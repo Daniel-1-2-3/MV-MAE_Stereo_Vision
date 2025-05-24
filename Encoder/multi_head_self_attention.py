@@ -32,6 +32,7 @@ class MultiHeadSelfAttention(nn.Module):
         
         final_attention = torch.cat(all_attention, dim=-1) # shape = (batch, num_patches, embedding_dim)
         x = self.norm(x + final_attention) # post add-norm
+        print('Ran self-attention layer and post norm')
         return x
             
                     

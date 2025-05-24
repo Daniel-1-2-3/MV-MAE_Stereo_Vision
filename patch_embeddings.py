@@ -25,6 +25,7 @@ class PatchEmbedding(nn.Module):
     def forward(self, x: Tensor):
         x = self.projection(x)
         x += self.pos_embeddings
+        print('Generated patch embeddings and added positional embeddings')
         return x # Returns an array containing embedding for each patch
 
 if __name__ == "__main__":
