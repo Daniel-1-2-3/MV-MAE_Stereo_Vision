@@ -4,36 +4,32 @@ from torch import nn
 from einops.layers.torch import Rearrange
 from torchvision import transforms
 from torch import Tensor
-import os, cv2, math
+import os
 
 class PatchEmbedding(nn.Module):
-    def __init__ (self, in_channels = 3, patch_size = 8, embedding_dim = 128, img_size = 512):
+    def __init__ (self, batch_size, in_channels, patch_size, embedding_dim, img_size):
         super().__init__()
-        self.patch_size = patch_size
-        self.num_patches = int((img_size / patch_size) ** 2)
-        self.embedding_dim = embedding_dim
-        self.in_channels = in_channels
+        num_patches = int((img_size / patch_size) ** 2)
         
         self.projection = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (c p1 p2)', p1 = patch_size, p2 = patch_size),
-            nn.Linear(patch_size * patch_size * in_channels, self.embedding_dim),
+            nn.Linear(patch_size * patch_size * in_channels, embedding_dim),
         )
         self.pos_embeddings = nn.Parameter(
-            torch.randn(1, self.num_patches, self.embedding_dim)
+            torch.randn(batch_size, num_patches, embedding_dim)
         )
 
     def forward(self, x: Tensor):
         x = self.projection(x)
         x += self.pos_embeddings
-        print('Generated patch embeddings and added positional embeddings')
         return x # Returns an array containing embedding for each patch
 
 if __name__ == "__main__":
     patch_embed = PatchEmbedding()    
 
-    img = Image.open(os.path.join(os.getcwd(), 'testImg.jpg')).convert('RGB')
+    img = Image.open(os.path.join(os.getcwd(), 'TestImg1.jpg')).convert('RGB')
     transform = transforms.Compose([
-        transforms.Resize((512, 512)),
+        transforms.Resize((256, 256)),
         transforms.ToTensor(),
     ])
     

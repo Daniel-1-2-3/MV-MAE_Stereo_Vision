@@ -5,11 +5,10 @@ import torch.nn.functional as F
 import math
 
 class MultiHeadSelfAttention(nn.Module): 
-    def __init__(self, embedding_dim = 128, num_heads = 8):
+    def __init__(self, embedding_dim, num_heads):
         super().__init__()
-        self.embedding_dim = embedding_dim
         self.num_heads = num_heads
-        self.head_dim = int(self.embedding_dim / self.num_heads)
+        self.head_dim = int(embedding_dim / num_heads)
         
         self.qkv_projection = nn.Linear(embedding_dim, 3 * embedding_dim)
         self.norm = nn.LayerNorm(embedding_dim)
@@ -32,7 +31,6 @@ class MultiHeadSelfAttention(nn.Module):
         
         final_attention = torch.cat(all_attention, dim=-1) # shape = (batch, num_patches, embedding_dim)
         x = self.norm(x + final_attention) # post add-norm
-        print('Ran self-attention layer and post norm')
         return x
             
                     
