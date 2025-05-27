@@ -3,7 +3,7 @@
   <img src="MV-MAE Achitecture.jpg" width="100%"/>
 </p>
 <td>
-  Model description and what files represent what layers will be added soon.
+  Model description and breif file descriptions.
 </td>
 
 <h3 align="left">Installation</h3>
