@@ -1,4 +1,7 @@
-<img src="MV-MAE_Stereo_Vision/MV-MAE_Architecture.jpg"/>
+<h3 align="left">Model Architecture</h3>
+<p align="center">
+  <img src="MV-MAE Achitecture.jpg" width="80%"/>
+</p>
 
 <h3 align="left">Installation</h3>
 
