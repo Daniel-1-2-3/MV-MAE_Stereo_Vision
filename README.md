@@ -20,10 +20,10 @@
     The patch embeddings are passed into the encoder, which incorporates transformer layers located in the 
     <code>TransformerLayer/</code> folder. The encoder consists of: <br><br>
     <ul>
-      <li><b>a.</b> A <b>multi-head self-attention</b> layer that computes attention vectors for each patch using the softmax function.  
+      <li>A <b>multi-head self-attention</b> layer that computes attention vectors for each patch using the softmax function.  
         <br><i>See:</i> <code>multi_head_self_attention.py</code>
       </li>
-      <li><b>b.</b> A <b>feedforward layer</b> (a fully connected network) that updates each patch vector based on its importance.  
+      <li>A <b>feedforward layer</b> (a fully connected network) that updates each patch vector based on its importance.  
         <br><i>See:</i> <code>feed_fwd.py</code>
       </li>
     </ul>
