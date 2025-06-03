@@ -5,6 +5,7 @@ import random
 from tqdm import tqdm
 import os
 import argparse
+import requests
 
 from model import Model
 from dataset import StereoImageDataset
@@ -12,8 +13,9 @@ from dataset import StereoImageDataset
 class Train():
     def __init__(self, img_size, patch_size, batch_size, in_channels,
                  encoder_embed_dim, encoder_num_heads,
-                 decoder_embed_dim, decoder_num_heads):
+                 decoder_embed_dim, decoder_num_heads, server):
 
+        self.server = server
         self.model = Model(img_size, patch_size, in_channels, encoder_embed_dim,
                            encoder_num_heads, decoder_embed_dim, decoder_num_heads)
         
@@ -56,7 +58,21 @@ class Train():
     
     def save_weights(self, epoch):
         os.makedirs('Weights', exist_ok=True)
-        torch.save(self.model.state_dict(), os.path.join('Weights', f'weights_epoch_{epoch+1}.pth'))
+        print('Saving checkpoint...')
+        filename = f'weights_epoch_{epoch + 1}.pth'
+        filepath = os.path.join('Weights', filename)
+        torch.save(self.model.state_dict(), filepath)
+        try:
+            with open(filepath, 'rb') as f:
+                response = requests.post(
+                    f"{self.server}/upload_weights", 
+                    files={"file": (filename, f, "application/octet-stream")}
+                )
+            print(f"Server response: {response.json()}")
+        except Exception as e:
+            print("Server not open")
+        
+            
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -70,6 +86,7 @@ if __name__ == "__main__":
     parser.add_argument("--decoder_num_heads", type=int, default=8)
     parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=0.0004) 
+    parser.add_argument("--server", type=str)
     args = parser.parse_args()
 
     trainer = Train(
@@ -81,6 +98,7 @@ if __name__ == "__main__":
         encoder_num_heads=args.encoder_num_heads,
         decoder_embed_dim=args.decoder_embed_dim,
         decoder_num_heads=args.decoder_num_heads,
+        server=args.server
     )
     
     trainer.train(num_epochs=args.num_epochs, lr=args.lr)
