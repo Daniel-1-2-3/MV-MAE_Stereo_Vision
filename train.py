@@ -24,8 +24,15 @@ class Train():
             transforms.ToTensor(), 
         ])
         print("Loading dataset...")
-        dataset = StereoImageDataset(root_dir='Dataset', transform=self.transform)
-        self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
+
+        train_dir = 'Dataset/Train'
+        val_dir = 'Dataset/Val'
+
+        train_dataset = StereoImageDataset(root_dir=train_dir, transform=self.transform)
+        val_dataset = StereoImageDataset(root_dir=val_dir, transform=self.transform)
+
+        self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
+        self.val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     def train(self, num_epochs, lr):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,43 +44,77 @@ class Train():
         
         for epoch in range(num_epochs):
             total_loss = 0.0
-            for left, right in tqdm(self.dataloader, desc=f"Epoch {epoch + 1}", leave=False):
-                left = left.to(device)
-                right = right.to(device)
-                
+            for left, right in tqdm(self.train_loader, desc=f"Epoch {epoch + 1} - Training", leave=False):
+                left, right = left.to(device), right.to(device)
                 visible, masked = random.choice([(left, right), (right, left)])
+                
                 optimizer.zero_grad()
                 x = self.model(visible)
-                mse_loss = self.model.get_mse_loss(x, masked.to(device))
+                mse_loss = self.model.get_mse_loss(x, masked)
                 mse_loss.backward()
                 optimizer.step()
                 
                 total_loss += mse_loss.item()
-                
-            avg_loss = total_loss / len(self.dataloader)
-            print(f'Epoch {epoch+1}/{num_epochs}, Loss: {round(avg_loss, 4)}')
+            
+            avg_train_loss = total_loss / len(self.train_loader)
+            avg_val_loss = self.evaluate(device)
 
-            if (epoch + 1) % 50 == 0 or (epoch + 1) == num_epochs:
+            print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
+
+            if (epoch + 1) % 50 == 0 or (epoch + 1) == num_epochs or epoch == 0:
+                print('Saving checkpoint...')
                 self.save_weights(epoch)
+                self.update_and_save_losses(epoch, avg_train_loss, avg_val_loss)
     
+    def evaluate(self, device):
+        self.model.eval()
+        total_loss = 0.0
+        with torch.no_grad():
+            for left, right in self.val_loader:
+                left, right = left.to(device), right.to(device)
+                visible, masked = random.choice([(left, right), (right, left)])
+                x = self.model(visible)
+                loss = self.model.get_mse_loss(x, masked)
+                total_loss += loss.item()
+        self.model.train()
+        return total_loss / len(self.val_loader)
+
     def save_weights(self, epoch):
-        os.makedirs('Weights', exist_ok=True)
-        print('Saving checkpoint...')
+        os.makedirs('Results', exist_ok=True)
         filename = f'weights_epoch_{epoch + 1}.pth'
-        filepath = os.path.join('Weights', filename)
+        filepath = os.path.join('Results', filename)
         torch.save(self.model.state_dict(), filepath)
+        
+        # Only for hosted GPU on RunPod
         try:
             with open(filepath, 'rb') as f:
                 response = requests.post(
-                    f"{self.server}/upload_weights", 
+                    f"{self.server}/upload", 
                     files={"file": (filename, f, "application/octet-stream")}
                 )
             print(f"Server response: {response.json()}")
-        except Exception as e:
-            print("Server not open")
+        except Exception:
+            print("Server may be offline")
+    
+    def update_and_save_losses(self, epoch, train_loss, val_loss):
+        os.makedirs("Results", exist_ok=True)
+        log_path = os.path.join("Results", "losses.txt")
         
-            
-
+        line = f"Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}\n"
+        with open(log_path, "a") as f:
+            f.write(line)
+        
+        # Only for hosted GPU on RunPod
+        try:
+            with open(log_path, "rb") as f:
+                response = requests.post(
+                    f"{self.server}/upload",
+                    files={"file": ("losses.txt", f, "text/plain")}
+                )
+            print(f"Loss recorded. Server response: {response.json()}")
+        except Exception:
+            print("Server may be offline")
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--img_size", type=int, default=256)

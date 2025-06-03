@@ -97,7 +97,7 @@ if __name__ == "__main__":
     model = Model()
     model.eval()
     map_location = "cuda" if torch.cuda.is_available() else "cpu"
-    state_dict = torch.load(os.path.join('Weights', args.weights), map_location=map_location, weights_only=True)
+    state_dict = torch.load(os.path.join('Results', args.weights), map_location=map_location, weights_only=True)
     model.load_state_dict(state_dict)
     
     with torch.no_grad():

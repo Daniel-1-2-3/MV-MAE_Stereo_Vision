@@ -15,10 +15,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = "Weights"
+UPLOAD_DIR = "Results"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-@app.post("/upload_weights")
+@app.post("/upload")
 async def upload_weights(file: UploadFile = File(...)):
     save_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(save_path, "wb") as f:
