@@ -5,13 +5,11 @@ import cv2
 import math
 import os
 import hashlib
-import pickle
 from tqdm import tqdm
 from itertools import product
 from pathlib import Path
-from multiprocessing import Process, cpu_count
-from math import ceil
-import tempfile
+from aug_dataset import Augment
+from pybullet_shapes import Shapes
 
 class StereoCamera:
     def __init__(self, r, cube_pos):
@@ -58,7 +56,34 @@ class StereoCamera:
         self.x_left, self.y_left, self.z_left = left_eye
         self.x_right, self.y_right, self.z_right = right_eye
 
-def collect_images_worker(worker_id, chunk, out_dir, show_progress=False, num_workers=4):
+    def save_and_split_dataset(all_images, base_dir='Dataset', split_ratio=0.7):
+        print("Removing duplicates and splitting dataset...")
+        seen_hashes = set()
+        unique_images = []
+
+        for left, right in tqdm(all_images, desc="Removing duplicates..."):
+            combined = np.concatenate((left, right), axis=1)
+            hash_val = hashlib.md5(combined.tobytes()).hexdigest()
+            if hash_val not in seen_hashes:
+                seen_hashes.add(hash_val)
+                unique_images.append((left, right))
+
+        np.random.shuffle(unique_images)
+        split_index = int(len(unique_images) * split_ratio)
+        train_set, val_set = unique_images[:split_index], unique_images[split_index:]
+
+        def save_images(pairs, left_dir, right_dir):
+            Path(left_dir).mkdir(parents=True, exist_ok=True)
+            Path(right_dir).mkdir(parents=True, exist_ok=True)
+            for i, (l, r) in enumerate(pairs):
+                cv2.imwrite(os.path.join(left_dir, f"left_{i}.png"), l)
+                cv2.imwrite(os.path.join(right_dir, f"right_{i}.png"), r)
+
+        save_images(train_set, f"{base_dir}/Train/LeftCam", f"{base_dir}/Train/RightCam")
+        save_images(val_set, f"{base_dir}/Val/LeftCam", f"{base_dir}/Val/RightCam")
+        print(f"Done. Saved {len(train_set)} training pairs and {len(val_set)} validation pairs.")
+
+if __name__ == "__main__":
     p.connect(p.DIRECT)
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
     p.setGravity(0, 0, -9.8)
@@ -67,90 +92,42 @@ def collect_images_worker(worker_id, chunk, out_dir, show_progress=False, num_wo
     ground_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[10, 10, 0.1], rgbaColor=[0.5, 0.5, 0.5, 1])
     p.createMultiBody(baseCollisionShapeIndex=ground_shape, baseVisualShapeIndex=ground_visual, basePosition=[0, 0, -0.1])
 
-    cube_visual = p.createVisualShape(shapeType=p.GEOM_BOX, halfExtents=[0.4, 0.4, 0.4], rgbaColor=[0.2, 0.2, 0.7, 1.0])
-    p.createMultiBody(
-        baseVisualShapeIndex=cube_visual,
-        baseCollisionShapeIndex=p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 0.1, 0.1]),
-        basePosition=[0, 0, 0.4]
-    )
-
-    sphere_visual = p.createVisualShape(shapeType=p.GEOM_SPHERE, radius=0.3, rgbaColor=[0.7, 0.2, 0.2, 1.0])
-    p.createMultiBody(
-        baseMass=1,
-        baseCollisionShapeIndex=p.createCollisionShape(shapeType=p.GEOM_SPHERE, radius=0.35),
-        baseVisualShapeIndex=sphere_visual,
-        basePosition=[0.75, 0, 0.35]
-    )
-
     cam = StereoCamera(3, [0, 0, 0])
+    shapes = Shapes()
     images = []
+    for shape_pair in shapes.get_shapes():
+        
+        p.createMultiBody(
+            baseVisualShapeIndex=shape_pair[0],
+            baseCollisionShapeIndex=p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 0.1, 0.1]),
+            basePosition=[0, 0, 0.4]
+        )
+        p.createMultiBody(
+            baseVisualShapeIndex=shape_pair[1],
+            baseCollisionShapeIndex=p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 0.1, 0.1]),
+            basePosition=[0.75, 0, 0.35]
+        )
 
-    iterator = tqdm(chunk, desc=f"1/{num_workers} Parallel Processes", ncols=100) if show_progress else chunk
-    for z, pitch, yaw in iterator:
-        cam.yaw, cam.pitch, cam.r = yaw, pitch, z / 2
-        cam.update_xyz()
-        p.stepSimulation()
-        cam.render()
-        if cam.img_left is not None and cam.img_right is not None:
-            images.append((cam.img_left.copy(), cam.img_right.copy()))
+        zoom_range = range(4, 11)
+        pitch_range = range(2, 90, 2)
+        yaw_range = range(0, 360, 10)
+        combinations = list(product(zoom_range, pitch_range, yaw_range))
 
-    with open(os.path.join(out_dir, f"worker_{worker_id}_images.pkl"), "wb") as f:
-        pickle.dump(images, f)
-
+        for z, pitch, yaw in tqdm(combinations, desc="Collecting images"):
+            cam.yaw, cam.pitch, cam.r = yaw, pitch, z / 2
+            cam.update_xyz()
+            p.stepSimulation()
+            cam.render()
+            if cam.img_left is not None and cam.img_right is not None:
+                images.append((cam.img_left.copy(), cam.img_right.copy()))
+        
+        # Remove the previous shapes
+        for body_id in range(p.getNumBodies()):
+            p.removeBody(body_id)
+        p.createMultiBody(baseCollisionShapeIndex=ground_shape, baseVisualShapeIndex=ground_visual, basePosition=[0, 0, -0.1])
+    
     p.disconnect()
-
-def save_and_split_dataset(all_images, base_dir='Dataset', split_ratio=0.7):
-    print("Removing duplicates and splitting dataset...")
-    seen_hashes = set()
-    unique_images = []
-
-    for left, right in tqdm(all_images, desc="Removing duplicates..."):
-        combined = np.concatenate((left, right), axis=1)
-        hash_val = hashlib.md5(combined.tobytes()).hexdigest()
-        if hash_val not in seen_hashes:
-            seen_hashes.add(hash_val)
-            unique_images.append((left, right))
-
-    np.random.shuffle(unique_images)
-    split_index = int(len(unique_images) * split_ratio)
-    train_set, val_set = unique_images[:split_index], unique_images[split_index:]
-
-    def save_images(pairs, left_dir, right_dir):
-        Path(left_dir).mkdir(parents=True, exist_ok=True)
-        Path(right_dir).mkdir(parents=True, exist_ok=True)
-        for i, (l, r) in enumerate(pairs):
-            cv2.imwrite(os.path.join(left_dir, f"left_{i}.png"), l)
-            cv2.imwrite(os.path.join(right_dir, f"right_{i}.png"), r)
-
-    save_images(train_set, f"{base_dir}/Train/LeftCam", f"{base_dir}/Train/RightCam")
-    save_images(val_set, f"{base_dir}/Val/LeftCam", f"{base_dir}/Val/RightCam")
-    print(f"Done. Saved {len(train_set)} training pairs and {len(val_set)} validation pairs.")
-
-if __name__ == "__main__":
-    zoom_range = range(4, 11)
-    pitch_range = range(2, 90, 2)
-    yaw_range = range(0, 360, 10)
-    combinations = list(product(zoom_range, pitch_range, yaw_range))
-
-    num_workers = min(5, cpu_count())
-    chunk_size = ceil(len(combinations) / num_workers)
-    chunks = [combinations[i:i + chunk_size] for i in range(0, len(combinations), chunk_size)]
-
-    output_dir = tempfile.mkdtemp()
-    processes = []
- 
-    for i, chunk in enumerate(chunks):
-        show_progress = (i == 0)
-        p_ = Process(target=collect_images_worker, args=(i, chunk, output_dir, show_progress, num_workers))
-        p_.start()
-        processes.append(p_)
-
-    for p_ in processes:
-        p_.join()
-
-    all_images = []
-    for i in range(len(chunks)):
-        with open(os.path.join(output_dir, f"worker_{i}_images.pkl"), "rb") as f:
-            all_images.extend(pickle.load(f))
-
-    save_and_split_dataset(all_images)
+        
+    cam.save_and_split_dataset(images)
+    aug = Augment()
+    aug.augment_dataset()

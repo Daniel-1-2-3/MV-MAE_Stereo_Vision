@@ -61,7 +61,7 @@ class Train():
 
             print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
 
-            if (epoch + 1) % 50 == 0 or (epoch + 1) == num_epochs or epoch == 0:
+            if (epoch + 1) % 20 == 0 or (epoch + 1) == num_epochs or epoch == 0:
                 print('Saving checkpoint...')
                 self.save_weights(epoch)
                 self.update_and_save_losses(epoch, avg_train_loss, avg_val_loss)
