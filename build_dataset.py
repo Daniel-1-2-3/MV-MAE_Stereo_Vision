@@ -8,8 +8,8 @@ import hashlib
 from tqdm import tqdm
 from itertools import product
 from pathlib import Path
+from multiprocessing import Pool, cpu_count
 from aug_dataset import Augment
-from pybullet_shapes import Shapes
 
 class StereoCamera:
     def __init__(self, r, cube_pos):
@@ -56,34 +56,8 @@ class StereoCamera:
         self.x_left, self.y_left, self.z_left = left_eye
         self.x_right, self.y_right, self.z_right = right_eye
 
-    def save_and_split_dataset(all_images, base_dir='Dataset', split_ratio=0.7):
-        print("Removing duplicates and splitting dataset...")
-        seen_hashes = set()
-        unique_images = []
-
-        for left, right in tqdm(all_images, desc="Removing duplicates..."):
-            combined = np.concatenate((left, right), axis=1)
-            hash_val = hashlib.md5(combined.tobytes()).hexdigest()
-            if hash_val not in seen_hashes:
-                seen_hashes.add(hash_val)
-                unique_images.append((left, right))
-
-        np.random.shuffle(unique_images)
-        split_index = int(len(unique_images) * split_ratio)
-        train_set, val_set = unique_images[:split_index], unique_images[split_index:]
-
-        def save_images(pairs, left_dir, right_dir):
-            Path(left_dir).mkdir(parents=True, exist_ok=True)
-            Path(right_dir).mkdir(parents=True, exist_ok=True)
-            for i, (l, r) in enumerate(pairs):
-                cv2.imwrite(os.path.join(left_dir, f"left_{i}.png"), l)
-                cv2.imwrite(os.path.join(right_dir, f"right_{i}.png"), r)
-
-        save_images(train_set, f"{base_dir}/Train/LeftCam", f"{base_dir}/Train/RightCam")
-        save_images(val_set, f"{base_dir}/Val/LeftCam", f"{base_dir}/Val/RightCam")
-        print(f"Done. Saved {len(train_set)} training pairs and {len(val_set)} validation pairs.")
-
-if __name__ == "__main__":
+def render_combination(args):
+    z, pitch, yaw = args
     p.connect(p.DIRECT)
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
     p.setGravity(0, 0, -9.8)
@@ -92,42 +66,68 @@ if __name__ == "__main__":
     ground_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[10, 10, 0.1], rgbaColor=[0.5, 0.5, 0.5, 1])
     p.createMultiBody(baseCollisionShapeIndex=ground_shape, baseVisualShapeIndex=ground_visual, basePosition=[0, 0, -0.1])
 
+    cube_visual = p.createVisualShape(shapeType=p.GEOM_BOX, halfExtents=[0.4, 0.4, 0.4], rgbaColor=[0.2, 0.2, 0.7, 1.0])
+    p.createMultiBody(
+        baseVisualShapeIndex=cube_visual,
+        baseCollisionShapeIndex=p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 0.1, 0.1]),
+        basePosition=[0, 0, 0.4]
+    )
+
+    sphere_visual = p.createVisualShape(shapeType=p.GEOM_SPHERE, radius=0.3, rgbaColor=[0.7, 0.2, 0.2, 1.0])
+    p.createMultiBody(
+        baseMass=1,
+        baseCollisionShapeIndex=p.createCollisionShape(shapeType=p.GEOM_SPHERE, radius=0.35),
+        baseVisualShapeIndex=sphere_visual,
+        basePosition=[0.75, 0, 0.35]
+    )
+
     cam = StereoCamera(3, [0, 0, 0])
-    shapes = Shapes()
-    images = []
-    for shape_pair in shapes.get_shapes():
-        
-        p.createMultiBody(
-            baseVisualShapeIndex=shape_pair[0],
-            baseCollisionShapeIndex=p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 0.1, 0.1]),
-            basePosition=[0, 0, 0.4]
-        )
-        p.createMultiBody(
-            baseVisualShapeIndex=shape_pair[1],
-            baseCollisionShapeIndex=p.createCollisionShape(p.GEOM_BOX, halfExtents=[0.1, 0.1, 0.1]),
-            basePosition=[0.75, 0, 0.35]
-        )
-
-        zoom_range = range(4, 11)
-        pitch_range = range(2, 90, 2)
-        yaw_range = range(0, 360, 10)
-        combinations = list(product(zoom_range, pitch_range, yaw_range))
-
-        for z, pitch, yaw in tqdm(combinations, desc="Collecting images"):
-            cam.yaw, cam.pitch, cam.r = yaw, pitch, z / 2
-            cam.update_xyz()
-            p.stepSimulation()
-            cam.render()
-            if cam.img_left is not None and cam.img_right is not None:
-                images.append((cam.img_left.copy(), cam.img_right.copy()))
-        
-        # Remove the previous shapes
-        for body_id in range(p.getNumBodies()):
-            p.removeBody(body_id)
-        p.createMultiBody(baseCollisionShapeIndex=ground_shape, baseVisualShapeIndex=ground_visual, basePosition=[0, 0, -0.1])
-    
+    cam.yaw, cam.pitch, cam.r = yaw, pitch, z / 2
+    cam.update_xyz()
+    p.stepSimulation()
+    cam.render()
+    result = (cam.img_left.copy(), cam.img_right.copy())
     p.disconnect()
-        
-    cam.save_and_split_dataset(images)
+    return result
+
+def save_and_split_dataset(all_images, base_dir='Dataset', split_ratio=0.7):
+    print("Removing duplicates and splitting dataset...")
+    seen_hashes = set()
+    unique_images = []
+
+    for left, right in tqdm(all_images, desc="Removing duplicates..."):
+        combined = np.concatenate((left, right), axis=1)
+        hash_val = hashlib.md5(combined.tobytes()).hexdigest()
+        if hash_val not in seen_hashes:
+            seen_hashes.add(hash_val)
+            unique_images.append((left, right))
+
+    np.random.shuffle(unique_images)
+    split_index = int(len(unique_images) * split_ratio)
+    train_set, val_set = unique_images[:split_index], unique_images[split_index:]
+
+    def save_images(pairs, left_dir, right_dir):
+        Path(left_dir).mkdir(parents=True, exist_ok=True)
+        Path(right_dir).mkdir(parents=True, exist_ok=True)
+        for i, (l, r) in enumerate(pairs):
+            cv2.imwrite(os.path.join(left_dir, f"left_{i}.png"), l)
+            cv2.imwrite(os.path.join(right_dir, f"right_{i}.png"), r)
+
+    save_images(train_set, f"{base_dir}/Train/LeftCam", f"{base_dir}/Train/RightCam")
+    save_images(val_set, f"{base_dir}/Val/LeftCam", f"{base_dir}/Val/RightCam")
+    print(f"Done. Saved {len(train_set)} training pairs and {len(val_set)} validation pairs.")
+
+if __name__ == "__main__":
+    zoom_range = range(4, 11)
+    pitch_range = range(2, 90, 2)
+    yaw_range = range(0, 360, 10)
+    combinations = list(product(zoom_range, pitch_range, yaw_range))
+
+    with Pool(cpu_count()) as pool:
+        images = list(tqdm(pool.imap(render_combination, combinations), total=len(combinations), desc="Collecting images"))
+
+    save_and_split_dataset(images)
     aug = Augment()
     aug.augment_dataset()
+    
+    
