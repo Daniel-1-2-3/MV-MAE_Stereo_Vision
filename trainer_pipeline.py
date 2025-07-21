@@ -60,7 +60,7 @@ class RenderCallback(BaseCallback):
 
 
 if __name__ == "__main__":
-    env = make_vec_env(lambda: FrankaEnv(
+    env = FrankaEnv(
         model_path=os.path.join(os.getcwd(), "FrankaSim", "pick_place.xml"),
         render_mode="rgb_array",
         n_substeps=25,
@@ -70,7 +70,7 @@ if __name__ == "__main__":
         obj_xy_range=0.3,
         goal_x_offset=0.0,
         goal_z_range=0.2,
-    ), n_envs=1)
+    )
     # Manually reset once to initialize the simulation
     env.reset()
     
@@ -84,7 +84,6 @@ if __name__ == "__main__":
         learning_starts=0, # SET AT 0 PURELY FOR DEBUGGING, do 500 for train
         train_freq=1,
         gradient_steps=1,
-        ent_coef="auto",
         gamma=0.99,
         tau=0.005,
         device="cuda" if torch.cuda.is_available() else "cpu",

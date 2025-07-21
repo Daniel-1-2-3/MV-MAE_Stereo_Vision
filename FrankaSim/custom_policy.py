@@ -11,28 +11,43 @@ class CustomSAC(SAC):
         for _ in range(gradient_steps):
             # Sample a batch from replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
+            print(0)
 
             with torch.no_grad():
+                next_obs_features = self.actor.features_extractor(replay_data.next_observations)
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
-                qf1_next_target = self.critic_target.qf1(replay_data.next_observations, next_actions)
-                qf2_next_target = self.critic_target.qf2(replay_data.next_observations, next_actions)
-                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.ent_coef * next_log_prob
+                
+                qf0_next_target = self.critic_target.qf0(torch.cat([next_obs_features, next_actions], dim=1))
+                qf1_next_target = self.critic_target.qf1(torch.cat([next_obs_features, next_actions], dim=1))
+
+                min_qf_next_target = torch.min(qf0_next_target, qf1_next_target) - self.log_ent_coef.exp().detach() * next_log_prob.unsqueeze(-1)
                 next_q_value = replay_data.rewards + (1 - replay_data.dones) * self.gamma * min_qf_next_target
 
-            # Critic update
-            current_q1 = self.critic.qf1(replay_data.observations, replay_data.actions)
-            current_q2 = self.critic.qf2(replay_data.observations, replay_data.actions)
-            critic_loss = nn.functional.mse_loss(current_q1, next_q_value) + nn.functional.mse_loss(current_q2, next_q_value)
+            obs_features = self.actor.features_extractor(replay_data.observations)
+            current_q0 = self.critic.qf0(torch.cat([obs_features, replay_data.actions], dim=1))
+            current_q1 = self.critic.qf1(torch.cat([obs_features, replay_data.actions], dim=1))
+            
+            print("obs_features:", obs_features.shape)
+            print("actions:", replay_data.actions.shape)
+            print("current_q0:", current_q0.shape)
+            print("next_q_value:", next_q_value.shape)
+            print("next_q_value sample:", next_q_value[:5])
+            print("any NaN in next_q_value?", torch.isnan(next_q_value).any().item())
+            print("any Inf in next_q_value?", torch.isinf(next_q_value).any().item())
+                        
+            critic_loss = nn.functional.mse_loss(current_q0, next_q_value) + nn.functional.mse_loss(current_q1, next_q_value)
 
             self.critic.optimizer.zero_grad()
             critic_loss.backward()
             self.critic.optimizer.step()
-
+            print("Updated Critic")
+            
             # Actor update
             actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
-            qf1_pi = self.critic.qf1(replay_data.observations, actions_pi)
-            qf2_pi = self.critic.qf2(replay_data.observations, actions_pi)
-            min_qf_pi = torch.min(qf1_pi, qf2_pi)
+            obs_features = self.actor.extract_features(replay_data.observations)
+            qf0_pi = self.critic.qf0(torch.cat([obs_features, actions_pi], dim=1))
+            qf1_pi = self.critic.qf1(torch.cat([obs_features, actions_pi], dim=1))
+            min_qf_pi = torch.min(qf0_pi, qf1_pi)
             actor_loss = (self.ent_coef * log_prob - min_qf_pi).mean()
 
             # MV-MAE loss
@@ -45,7 +60,7 @@ class CustomSAC(SAC):
             self.actor.optimizer.zero_grad()
             total_loss.backward()
             self.actor.optimizer.step()
-
+            
             # Entropy coefficient update
             if self.ent_coef_optimizer is not None:
                 ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean()

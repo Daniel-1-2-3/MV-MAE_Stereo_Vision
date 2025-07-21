@@ -2,8 +2,8 @@ import gym.spaces
 import mujoco
 import numpy as np
 from gymnasium.core import ObsType
-from gymnasium_robotics.envs.robot_env import MujocoRobotEnv
-from gymnasium_robotics.utils import rotations
+from Gymnasium_Robotics.gymnasium_robotics.envs.robot_env import MujocoRobotEnv # Might need to go in a remove the mujoco-py import
+from Gymnasium_Robotics.gymnasium_robotics.utils import rotations
 from typing import Optional, Any, SupportsFloat
 from Model.model import Model
 from Model.prepare_input import Prepare
