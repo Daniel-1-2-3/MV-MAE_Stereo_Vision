@@ -30,14 +30,16 @@ class ViTMaskedDecoder(nn.Module):
         # Learnable, since attention in the encoder has already mixed spatial locations
         self.pos_embeds = nn.Parameter(torch.randn(1, self.num_total_patches, self.decoder_embed_dim)) 
         
-        self.vit_block = VitBlock(
-            embed_dim=self.decoder_embed_dim,
-            heads=self.heads,
-            mlp_ratio=4.0,
-            attn_drop_rate=0.1,
-            mlp_drop_rate=0.1,
-            path_drop_rate=0.05
-        )
+        self.vit_blocks = nn.ModuleList([
+            VitBlock(
+                embed_dim=self.decoder_embed_dim,
+                heads=self.heads,
+                mlp_ratio=4.0,
+                attn_drop_rate=0.1,
+                mlp_drop_rate=0.1,
+                path_drop_rate=0.05
+            ) for _ in range(self.depth)
+        ])
         self.norm = nn.LayerNorm(normalized_shape=self.decoder_embed_dim, eps=1e-6)
         
     def forward(self, x: Tensor, mask: Tensor):
@@ -63,8 +65,8 @@ class ViTMaskedDecoder(nn.Module):
         x_full[unmasked_indices] = x.reshape(-1, dim) # Scatter the encoder outputs into the unmasked positions
         x = x_full + self.pos_embeds
         
-        for i in range(self.depth):
-            x = self.vit_block(x)
+        for block in self.vit_blocks:
+            x = block(x)
         x = self.norm(x)
 
         return x

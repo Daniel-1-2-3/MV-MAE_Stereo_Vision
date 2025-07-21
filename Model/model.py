@@ -47,13 +47,18 @@ class Model(nn.Module):
                         with a shape of (batch, height, width_total, channels)
 
         Returns:
-            x (Tensor): (batch, total_patches, patch_size^2 * channels)
+            out (Tensor):   (batch, total_patches, patch_size^2 * channels) Input is masked, then
+                                    fed through the encoder, then the decoder
+            mask (Tensor):      Has shape (batch, total_num_patches), where each vector in the 
+                                last dimension is a binary mask with 0 representing unmasked, and 
+                                1 representing masked
+            unmasked_x (Tensor):    (batch, total_patches, patch_size^2 * channels) This is the input to the 
+                                    actor in the pipeline. It is the input, without masking, passed through the encoder
         """
-        x, mask = self.encoder(x)
-        x = self.decoder(x, mask)
-
-        out = self.out_proj(x)
-        return out, mask
+        masked_x, mask, encoder_nomask_x = self.encoder(x)
+        out = self.decoder(masked_x, mask)
+        out = self.out_proj(out)
+        return out, mask, encoder_nomask_x
     
     def compute_loss(self, out: Tensor, truth: Tensor, mask: Tensor):
         """

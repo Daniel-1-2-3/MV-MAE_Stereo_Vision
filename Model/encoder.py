@@ -27,15 +27,18 @@ class ViTMaskedEncoder(nn.Module):
         self.depth = depth
         
         self.forward_conv = self.construct_conv_layers()
-        self.vit_block = VitBlock(
-            embed_dim=self.embed_dim,
-            heads=self.heads,
-            mlp_ratio=4.0,
-            attn_drop_rate=0.1,
-            mlp_drop_rate=0.1,
-            path_drop_rate=0.05
-        )
-        self.norm = nn.LayerNorm(normalized_shape=self.embed_dim, eps=1e-6)
+        self.vit_blocks = nn.ModuleList([
+            VitBlock(
+                embed_dim=self.embed_dim,
+                heads=self.heads,
+                mlp_ratio=4.0,
+                attn_drop_rate=0.1,
+                mlp_drop_rate=0.1,
+                path_drop_rate=0.05
+            ) for _ in range(self.depth)
+        ])
+        self.norm_masked = nn.LayerNorm(normalized_shape=self.embed_dim, eps=1e-6)
+        self.norm_unmasked = nn.LayerNorm(normalized_shape=self.embed_dim, eps=1e-6)
 
     def forward(self, x: Tensor):
         """
@@ -55,15 +58,20 @@ class ViTMaskedEncoder(nn.Module):
         x = self.forward_early_conv(x) # Early conv to embed patches 
         # - (batch, total patches across both views, embed_dim)
         
-        x = self.add_pos_embeds(x) # Add sin/cos positional embeddings to each patch, addition element wise along last dim
-        x, mask = self.random_view_masking(x, mask_ratio=0.20)
+        # Add sin/cos positional embeddings to each patch, addition element wise along last dim
+        unmasked_x = self.add_pos_embeds(x) 
+        
+        masked_x, mask = self.random_view_masking(unmasked_x, mask_ratio=0.20)
         # - (batch, unmasked_patches, embed_dim)
-     
-        for i in range(self.depth):
-            x = self.vit_block(x)
-        x = self.norm(x)
-      
-        return x, mask
+
+        # Masked x passed through vit
+        for block in self.vit_blocks:
+            masked_x = block(masked_x)
+            unmasked_x = block(unmasked_x)
+        masked_x = self.norm_masked(masked_x)
+        unmasked_x = self.norm_unmasked(unmasked_x)
+        
+        return masked_x, mask, unmasked_x,
 
     def random_view_masking(self, x: Tensor, mask_ratio=0.20):
         """

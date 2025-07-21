@@ -1,9 +1,15 @@
+import gym.spaces
 import mujoco
 import numpy as np
 from gymnasium.core import ObsType
 from gymnasium_robotics.envs.robot_env import MujocoRobotEnv
 from gymnasium_robotics.utils import rotations
 from typing import Optional, Any, SupportsFloat
+from Model.model import Model
+from Model.prepare_input import Prepare
+import gym
+import torch
+import os
 
 DEFAULT_CAMERA_CONFIG = {
     "distance": 2.5,
@@ -17,24 +23,34 @@ class FrankaEnv(MujocoRobotEnv):
         "render_modes": ["human", "rgb_array"],
         "render_fps": 20,
     }
-
-    def __init__(
-        self,
-        model_path: str = None,
-        n_substeps: int = 50,
-        reward_type: str = "dense",
-        distance_threshold: float = 0.05,
-        goal_xy_range: float = 0.3,
-        obj_xy_range: float = 0.3,
-        goal_x_offset: float = 0.4,
-        goal_z_range: float = 0.2,
+    
+    def __init__(self,
+        model_path=os.path.join(os.getcwd(), "FrankaSim", "pick_place.xml"),
+        render_mode="rgb_array",
+        n_substeps=25,
+        reward_type="dense",
+        distance_threshold=0.05,
+        goal_xy_range=0.3,
+        obj_xy_range=0.3,
+        goal_x_offset=0.0,
+        goal_z_range=0.2,
+        nviews=2,
+        patch_size=8,
+        encoder_embed_dim=768,
+        decoder_embed_dim=512,
+        encoder_heads=16,
+        decoder_heads=16,
+        in_channels=3,
+        img_h_size=128,
+        img_w_size=128, 
         **kwargs,
     ):
+        # Initialize Franka model
         self.model_path = model_path
         action_size = 4 # 3 DoF and gripper
         self.reward_type = reward_type
         self.neutral_joint_values = np.array([0.00, 0.41, 0.00, -1.85, 0.00, 2.26, 0.79, 0.00, 0.00])
-
+        self.distance_threshold = distance_threshold
         super().__init__(
             n_actions=action_size,
             n_substeps=n_substeps,
@@ -43,10 +59,6 @@ class FrankaEnv(MujocoRobotEnv):
             default_camera_config=DEFAULT_CAMERA_CONFIG,
             **kwargs,
         )
-
-        self.distance_threshold = distance_threshold
-
-        # sample areas for the object and goal target
         self.obj_xy_range = obj_xy_range
         self.goal_xy_range = goal_xy_range
         self.goal_x_offset = goal_x_offset
@@ -63,8 +75,20 @@ class FrankaEnv(MujocoRobotEnv):
         self.obj_range_high[0] += 0.6
 
         self.ctrl_range = self.model.actuator_ctrlrange
-
-    # Override the methods in MujocoRobotEnv
+        
+        # Initialize MV-MAE
+        self.mvmae = Model(
+            nviews=nviews,
+            patch_size=patch_size,
+            encoder_embed_dim=encoder_embed_dim,
+            decoder_embed_dim=decoder_embed_dim,
+            encoder_heads=encoder_heads,
+            decoder_heads=decoder_heads,
+            in_channels=in_channels,
+            img_h_size=img_h_size,
+            img_w_size=img_w_size,
+        )
+        
     def _initialize_simulation(self) -> None:
         self.model = self._mujoco.MjModel.from_xml_path(self.fullpath)
         self.data = self._mujoco.MjData(self.model)
@@ -72,8 +96,13 @@ class FrankaEnv(MujocoRobotEnv):
 
         self.model.vis.global_.offwidth = self.width
         self.model.vis.global_.offheight = self.height
+        
+        # Getting scenes
+        self.left_cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "left_eye")
+        self.right_cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "right_eye")
+        self.renderer = mujoco.Renderer(self.model, width=128, height=128)
 
-        # index used to distinguish arm and gripper joints
+        # Index used to distinguish arm and gripper joints
         free_joint_index = self._model_names.joint_names.index("obj_joint")
         self.arm_joint_names = self._model_names.joint_names[:free_joint_index][0:7]
         self.gripper_joint_names = self._model_names.joint_names[:free_joint_index][7:9]
@@ -81,6 +110,14 @@ class FrankaEnv(MujocoRobotEnv):
         self._env_setup(self.neutral_joint_values)
         self.initial_time = self.data.time
         self.initial_qvel = np.copy(self.data.qvel)
+        
+        # Define observations and actions
+        self.observation_space = gym.spaces.Dict({  # (height, width_total, channels) for obs space
+            "observation": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(128, 256, 3), dtype=np.float32), # Concatenated views
+            "achieved_goal": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
+            "desired_goal": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
+        })
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
     def _env_setup(self, neutral_joint_values) -> None:
         self.set_joint_neutral()
@@ -88,14 +125,10 @@ class FrankaEnv(MujocoRobotEnv):
         self.reset_mocap_welds(self.model, self.data)
 
         self._mujoco.mj_forward(self.model, self.data)
-
         self.initial_mocap_position = self._utils.get_site_xpos(self.model, self.data, "ee_center_site").copy()
         self.grasp_site_pose = self.get_ee_orientation().copy()
-
         self.set_mocap_pose(self.initial_mocap_position, self.grasp_site_pose)
-
         self._mujoco_step()
-
         self.initial_object_height = self._utils.get_joint_qpos(self.model, self.data, "obj_joint")[2].copy()
 
     def step(self, action) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
@@ -106,53 +139,53 @@ class FrankaEnv(MujocoRobotEnv):
         self._set_action(action)
         self._mujoco_step(action)
         self._step_callback()
+        
         obs = self._get_obs().copy()
-
         info = {"is_success": self._is_success(obs["achieved_goal"], self.goal)}
-
         terminated = info["is_success"]
         truncated = self.compute_truncated(obs["achieved_goal"], self.goal, info)
         reward = self.compute_reward(obs["achieved_goal"], self.goal, info)
+        print(f'Reward: {reward}')
 
         return obs, reward, terminated, truncated, info
 
     def compute_reward(self, achieved_goal, desired_goal, info) -> SupportsFloat:
         d = self.goal_distance(achieved_goal, desired_goal)
-        if self.reward_type == "sparse":
-            return -(d > self.distance_threshold).astype(np.float32)
-        else:
-            return -d
+        return -(d > self.distance_threshold).astype(np.float32) if self.reward_type == "sparse" else -d
 
     def _set_action(self, action) -> None:
         action = action.copy()
-        # for the pick and place task
+        # For the pick and place task
         pos_ctrl, gripper_ctrl = action[:3], action[3]
         fingers_ctrl = gripper_ctrl * 0.2
         fingers_width = self.get_fingers_width().copy() + fingers_ctrl
         fingers_half_width = np.clip(fingers_width / 2, self.ctrl_range[-1, 0], self.ctrl_range[-1, 1])
 
-        # control the gripper
-        self.data.ctrl[-2:] = fingers_half_width
-
-        # control the end-effector with mocap body
-        pos_ctrl *= 0.05
+        # Set joint positions
+        self.data.ctrl[-2:] = fingers_half_width # Gripper
+        pos_ctrl *= 0.05 # Control the end-effector with mocap body
         pos_ctrl += self.get_ee_position().copy()
         pos_ctrl[2] = np.max((0, pos_ctrl[2]))
-
         self.set_mocap_pose(pos_ctrl, self.grasp_site_pose)
 
     def _get_obs(self) -> dict:
-        ee_position = self._utils.get_site_xpos(self.model, self.data, "ee_center_site").copy()
-        ee_velocity = self._utils.get_site_xvelp(self.model, self.data, "ee_center_site").copy() * self.dt
-        fingers_width = self.get_fingers_width().copy()
-        object_position = self._utils.get_site_xpos(self.model, self.data, "obj_site").copy()
+        # Create embeddings ith mvmae encoder
+        self.renderer.update_scene(self.data, camera=self.left_cam_id)
+        left_img = self.renderer.render()
+        self.renderer.update_scene(self.data, camera=self.right_cam_id)
+        right_img = self.renderer.render()
+        
+        left_tensor = torch.from_numpy(left_img).float().div(255).permute(2, 0, 1).unsqueeze(0)
+        right_tensor = torch.from_numpy(right_img).float().div(255).permute(2, 0, 1).unsqueeze(0)
+        fused = Prepare.fuse_normalize([left_tensor, right_tensor]) # (batch, height, width_total, channels)
+        obs = fused.squeeze(0).numpy() 
 
+        object_position = self._utils.get_site_xpos(self.model, self.data, "obj_site").copy()
+        
         return {
-            "observation": np.concatenate(
-                [ee_position, ee_velocity, fingers_width]
-            ).copy(),
+            "observation": obs,
             "achieved_goal": object_position.copy(),
-            "desired_goal": self.goal.copy(),
+            "desired_goal": self.goal,
         }
 
     def _is_success(self, achieved_goal, desired_goal) -> np.float32:
@@ -167,22 +200,20 @@ class FrankaEnv(MujocoRobotEnv):
 
         self.set_joint_neutral()
         self.set_mocap_pose(self.initial_mocap_position, self.grasp_site_pose)
-
         self._sample_object()
 
         self._mujoco.mj_forward(self.model, self.data)
         return True
 
     def _mujoco_step(self, action: Optional[np.ndarray] = None) -> None:
-        for _ in range(10):
+        for _ in range(10): # 10 updates to physics to make a real difference
             self._mujoco.mj_step(self.model, self.data, nstep=self.n_substeps)
 
     def reset_mocap_welds(self, model, data) -> None:
         if model.nmocap > 0 and model.eq_data is not None:
             for i in range(model.eq_data.shape[0]):
                 if model.eq_type[i] == mujoco.mjtEq.mjEQ_WELD:
-                    # relative pose
-                    model.eq_data[i, 3:10] = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+                    model.eq_data[i, 3:10] = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])  # Relative pose
         self._mujoco.mj_forward(model, data)
 
     def goal_distance(self, goal_a, goal_b) -> SupportsFloat:
@@ -194,19 +225,17 @@ class FrankaEnv(MujocoRobotEnv):
         self._utils.set_mocap_quat(self.model, self.data, "panda_mocap", orientation)
 
     def set_joint_neutral(self) -> None:
-        # assign value to arm joints
-        for name, value in zip(self.arm_joint_names, self.neutral_joint_values[0:7]):
+        for name, value in zip(self.arm_joint_names, self.neutral_joint_values[0:7]): # Arm joints
             self._utils.set_joint_qpos(self.model, self.data, name, value)
 
-        # assign value to finger joints
-        for name, value in zip(self.gripper_joint_names, self.neutral_joint_values[7:9]):
+        for name, value in zip(self.gripper_joint_names, self.neutral_joint_values[7:9]): # Finger joints
             self._utils.set_joint_qpos(self.model, self.data, name, value)
 
     def _sample_goal(self) -> np.ndarray:
         goal = np.array([0.0, 0.0, self.initial_object_height])
         noise = self.np_random.uniform(self.goal_range_low, self.goal_range_high)
-        # for the pick and place task
-        if self.goal_z_range > 0.0 and self.np_random.random() < 0.3:
+        
+        if self.goal_z_range > 0.0 and self.np_random.random() < 0.3: # Check for target being close by
             noise[2] = 0.0
         goal += noise
         return goal

@@ -9,7 +9,7 @@ import torch
 import shutil
 from kaggle.api.kaggle_api_extended import KaggleApi
 
-class Trainer():
+class MVMAETrainer():
     def __init__(self, 
             nviews=2,
             patch_size=8,
@@ -70,7 +70,7 @@ class Trainer():
                 x1, x2 = x1.to(self.device), x2.to(self.device)
                 optimizer.zero_grad()
                 x = Prepare.fuse_normalize([x1, x2])
-                out, mask = self.model(x)
+                out, mask, encoder_nomask_x = self.model(x)
                 loss = self.model.compute_loss(out, x, mask)
                 loss.backward()
                 optimizer.step()
@@ -140,7 +140,7 @@ if __name__ == "__main__":
         api.authenticate()
         api.dataset_download_files('thisisdaniel12345/dataset', path=os.path.join(os.getcwd(), 'dataset'), unzip=True)
         
-    trainer = Trainer(
+    trainer = MVMAETrainer(
         nviews=2,
         patch_size=8,
         encoder_embed_dim=768,
