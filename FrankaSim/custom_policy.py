@@ -30,7 +30,6 @@ class CustomSAC(SAC):
             self.critic.optimizer.zero_grad()
             critic_loss.backward()
             self.critic.optimizer.step()
-            print("Updated Critic")
             
             # Actor update
             actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
@@ -39,8 +38,7 @@ class CustomSAC(SAC):
             qf1_pi = self.critic.qf1(torch.cat([obs_features, actions_pi], dim=1))
             min_qf_pi = torch.min(qf0_pi, qf1_pi)
             actor_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
-            print('Updated Critic')
-
+        
             # MV-MAE loss
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss
             total_loss = actor_loss + (mvmae_loss if mvmae_loss is not None else 0)

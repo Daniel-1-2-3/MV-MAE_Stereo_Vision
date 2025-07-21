@@ -81,9 +81,9 @@ if __name__ == "__main__":
         env=env,
         verbose=1,
         learning_rate=3e-4,
-        buffer_size=10, # SET AT 10 PURELY FOR DEBUGGING, do 10,000 for train
-        batch_size=32,
-        learning_starts=0, # SET AT 0 PURELY FOR DEBUGGING, do 500 for train
+        buffer_size=50_000,
+        batch_size=128,
+        learning_starts=5000, # Only starts training after some buffer has been filled
         train_freq=1,
         gradient_steps=1,
         gamma=0.99,
