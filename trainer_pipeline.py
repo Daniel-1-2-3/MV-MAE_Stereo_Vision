@@ -88,8 +88,8 @@ if __name__ == "__main__":
         verbose=1,
         learning_rate=3e-4,
         buffer_size=50_000,
-        batch_size=128,
-        learning_starts=1000, # Only starts training after some buffer has been filled, use 5000 for actual training
+        batch_size=32,
+        learning_starts=500, # Only starts training after some buffer has been filled, use 5000 for actual training
         train_freq=1,
         gradient_steps=1,
         gamma=0.99,
