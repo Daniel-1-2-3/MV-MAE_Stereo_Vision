@@ -101,6 +101,7 @@ if __name__ == "__main__":
             total_timesteps=100_000,
             callback=RenderCallback(env) if args.render else None,
             log_interval=10,
+            progress_bar=True
         )
     finally:
         env.close()
