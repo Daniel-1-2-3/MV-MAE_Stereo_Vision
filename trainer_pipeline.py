@@ -10,6 +10,7 @@ from FrankaSim.franka_env import FrankaEnv
 from FrankaSim.mvmae_feature_extractor import MVMAEFeatureExtractor
 from FrankaSim.custom_policy import CustomSAC
 from stable_baselines3.sac import MlpPolicy
+from stable_baselines3.common.env_util import make_vec_env
 
 # Custom Policy with MV-MAE feature extractor
 class CustomSACPolicy(MlpPolicy):
@@ -59,7 +60,7 @@ class RenderCallback(BaseCallback):
 
 
 if __name__ == "__main__":
-    env = FrankaEnv(
+    env = make_vec_env(lambda: FrankaEnv(
         model_path=os.path.join(os.getcwd(), "FrankaSim", "pick_place.xml"),
         render_mode="rgb_array",
         n_substeps=25,
@@ -69,19 +70,18 @@ if __name__ == "__main__":
         obj_xy_range=0.3,
         goal_x_offset=0.0,
         goal_z_range=0.2,
-    )
-
+    ), n_envs=1)
     # Manually reset once to initialize the simulation
     env.reset()
-
+    
     model = CustomSAC(
         policy=CustomSACPolicy,
         env=env,
         verbose=1,
         learning_rate=3e-4,
-        buffer_size=10, # SET AT 10 PURELY FOR DEBUGGING
+        buffer_size=10, # SET AT 10 PURELY FOR DEBUGGING, do 10,000 for train
         batch_size=32,
-        learning_starts=1000,
+        learning_starts=0, # SET AT 0 PURELY FOR DEBUGGING, do 500 for train
         train_freq=1,
         gradient_steps=1,
         ent_coef="auto",
