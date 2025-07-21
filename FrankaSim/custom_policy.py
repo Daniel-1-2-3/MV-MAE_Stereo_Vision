@@ -11,7 +11,6 @@ class CustomSAC(SAC):
         for _ in range(gradient_steps):
             # Sample a batch from replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
-            print(0)
 
             with torch.no_grad():
                 next_obs_features = self.actor.features_extractor(replay_data.next_observations)
@@ -26,17 +25,8 @@ class CustomSAC(SAC):
             obs_features = self.actor.features_extractor(replay_data.observations)
             current_q0 = self.critic.qf0(torch.cat([obs_features, replay_data.actions], dim=1))
             current_q1 = self.critic.qf1(torch.cat([obs_features, replay_data.actions], dim=1))
-            
-            print("obs_features:", obs_features.shape)
-            print("actions:", replay_data.actions.shape)
-            print("current_q0:", current_q0.shape)
-            print("next_q_value:", next_q_value.shape)
-            print("next_q_value sample:", next_q_value[:5])
-            print("any NaN in next_q_value?", torch.isnan(next_q_value).any().item())
-            print("any Inf in next_q_value?", torch.isinf(next_q_value).any().item())
-                        
-            critic_loss = nn.functional.mse_loss(current_q0, next_q_value) + nn.functional.mse_loss(current_q1, next_q_value)
 
+            critic_loss = nn.functional.mse_loss(current_q0, next_q_value) + nn.functional.mse_loss(current_q1, next_q_value)
             self.critic.optimizer.zero_grad()
             critic_loss.backward()
             self.critic.optimizer.step()
@@ -44,7 +34,7 @@ class CustomSAC(SAC):
             
             # Actor update
             actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
-            obs_features = self.actor.extract_features(replay_data.observations)
+            obs_features = self.actor.features_extractor(replay_data.observations)
             qf0_pi = self.critic.qf0(torch.cat([obs_features, actions_pi], dim=1))
             qf1_pi = self.critic.qf1(torch.cat([obs_features, actions_pi], dim=1))
             min_qf_pi = torch.min(qf0_pi, qf1_pi)
