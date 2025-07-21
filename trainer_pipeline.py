@@ -14,6 +14,7 @@ from FrankaSim.custom_policy import CustomSAC
 from stable_baselines3.sac import MlpPolicy
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv
+import argparse
 
 # Custom Policy with MV-MAE feature extractor
 class CustomSACPolicy(MlpPolicy):
@@ -63,6 +64,10 @@ class RenderCallback(BaseCallback):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--envs", type=int, default=4)
+    args = parser.parse_args()
+    
     def make_franka_env():
         return FrankaEnv(
             model_path=os.path.join(os.getcwd(), "FrankaSim", "pick_place.xml"),
@@ -74,8 +79,8 @@ if __name__ == "__main__":
             obj_xy_range=0.3,
             goal_x_offset=0.0,
             goal_z_range=0.2)
-    env = make_vec_env(make_franka_env, n_envs=1, vec_env_cls=DummyVecEnv)
-    env.reset()
+    env = make_vec_env(make_franka_env, n_envs=args.envs, vec_env_cls=DummyVecEnv)
+    env.reset() 
     
     model = CustomSAC(
         policy=CustomSACPolicy,
@@ -95,7 +100,7 @@ if __name__ == "__main__":
     try:
         model.learn(
             total_timesteps=100_000,
-            # callback=RenderCallback(env),
+            # callback=RenderCallback(env), 
             log_interval=10,
             progress_bar=True
         )
