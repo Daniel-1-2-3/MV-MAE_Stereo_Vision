@@ -13,7 +13,7 @@ from FrankaSim.mvmae_feature_extractor import MVMAEFeatureExtractor
 from FrankaSim.custom_policy import CustomSAC
 from stable_baselines3.sac import MlpPolicy
 from stable_baselines3.common.env_util import make_vec_env
-import argparse
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 # Custom Policy with MV-MAE feature extractor
 class CustomSACPolicy(MlpPolicy):
@@ -63,22 +63,18 @@ class RenderCallback(BaseCallback):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--render", action="store_true", help="Enable real-time rendering with cv2")
-    args = parser.parse_args()
-    
-    env = FrankaEnv(
-        model_path=os.path.join(os.getcwd(), "FrankaSim", "pick_place.xml"),
-        render_mode="rgb_array",
-        n_substeps=25,
-        reward_type="dense",
-        distance_threshold=0.05,
-        goal_xy_range=0.3,
-        obj_xy_range=0.3,
-        goal_x_offset=0.0,
-        goal_z_range=0.2,
-    )
-    # Manually reset once to initialize the simulation
+    def make_franka_env():
+        return FrankaEnv(
+            model_path=os.path.join(os.getcwd(), "FrankaSim", "pick_place.xml"),
+            render_mode="rgb_array",
+            n_substeps=25,
+            reward_type="dense",
+            distance_threshold=0.05,
+            goal_xy_range=0.3,
+            obj_xy_range=0.3,
+            goal_x_offset=0.0,
+            goal_z_range=0.2)
+    env = make_vec_env(make_franka_env, n_envs=1, vec_env_cls=DummyVecEnv)
     env.reset()
     
     model = CustomSAC(
@@ -99,7 +95,7 @@ if __name__ == "__main__":
     try:
         model.learn(
             total_timesteps=100_000,
-            callback=RenderCallback(env) if args.render else None,
+            # callback=RenderCallback(env),
             log_interval=10,
             progress_bar=True
         )
