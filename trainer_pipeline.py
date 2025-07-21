@@ -13,6 +13,7 @@ from FrankaSim.mvmae_feature_extractor import MVMAEFeatureExtractor
 from FrankaSim.custom_policy import CustomSAC
 from stable_baselines3.sac import MlpPolicy
 from stable_baselines3.common.env_util import make_vec_env
+import argparse
 
 # Custom Policy with MV-MAE feature extractor
 class CustomSACPolicy(MlpPolicy):
@@ -62,6 +63,10 @@ class RenderCallback(BaseCallback):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--render", action="store_true", help="Enable real-time rendering with cv2")
+    args = parser.parse_args()
+    
     env = FrankaEnv(
         model_path=os.path.join(os.getcwd(), "FrankaSim", "pick_place.xml"),
         render_mode="rgb_array",
@@ -83,7 +88,7 @@ if __name__ == "__main__":
         learning_rate=3e-4,
         buffer_size=50_000,
         batch_size=128,
-        learning_starts=5000, # Only starts training after some buffer has been filled
+        learning_starts=1000, # Only starts training after some buffer has been filled, use 5000 for actual training
         train_freq=1,
         gradient_steps=1,
         gamma=0.99,
@@ -94,7 +99,7 @@ if __name__ == "__main__":
     try:
         model.learn(
             total_timesteps=100_000,
-            # callback=RenderCallback(env),
+            callback=RenderCallback(env) if args.render else None,
             log_interval=10,
         )
     finally:

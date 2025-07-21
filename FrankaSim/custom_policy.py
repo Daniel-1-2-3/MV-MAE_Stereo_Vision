@@ -43,8 +43,9 @@ class CustomSAC(SAC):
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss
             total_loss = actor_loss + (mvmae_loss if mvmae_loss is not None else 0)
 
-            print(f'mvmae: {mvmae_loss.item() if mvmae_loss is not None else "None"}, '
-                f'actor: {actor_loss.item()}, total: {total_loss.item()}')
+            print(f'mvmae: {mvmae_loss.item() if mvmae_loss is not None else "None"},'
+                f'actor: {actor_loss.item()}, total: {total_loss.item()},'
+                f'Batch reward mean: {replay_data.rewards.mean().item():.4f}')
 
             self.actor.optimizer.zero_grad()
             total_loss.backward()
