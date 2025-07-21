@@ -38,7 +38,8 @@ class CustomSAC(SAC):
             qf0_pi = self.critic.qf0(torch.cat([obs_features, actions_pi], dim=1))
             qf1_pi = self.critic.qf1(torch.cat([obs_features, actions_pi], dim=1))
             min_qf_pi = torch.min(qf0_pi, qf1_pi)
-            actor_loss = (self.ent_coef * log_prob - min_qf_pi).mean()
+            actor_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
+            print('Updated Critic')
 
             # MV-MAE loss
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss
