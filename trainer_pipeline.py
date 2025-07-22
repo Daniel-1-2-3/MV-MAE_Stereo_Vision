@@ -89,7 +89,7 @@ if __name__ == "__main__":
         learning_rate=3e-4,
         buffer_size=50_000,
         batch_size=32,
-        learning_starts=100, # Only starts training after some buffer has been filled, use 5000 for actual training
+        learning_starts=50, # Only starts training after some buffer has been filled, use 5000 for actual training
         train_freq=1,
         gradient_steps=1,
         gamma=0.99,
