@@ -180,8 +180,7 @@ class FrankaEnv(MujocoRobotEnv):
         left_tensor = torch.from_numpy(left_img).float().div(255).permute(2, 0, 1).unsqueeze(0).to(self.device)
         right_tensor = torch.from_numpy(right_img).float().div(255).permute(2, 0, 1).unsqueeze(0).to(self.device)
         fused = Prepare.fuse_normalize([left_tensor, right_tensor]) # (batch, height, width_total, channels)
-        obs = fused.squeeze(0).numpy() 
-
+        obs = fused.squeeze(0).cpu().numpy()
         object_position = self._utils.get_site_xpos(self.model, self.data, "obj_site").copy()
         
         return {
