@@ -1,12 +1,20 @@
 from stable_baselines3.sac.sac import SAC
 import torch
 from torch import nn
+import csv, os
 
 # Custom SAC that implements the mv-mae loss
 class CustomSAC(SAC):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Create CSV header
+        self.log_file = "training_log.csv"
+        if not os.path.exists(self.log_file):
+            with open(self.log_file, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(["MVMAE_L", "Actor_L", "Total_Loss", "Batch_Reward_Mean"])
         
     def train(self, gradient_steps: int, batch_size: int = 32):
         for _ in range(gradient_steps):
@@ -51,9 +59,14 @@ class CustomSAC(SAC):
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss
             total_loss = actor_loss + (mvmae_loss if mvmae_loss is not None else 0)
 
-            print(f'MVMAE_L: {mvmae_loss.item() if mvmae_loss is not None else "None"},'
-                f' Actor_L: {actor_loss.item()}, total: {total_loss.item()},'
-                f' Batch reward mean: {rewards.mean().item():.4f}')
+            with open(self.log_file, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    mvmae_loss.item() if mvmae_loss is not None else None,
+                    actor_loss.item(),
+                    total_loss.item(),
+                    rewards.mean().item()
+            ])
 
             self.actor.optimizer.zero_grad()
             total_loss.backward()
