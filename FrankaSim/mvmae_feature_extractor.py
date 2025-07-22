@@ -35,13 +35,12 @@ class MVMAEFeatureExtractor(BaseFeaturesExtractor):
         self.last_mvmae_loss = None
 
     def forward(self, obs_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-        obs = obs_dict["observation"].to(next(self.mvmae.parameters()).device).float()
+        obs = obs_dict["observation"].float().to(self.device)
         # obs is (batch, height, width * 2, channels)
         self.mvmae.train()
         out, mask, encoder_nomask_x = self.mvmae(obs)
         
         # Get the mvmae loss
-        obs = obs.to(self.device)
         self.last_mvmae_loss = self.mvmae.compute_loss(out, obs, mask) * 10
         
         # See model .forward() for description of out, mask, and encoder_nomask_x
