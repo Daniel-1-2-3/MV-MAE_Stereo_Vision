@@ -11,10 +11,9 @@ class CustomSAC(SAC):
 
         # Create CSV header
         self.log_file = "training_log.csv"
-        if not os.path.exists(self.log_file):
-            with open(self.log_file, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(["MVMAE_L", "Actor_L", "Total_Loss", "Batch_Reward_Mean"])
+        with open(self.log_file, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["MVMAE_L", "Actor_L", "Total_Loss", "Batch_Reward_Mean"])
         
     def train(self, gradient_steps: int, batch_size: int = 32):
         for _ in range(gradient_steps):
