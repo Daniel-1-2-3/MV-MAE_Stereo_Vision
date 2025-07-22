@@ -86,7 +86,7 @@ if __name__ == "__main__":
         policy=CustomSACPolicy,
         env=env,
         verbose=1,
-        learning_rate=3e-4,
+        learning_rate=1.5e-4,
         buffer_size=25_000,
         batch_size=32,
         learning_starts=500, # Only starts training after some buffer has been filled, use 1000 for actual training
