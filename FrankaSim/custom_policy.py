@@ -53,8 +53,7 @@ class CustomSAC(SAC):
 
             print(f'MVMAE_L: {mvmae_loss.item() if mvmae_loss is not None else "None"},'
                 f' Actor_L: {actor_loss.item()}, total: {total_loss.item()},'
-                f' Batch reward mean: {rewards.mean().item():.4f},'
-                f'Ent_coef: {self.log_ent_coef}')
+                f' Batch reward mean: {rewards.mean().item():.4f}')
 
             self.actor.optimizer.zero_grad()
             total_loss.backward()
