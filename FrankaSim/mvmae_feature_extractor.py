@@ -41,7 +41,7 @@ class MVMAEFeatureExtractor(BaseFeaturesExtractor):
         out, mask, encoder_nomask_x = self.mvmae(obs)
         
         # Get the mvmae loss
-        self.last_mvmae_loss = self.mvmae.compute_loss(out, obs, mask) * 10
+        self.last_mvmae_loss = self.mvmae.compute_loss(out, obs, mask) * 2
         
         # See model .forward() for description of out, mask, and encoder_nomask_x
         pooled_features = encoder_nomask_x.mean(dim=1)
