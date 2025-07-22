@@ -13,7 +13,7 @@ class CustomSAC(SAC):
         self.log_file = "training_log.csv"
         with open(self.log_file, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["MVMAE_L", "Actor_L", "Total_Loss", "Batch_Reward_Mean"])
+            writer.writerow(["MVMAE_L", "Policy_L", "Total_Loss", "Batch_Reward_Mean"])
         
     def train(self, gradient_steps: int, batch_size: int = 32):
         for _ in range(gradient_steps):
@@ -53,19 +53,19 @@ class CustomSAC(SAC):
             qf1_pi = self.critic.qf1(torch.cat([obs_features, actions_pi], dim=1))
             min_qf_pi = torch.min(qf0_pi, qf1_pi)
             
-            actor_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
+            policy_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss # MV-MAE loss
-            total_loss = actor_loss + (mvmae_loss * 0.025 if mvmae_loss is not None else 0) # Gradients from mvmae are much stronger
+            total_loss =  policy_loss + mvmae_loss * 1e-3 # Gradients from mvmae are much stronger
 
             with open(self.log_file, mode='a', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerow([
                     mvmae_loss.item() if mvmae_loss is not None else None,
-                    actor_loss.item(),
+                    policy_loss.item(),
                     total_loss.item(),
                     rewards.mean().item()
             ])
-            print(f'mvmae: {mvmae_loss.item()}, actor: {actor_loss.item()}, total_loss: {total_loss.item()}, rewards: {rewards.mean().item()}')
+            print(f'mvmae: {mvmae_loss.item()}, policy: {policy_loss.item()}, total_loss: {total_loss.item()}, rewards: {rewards.mean().item()}')
 
             self.actor.optimizer.zero_grad()
             total_loss.backward()
