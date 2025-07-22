@@ -67,6 +67,7 @@ class CustomSAC(SAC):
                     total_loss.item(),
                     rewards.mean().item()
             ])
+            print(f'mvmae: {mvmae_loss.item()}, actor: {actor_loss.item()}, total_loss: {total_loss.item()}, rewards: {rewards.mean().item()}')
 
             self.actor.optimizer.zero_grad()
             total_loss.backward()
