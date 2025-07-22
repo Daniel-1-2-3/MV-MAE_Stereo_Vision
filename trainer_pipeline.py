@@ -13,7 +13,7 @@ from FrankaSim.mvmae_feature_extractor import MVMAEFeatureExtractor
 from FrankaSim.custom_policy import CustomSAC
 from stable_baselines3.sac import MlpPolicy
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 import argparse
 
 # Custom Policy with MV-MAE feature extractor
@@ -79,7 +79,7 @@ if __name__ == "__main__":
             obj_xy_range=0.3,
             goal_x_offset=0.0,
             goal_z_range=0.2)
-    env = make_vec_env(make_franka_env, n_envs=args.envs, vec_env_cls=SubprocVecEnv)
+    env = make_vec_env(make_franka_env, n_envs=args.envs, vec_env_cls=DummyVecEnv)
     env.reset() 
     
     model = CustomSAC(
@@ -88,8 +88,8 @@ if __name__ == "__main__":
         verbose=1,
         learning_rate=3e-4,
         buffer_size=25_000,
-        batch_size=64,
-        learning_starts=1000, # Only starts training after some buffer has been filled, use 1000 for actual training
+        batch_size=128,
+        learning_starts=10, # Only starts training after some buffer has been filled, use 1000 for actual training
         train_freq = (2, "step"),
         gradient_steps = 8,
         gamma=0.99,
@@ -99,7 +99,7 @@ if __name__ == "__main__":
 
     try:
         model.learn(
-            total_timesteps=100_000,
+            total_timesteps=1_000_000,
             # callback=RenderCallback(env), 
             log_interval=10,
             progress_bar=True
