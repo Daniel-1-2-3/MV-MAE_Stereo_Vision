@@ -6,16 +6,24 @@ from torch import nn
 class CustomSAC(SAC):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     def train(self, gradient_steps: int, batch_size: int = 32):
         for _ in range(gradient_steps):
             # Sample a batch from replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
 
+            # Move all replay data tensors to the correct device
+            replay_data.observations = replay_data.observations.to(self.device)
+            replay_data.next_observations = replay_data.next_observations.to(self.device)
+            replay_data.actions = replay_data.actions.to(self.device)
+            replay_data.rewards = replay_data.rewards.to(self.device)
+            replay_data.dones = replay_data.dones.to(self.device)
+
             with torch.no_grad():
                 next_obs_features = self.actor.features_extractor(replay_data.next_observations)
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
-                
+
                 qf0_next_target = self.critic_target.qf0(torch.cat([next_obs_features, next_actions], dim=1))
                 qf1_next_target = self.critic_target.qf1(torch.cat([next_obs_features, next_actions], dim=1))
 
@@ -38,7 +46,7 @@ class CustomSAC(SAC):
             qf1_pi = self.critic.qf1(torch.cat([obs_features, actions_pi], dim=1))
             min_qf_pi = torch.min(qf0_pi, qf1_pi)
             actor_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
-        
+
             # MV-MAE loss
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss
             total_loss = actor_loss + (mvmae_loss if mvmae_loss is not None else 0)

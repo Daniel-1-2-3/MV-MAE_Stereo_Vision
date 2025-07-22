@@ -23,4 +23,4 @@ class Prepare():
         mean = torch.tensor([0.51905, 0.47986, 0.48809], device=x.device).view(1, 1, 1, 3)
         std = torch.tensor([0.17454, 0.20183, 0.19598], device=x.device).view(1, 1, 1, 3)
         x = (x - mean) / std
-        return x
+        return x.to(imgs[0].device())
