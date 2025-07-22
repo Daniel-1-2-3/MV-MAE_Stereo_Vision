@@ -54,13 +54,9 @@ class CustomSAC(SAC):
             qf1_pi = self.critic.qf1(torch.cat([obs_features, actions_pi], dim=1))
             min_qf_pi = torch.min(qf0_pi, qf1_pi)
             
-            # Traiditional: actor_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
-            # This version produces a positive loss value, but still represents the same SAC objective.
-            # Minimizing it still maximizes the expected Q-value and entropy, improving the policy.
-            # "Pick actions that both give high rewards (Q) and have high entropy (exploration)."
-            actor_loss = (min_qf_pi - self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1)).mean() 
+            actor_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss # MV-MAE loss
-            total_loss = actor_loss + (mvmae_loss if mvmae_loss is not None else 0)
+            total_loss = actor_loss + (mvmae_loss * 0.5 if mvmae_loss is not None else 0)
 
             with open(self.log_file, mode='a', newline='') as file:
                 writer = csv.writer(file)
