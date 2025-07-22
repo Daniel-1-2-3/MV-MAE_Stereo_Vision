@@ -88,6 +88,8 @@ class FrankaEnv(MujocoRobotEnv):
             img_h_size=img_h_size,
             img_w_size=img_w_size,
         )
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.mvmae.to(self.device)
         
     def _initialize_simulation(self) -> None:
         self.model = self._mujoco.MjModel.from_xml_path(self.fullpath)
@@ -174,8 +176,8 @@ class FrankaEnv(MujocoRobotEnv):
         self.renderer.update_scene(self.data, camera=self.right_cam_id)
         right_img = self.renderer.render()
         
-        left_tensor = torch.from_numpy(left_img).float().div(255).permute(2, 0, 1).unsqueeze(0)
-        right_tensor = torch.from_numpy(right_img).float().div(255).permute(2, 0, 1).unsqueeze(0)
+        left_tensor = torch.from_numpy(left_img).float().div(255).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        right_tensor = torch.from_numpy(right_img).float().div(255).permute(2, 0, 1).unsqueeze(0).to(self.device)
         fused = Prepare.fuse_normalize([left_tensor, right_tensor]) # (batch, height, width_total, channels)
         obs = fused.squeeze(0).numpy() 
 
