@@ -89,9 +89,9 @@ if __name__ == "__main__":
         learning_rate=3e-4,
         buffer_size=25_000,
         batch_size=32,
-        learning_starts=100, # Only starts training after some buffer has been filled, use 1000 for actual training
+        learning_starts=500, # Only starts training after some buffer has been filled, use 1000 for actual training
         train_freq = (1, "step"),
-        gradient_steps = 8,
+        gradient_steps = 2,
         gamma=0.99,
         tau=0.005,
         device="cuda" if torch.cuda.is_available() else "cpu",

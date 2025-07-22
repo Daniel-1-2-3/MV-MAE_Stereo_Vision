@@ -55,7 +55,7 @@ class CustomSAC(SAC):
             
             actor_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss # MV-MAE loss
-            total_loss = actor_loss + (mvmae_loss * 0.5 if mvmae_loss is not None else 0)
+            total_loss = actor_loss + (mvmae_loss * 0.025 if mvmae_loss is not None else 0) # Gradients from mvmae are much stronger
 
             with open(self.log_file, mode='a', newline='') as file:
                 writer = csv.writer(file)
