@@ -13,7 +13,7 @@ from FrankaSim.mvmae_feature_extractor import MVMAEFeatureExtractor
 from FrankaSim.custom_policy import CustomSAC
 from stable_baselines3.sac import MlpPolicy
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv
 import argparse
 
 # Custom Policy with MV-MAE feature extractor
@@ -79,7 +79,7 @@ if __name__ == "__main__":
             obj_xy_range=0.3,
             goal_x_offset=0.0,
             goal_z_range=0.2)
-    env = make_vec_env(make_franka_env, n_envs=args.envs, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(make_franka_env, n_envs=args.envs, vec_env_cls=SubprocVecEnv)
     env.reset() 
     
     model = CustomSAC(
