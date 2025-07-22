@@ -14,8 +14,8 @@ class CustomSAC(SAC):
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
 
             # Move all replay data tensors to the correct device
-            replay_data.observations = replay_data.observations.to(self.device)
-            replay_data.next_observations = replay_data.next_observations.to(self.device)
+            replay_data.observations = {k: v.to(self.device) for k, v in replay_data.observations.items()}
+            replay_data.next_observations = {k: v.to(self.device) for k, v in replay_data.next_observations.items()}
             replay_data.actions = replay_data.actions.to(self.device)
             replay_data.rewards = replay_data.rewards.to(self.device)
             replay_data.dones = replay_data.dones.to(self.device)
