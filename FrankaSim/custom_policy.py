@@ -16,9 +16,9 @@ class CustomSAC(SAC):
             # Move all replay data tensors to the correct device
             replay_data.observations.update({k: v.to(self.device) for k, v in replay_data.observations.items()})
             replay_data.next_observations.update({k: v.to(self.device) for k, v in replay_data.next_observations.items()})
-            replay_data.actions = replay_data.actions.to(self.device)
-            replay_data.rewards = replay_data.rewards.to(self.device)
-            replay_data.dones = replay_data.dones.to(self.device)
+            actions = replay_data.actions.to(self.device)
+            rewards = replay_data.rewards.to(self.device)
+            dones = replay_data.dones.to(self.device)
 
             with torch.no_grad():
                 next_obs_features = self.actor.features_extractor(replay_data.next_observations)
@@ -28,11 +28,11 @@ class CustomSAC(SAC):
                 qf1_next_target = self.critic_target.qf1(torch.cat([next_obs_features, next_actions], dim=1))
 
                 min_qf_next_target = torch.min(qf0_next_target, qf1_next_target) - self.log_ent_coef.exp().detach() * next_log_prob.unsqueeze(-1)
-                next_q_value = replay_data.rewards + (1 - replay_data.dones) * self.gamma * min_qf_next_target
+                next_q_value = rewards + (1 - dones) * self.gamma * min_qf_next_target
 
             obs_features = self.actor.features_extractor(replay_data.observations)
-            current_q0 = self.critic.qf0(torch.cat([obs_features, replay_data.actions], dim=1))
-            current_q1 = self.critic.qf1(torch.cat([obs_features, replay_data.actions], dim=1))
+            current_q0 = self.critic.qf0(torch.cat([obs_features, actions], dim=1))
+            current_q1 = self.critic.qf1(torch.cat([obs_features, actions], dim=1))
 
             critic_loss = nn.functional.mse_loss(current_q0, next_q_value) + nn.functional.mse_loss(current_q1, next_q_value)
             self.critic.optimizer.zero_grad()
@@ -53,7 +53,7 @@ class CustomSAC(SAC):
 
             print(f'MVMAE_L: {mvmae_loss.item() if mvmae_loss is not None else "None"},'
                 f' Actor_L: {actor_loss.item()}, total: {total_loss.item()},'
-                f' Batch reward mean: {replay_data.rewards.mean().item():.4f}')
+                f' Batch reward mean: {rewards.mean().item():.4f}')
 
             self.actor.optimizer.zero_grad()
             total_loss.backward()
