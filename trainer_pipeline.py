@@ -13,7 +13,7 @@ from FrankaSim.mvmae_feature_extractor import MVMAEFeatureExtractor
 from FrankaSim.custom_policy import CustomSAC
 from stable_baselines3.sac import MlpPolicy
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv
 import argparse
 
 # Custom Policy with MV-MAE feature extractor
@@ -79,7 +79,7 @@ if __name__ == "__main__":
             obj_xy_range=0.3,
             goal_x_offset=0.0,
             goal_z_range=0.2)
-    env = make_vec_env(make_franka_env, n_envs=args.envs, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(make_franka_env, n_envs=args.envs, vec_env_cls=SubprocVecEnv)
     env.reset() 
     
     model = CustomSAC(
@@ -88,10 +88,10 @@ if __name__ == "__main__":
         verbose=1,
         learning_rate=3e-4,
         buffer_size=50_000,
-        batch_size=32,
-        learning_starts=50, # Only starts training after some buffer has been filled, use 5000 for actual training
-        train_freq = (16, "step"),
-        gradient_steps = 32,
+        batch_size=128,
+        learning_starts=500, # Only starts training after some buffer has been filled, use 1000 for actual training
+        train_freq = (2, "step"),
+        gradient_steps = 8,
         gamma=0.99,
         tau=0.005,
         device="cuda" if torch.cuda.is_available() else "cpu",
