@@ -88,7 +88,8 @@ class FrankaEnv(MujocoRobotEnv):
             img_h_size=img_h_size,
             img_w_size=img_w_size,
         )
-        
+        self.mvmae.to(self.device)
+
     def _initialize_simulation(self) -> None:
         self.model = self._mujoco.MjModel.from_xml_path(self.fullpath)
         self.data = self._mujoco.MjData(self.model)
@@ -120,7 +121,6 @@ class FrankaEnv(MujocoRobotEnv):
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.mvmae.to(self.device)
 
     def _env_setup(self, neutral_joint_values) -> None:
         self.set_joint_neutral()
