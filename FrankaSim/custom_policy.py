@@ -55,7 +55,7 @@ class CustomSAC(SAC):
             
             policy_loss = (self.log_ent_coef.exp().detach() * log_prob.unsqueeze(-1) - min_qf_pi).mean()
             mvmae_loss = self.actor.features_extractor.last_mvmae_loss # MV-MAE loss
-            total_loss =  policy_loss + mvmae_loss * 1e-3 # Gradients from mvmae are much stronger
+            total_loss =  policy_loss + mvmae_loss * 0.01 # Gradients from mvmae are much stronger
 
             with open(self.log_file, mode='a', newline='') as file:
                 writer = csv.writer(file)
@@ -63,7 +63,8 @@ class CustomSAC(SAC):
                     mvmae_loss.item() if mvmae_loss is not None else None,
                     policy_loss.item(),
                     total_loss.item(),
-                    rewards.mean().item()
+                    rewards.mean().item(),
+                    self.log_ent_coef.exp().detach(),
             ])
             print(f'mvmae: {mvmae_loss.item()}, policy: {policy_loss.item()}, total_loss: {total_loss.item()}, rewards: {rewards.mean().item()}')
 
