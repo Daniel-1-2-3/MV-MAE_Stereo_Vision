@@ -14,15 +14,15 @@ class CustomSAC(SAC):
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
 
             # Move all replay data tensors to the correct device
-            replay_data.observations.update({k: v.to(self.device) for k, v in replay_data.observations.items()})
-            replay_data.next_observations.update({k: v.to(self.device) for k, v in replay_data.next_observations.items()})
+            obs = {k: v.to(self.device) for k, v in replay_data.observations.items()}
+            next_obs = {k: v.to(self.device) for k, v in replay_data.next_observations.items()}
             actions = replay_data.actions.to(self.device)
             rewards = replay_data.rewards.to(self.device)
             dones = replay_data.dones.to(self.device)
 
             with torch.no_grad():
-                next_obs_features = self.actor.features_extractor(replay_data.next_observations)
-                next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
+                next_obs_features = self.actor.features_extractor(next_obs)
+                next_actions, next_log_prob = self.actor.action_log_prob(next_obs)
 
                 qf0_next_target = self.critic_target.qf0(torch.cat([next_obs_features, next_actions], dim=1))
                 qf1_next_target = self.critic_target.qf1(torch.cat([next_obs_features, next_actions], dim=1))
@@ -30,7 +30,7 @@ class CustomSAC(SAC):
                 min_qf_next_target = torch.min(qf0_next_target, qf1_next_target) - self.log_ent_coef.exp().detach() * next_log_prob.unsqueeze(-1)
                 next_q_value = rewards + (1 - dones) * self.gamma * min_qf_next_target
 
-            obs_features = self.actor.features_extractor(replay_data.observations)
+            obs_features = self.actor.features_extractor(obs)
             current_q0 = self.critic.qf0(torch.cat([obs_features, actions], dim=1))
             current_q1 = self.critic.qf1(torch.cat([obs_features, actions], dim=1))
 
@@ -40,8 +40,8 @@ class CustomSAC(SAC):
             self.critic.optimizer.step()
             
             # Actor update
-            actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
-            obs_features = self.actor.features_extractor(replay_data.observations)
+            actions_pi, log_prob = self.actor.action_log_prob(obs)
+            obs_features = self.actor.features_extractor(obs)
             qf0_pi = self.critic.qf0(torch.cat([obs_features, actions_pi], dim=1))
             qf1_pi = self.critic.qf1(torch.cat([obs_features, actions_pi], dim=1))
             min_qf_pi = torch.min(qf0_pi, qf1_pi)
