@@ -69,12 +69,6 @@ class CustomSAC(SAC):
 
             self.actor.optimizer.zero_grad()
             total_loss.backward()
-            
-            for name, p in self.actor.named_parameters():
-                if p.grad is not None:
-                    print(name, p.grad.norm().item())
-                    
-            
             self.actor.optimizer.step()
             
             # Entropy coefficient update
