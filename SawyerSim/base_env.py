@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
-import copy
-import pickle
 from functools import cached_property
-from typing import Any, Callable, Literal, SupportsFloat
+from typing import Any, Literal, SupportsFloat
 
+import torch
+import torch.nn.functional as F
+import cv2
 import mujoco
 import numpy as np
 import numpy.typing as npt
-from gymnasium.spaces import Box, Discrete, Space
+from gymnasium.spaces import Box, Dict
 from gymnasium.utils import seeding
 from gymnasium.utils.ezpickle import EzPickle
+from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 from typing_extensions import TypeAlias
 
-from metaworld.types import XYZ, EnvironmentStateDict, ObservationDict
+from metaworld.types import XYZ, ObservationDict
 from metaworld.sawyer_xyz_env import SawyerMocapBase
 from metaworld.utils import reward_utils
+
+from Model.prepare_input import Prepare
 
 RenderMode: TypeAlias = "Literal['human', 'rgb_array', 'depth_array']"
 
@@ -43,7 +47,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         action_rot_scale: float = 1.0,
         render_mode: RenderMode | None = None,
         camera_id: int | None = None,
-        camera_name: str | None = None,
+        camera_names: list | None = None,
         width: int = 480,
         height: int = 480,
     ):
@@ -59,7 +63,6 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.mocap_high = np.hstack(mocap_high)
         self.curr_path_length: int = 0
         self.seeded_rand_vec: bool = False
-        self._freeze_rand_vec: bool = False
         self._last_rand_vec: npt.NDArray[Any] | None = None
         self.num_resets: int = 0
         self.current_seed: int | None = None
@@ -68,12 +71,14 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.width = width
         self.height = height
         
+        self._obs_obj_max_len = 14
+        
         super().__init__(
             self.model_name,
             frame_skip=frame_skip,
             render_mode=render_mode,
-            camera_name=camera_name,
-            camera_id=camera_id,
+            camera_name=None,
+            camera_id=None,
             width=width,
             height=height,
         )
@@ -91,22 +96,14 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             np.array([+1, +1, +1, +1]),
             dtype=np.float32,
         )
-        
-        self._obs_obj_max_len: int = 14
         self.hand_init_pos: npt.NDArray[Any] | None = None  # OVERRIDE ME
         self._target_pos: npt.NDArray[Any] | None = None  # OVERRIDE ME
         self._random_reset_space: Box | None = None  # OVERRIDE ME
         self.goal_space: Box | None = None  # OVERRIDE ME
         self._last_stable_obs: npt.NDArray[np.float64] | None = None
 
-        # Note: It is unlikely that the positions and orientations stored
-        # in this initiation of _prev_obs are correct. That being said, it
-        # doesn't seem to matter (it will only effect frame-stacking for the
-        # very first observation)
-
         self.init_qpos = np.copy(self.data.qpos)
         self.init_qvel = np.copy(self.data.qvel)
-        self._prev_obs = self._get_curr_obs_combined_no_goal()
         
         EzPickle.__init__(
             self,
@@ -119,12 +116,38 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             action_scale,
             action_rot_scale,
         )
+        
+        # Custom Mujoco renders for stereo vision
+        default_camera_config = None
+        max_geom = 1000
+        visual_options = {}
+        self.stereo_renderer_left = MujocoRenderer(
+            self.model,
+            self.data,
+            default_camera_config,
+            self.width,
+            self.height,
+            max_geom,
+            camera_id,
+            camera_names[0],
+            visual_options,
+        )
+        self.stereo_renderer_right = MujocoRenderer(
+            self.model,
+            self.data,
+            default_camera_config,
+            self.width,
+            self.height,
+            max_geom,
+            camera_id,
+            camera_names[1],
+            visual_options,
+        )
 
     def seed(self, seed: int) -> list[int]:
         """Seeds the environment.
         Args:
             seed: The seed to use.
-
         Returns:
             The seed used inside a 1 element list.
         """
@@ -264,18 +287,16 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         assert isinstance(self._target_pos, np.ndarray)
         assert self._target_pos.ndim == 1
         return self._target_pos
-
+    
     def _get_curr_obs_combined_no_goal(self) -> npt.NDArray[np.float64]:
         """Combines the end effector's {pos, closed amount} and the object(s)' {pos, quat} into a single flat observation.
-
         Note: The goal's position is *not* included in this.
-
+        
         Returns:
             The flat observation array (18 elements)
         """
 
         pos_hand = self.get_endeff_pos()
-
         finger_right, finger_left = (
             self.data.body("rightclaw"),
             self.data.body("leftclaw"),
@@ -302,67 +323,49 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             [np.hstack((pos, quat)) for pos, quat in zip(obj_pos_split, obj_quat_split)]
         )
         return np.hstack((pos_hand, gripper_distance_apart, obs_obj_padded))
-
+    
     def _get_obs(self) -> npt.NDArray[np.float64]:
-        """Frame stacks `_get_curr_obs_combined_no_goal()` and concatenates the goal position to form a single flat observation.
+        """Returns a dictionary comprised of tensor representation of the image and state observations
+        Image observations: a single tensor of shape (batch, height, width_total, channels), for passing into mvmae
+        State observations: a flat numpy vector of n elements
 
         Returns:
             The flat observation array (39 elements)
         """
-        # do frame stacking
-        pos_goal = self._get_pos_goal()
-        curr_obs = self._get_curr_obs_combined_no_goal()
-        # do frame stacking
-        obs = np.hstack((curr_obs, self._prev_obs, pos_goal))
-        self._prev_obs = curr_obs
+        state_obs = self._get_curr_obs_combined_no_goal()
+        img_obs = self.render()
+        obs = {
+            "state_observation": state_obs.astype(np.float32),
+            "image_observation": img_obs
+        }
         return obs
-
-    def _get_obs_dict(self) -> ObservationDict:
-        obs = self._get_obs()
-        return dict(
-            state_observation=obs,
-            state_desired_goal=self._get_pos_goal(),
-            state_achieved_goal=obs[3:-3],
-        )
+    
+    def render(self):
+        """Override the Mujoco render method so that I can return two views for stereo vision"""
+        left_view = np.flipud(self.stereo_renderer_left.render("rgb_array"))
+        right_view = np.flipud(self.stereo_renderer_right.render("rgb_array"))
+        
+        stereo_image = np.concatenate([left_view, right_view], axis=1)
+        if self.render_mode == "human":
+            cv2.imshow("Stereo view", stereo_image)
+            cv2.waitKey(1)
+            
+        left_tensor = torch.from_numpy(np.transpose(left_view, (2, 0, 1)).copy()).unsqueeze(0).float()
+        left_tensor = F.interpolate(left_tensor, size=(128, 128), mode='bilinear', align_corners=False)
+        right_tensor = torch.from_numpy(np.transpose(right_view, (2, 0, 1)).copy()).unsqueeze(0).float()
+        right_tensor = F.interpolate(right_tensor, size=(128, 128), mode='bilinear', align_corners=False)
+        stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor], )
+        
+        return stereo_tensor
 
     @cached_property
-    def sawyer_observation_space(self) -> Box:
-        obs_obj_max_len = 14
-        obj_low = np.full(obs_obj_max_len, -np.inf, dtype=np.float64)
-        obj_high = np.full(obs_obj_max_len, +np.inf, dtype=np.float64)
-        assert (
-            self.goal_space is not None
-        ), "The goal space must be defined to use full observability"
-        goal_low = self.goal_space.low
-        goal_high = self.goal_space.high
-        gripper_low = -1.0
-        gripper_high = +1.0
-        return Box(
-            np.hstack(
-                (
-                    self._HAND_SPACE.low,
-                    gripper_low,
-                    obj_low,
-                    self._HAND_SPACE.low,
-                    gripper_low,
-                    obj_low,
-                    goal_low,
-                )
-            ),
-            np.hstack(
-                (
-                    self._HAND_SPACE.high,
-                    gripper_high,
-                    obj_high,
-                    self._HAND_SPACE.high,
-                    gripper_high,
-                    obj_high,
-                    goal_high,
-                )
-            ),
-            dtype=np.float64,
-        )
-
+    def sawyer_observation_space(self) -> Dict:
+        observation_space = Dict({
+            "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float32),
+            "image_observation": Box(low=0, high=255, shape=(3, 128, 128), dtype=np.uint8)
+        })
+        return observation_space
+ 
     def step(
         self, action: npt.NDArray[np.float32]
     ) -> tuple[npt.NDArray[np.float64], SupportsFloat, bool, bool, dict[str, Any]]:
@@ -405,13 +408,12 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         mujoco.mj_forward(self.model, self.data)
         self._last_stable_obs = self._get_obs()
 
-        self._last_stable_obs = np.clip(
-            self._last_stable_obs,
-            a_max=self.sawyer_observation_space.high,
-            a_min=self.sawyer_observation_space.low,
+        self._last_stable_obs["state_observation"] = np.clip(
+            self._last_stable_obs["state_observation"],
+            a_max=self.sawyer_observation_space["state_observation"].high,
+            a_min=self.sawyer_observation_space["state_observation"].low,
             dtype=np.float64,
         )
-        assert isinstance(self._last_stable_obs, np.ndarray)
         reward, info = self.evaluate_state(self._last_stable_obs, action)
         # step will never return a terminate==True if there is a success
         # but we can return truncate=True if the current path length == max path length
@@ -419,7 +421,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         if self.curr_path_length == self.max_path_length:
             truncate = True
         return (
-            np.array(self._last_stable_obs, dtype=np.float64),
+            self._last_stable_obs,
             reward,
             False,
             truncate,
@@ -461,9 +463,6 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.curr_path_length = 0
         self.reset_model()
         obs, info = super().reset()
-        self._prev_obs = obs[:18].copy()
-        obs[18:36] = self._prev_obs
-        obs = obs.astype(np.float64)
         return obs, info
 
     def _reset_hand(self, steps: int = 50) -> None:
@@ -481,27 +480,15 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
 
     def _get_state_rand_vec(self) -> npt.NDArray[np.float64]:
         """Gets or generates a random vector for the hand position at reset."""
-        if self._freeze_rand_vec:
-            assert self._last_rand_vec is not None
-            return self._last_rand_vec
-        elif self.seeded_rand_vec:
-            assert self._random_reset_space is not None
-            rand_vec = self.np_random.uniform(
-                self._random_reset_space.low,
-                self._random_reset_space.high,
-                size=self._random_reset_space.low.size,
-            )
-            self._last_rand_vec = rand_vec
-            return rand_vec
-        else:
-            assert self._random_reset_space is not None
-            rand_vec: npt.NDArray[np.float64] = np.random.uniform(  # type: ignore
-                self._random_reset_space.low,
-                self._random_reset_space.high,
-                size=self._random_reset_space.low.size,
-            ).astype(np.float64)
-            self._last_rand_vec = rand_vec
-            return rand_vec
+        # Removed caching, simply generate a random hand position
+        assert self._random_reset_space is not None
+        rand_vec: npt.NDArray[np.float64] = np.random.uniform(
+            self._random_reset_space.low,
+            self._random_reset_space.high,
+            size=self._random_reset_space.low.size,
+        ).astype(np.float64)
+        self._last_rand_vec = rand_vec
+        return rand_vec
 
     def _gripper_caging_reward(
         self,
