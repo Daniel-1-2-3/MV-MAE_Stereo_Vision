@@ -1,8 +1,8 @@
 import torch
 from torch import nn, Tensor
 import numpy as np
-from Model.sincos_pos_embeds import PosEmbed
-from Model.vit import VitBlock
+from MAE_Model.sincos_pos_embeds import PosEmbed
+from MAE_Model.vit import VitBlock
 import random
 class ViTMaskedEncoder(nn.Module):
     def __init__(self, 
@@ -49,7 +49,9 @@ class ViTMaskedEncoder(nn.Module):
                         with a shape of (batch, height, width_total, channels)
 
         Returns:
-            x (Tensor):         Has shape (batch, unmasked_patches, embed_dim)
+            masked_x (Tensor):      Has shape (batch, unmasked_patches, embed_dim)
+            unmasked_x (Tensor):    Has shape (batch, total_patches, embed_dim)
+            
             mask (Tensor):      Has shape (batch, total_num_patches), where each vector in the 
                                 last dimension is a binary mask with 0 representing unmasked, and 
                                 1 representing masked

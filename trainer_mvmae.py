@@ -1,6 +1,6 @@
-from CreateDataset.dataset import StereoImageDataset
-from Model.prepare_input import Prepare
-from Model.model import MAEModel
+from DummyDataset.dataset import StereoImageDataset
+from MAE_Model.prepare_input import Prepare
+from MAE_Model.model import MAEModel
 import os
 from tqdm import tqdm
 from torchvision import transforms

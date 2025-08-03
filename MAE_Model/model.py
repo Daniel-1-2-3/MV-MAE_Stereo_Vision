@@ -3,8 +3,8 @@ import torch
 import einops
 import torch.nn.functional as F
 
-from Model.encoder import ViTMaskedEncoder
-from Model.decoder import ViTMaskedDecoder
+from MAE_Model.encoder import ViTMaskedEncoder
+from MAE_Model.decoder import ViTMaskedDecoder
 import matplotlib.pyplot as plt
 
 class MAEModel(nn.Module):

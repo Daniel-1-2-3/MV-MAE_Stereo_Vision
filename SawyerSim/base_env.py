@@ -21,7 +21,7 @@ from metaworld.types import XYZ, ObservationDict
 from metaworld.sawyer_xyz_env import SawyerMocapBase
 from metaworld.utils import reward_utils
 
-from Model.prepare_input import Prepare
+from MAE_Model.prepare_input import Prepare
 
 RenderMode: TypeAlias = "Literal['human', 'rgb_array', 'depth_array']"
 

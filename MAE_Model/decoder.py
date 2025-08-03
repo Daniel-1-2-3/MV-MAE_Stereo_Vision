@@ -1,6 +1,6 @@
 import torch
 from torch import nn, Tensor
-from Model.vit import VitBlock
+from MAE_Model.vit import VitBlock
 
 class ViTMaskedDecoder(nn.Module):
     def __init__(self,
