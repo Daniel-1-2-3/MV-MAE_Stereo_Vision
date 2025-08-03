@@ -12,26 +12,13 @@ from SawyerSim.base_env import RenderMode, SawyerXYZEnv
 from metaworld.types import InitConfigDict
 from metaworld.utils import reward_utils
 
-
 class SawyerReachEnvV3(SawyerXYZEnv):
-    """SawyerReachEnv.
-
-    Motivation for V3:
-        V1 was very difficult to solve because the observation didn't say where
-        to move (where to reach).
-    Changelog from V1 to V3:
-        - (7/7/20) Removed 3 element vector. Replaced with 3 element position
-            of the goal (for consistency with other environments)
-        - (6/15/20) Added a 3 element vector to the observation. This vector
-            points from the end effector to the goal coordinate.
-            i.e. (self._target_pos - pos_hand)
-        - (6/15/20) Separated reach-push-pick-place into 3 separate envs.
-    """
-
     def __init__(
         self,
         render_mode: RenderMode | None = None,
-        camera_names: list | None = ["stereo_left", "stereo_right"],  # Reference xyz_base for camera names
+        camera_pairs: list | None = [("stereo_left1", "stereo_right1"), 
+                                     ("stereo_left2", "stereo_right2"), 
+                                     ("stereo_left3", "stereo_right3")],  # Reference xyz_base for camera names
         camera_id: int | None = None,
         reward_function_version: str = "v2",
         height: int = 480,
@@ -49,7 +36,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
             hand_low=hand_low,
             hand_high=hand_high,
             render_mode=render_mode,
-            camera_names=camera_names,
+            camera_pairs=camera_pairs,
             camera_id=camera_id,
             height=height,
             width=width,

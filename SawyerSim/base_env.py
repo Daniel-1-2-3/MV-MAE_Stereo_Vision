@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 import cv2
 import mujoco
+import random
 import numpy as np
 import numpy.typing as npt
 from gymnasium.spaces import Box, Dict
@@ -47,7 +48,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         action_rot_scale: float = 1.0,
         render_mode: RenderMode | None = None,
         camera_id: int | None = None,
-        camera_names: list | None = None,
+        camera_pairs: list | None = None,
         width: int = 480,
         height: int = 480,
     ):
@@ -121,6 +122,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         default_camera_config = None
         max_geom = 1000
         visual_options = {}
+        self.camera_pairs = camera_pairs
+        chosen_pair = random.choice(self.camera_pairs)
         self.stereo_renderer_left = MujocoRenderer(
             self.model,
             self.data,
@@ -129,7 +132,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             self.height,
             max_geom,
             camera_id,
-            camera_names[0],
+            chosen_pair[0],
             visual_options,
         )
         self.stereo_renderer_right = MujocoRenderer(
@@ -140,7 +143,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             self.height,
             max_geom,
             camera_id,
-            camera_names[1],
+            chosen_pair[1],
             visual_options,
         )
 
@@ -357,6 +360,18 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor], )
         
         return stereo_tensor
+    
+    def render_for_test_dataset(self):
+        """Override the Mujoco render method so that I can return two views for stereo vision"""
+        left_view = np.flipud(self.stereo_renderer_left.render("rgb_array"))
+        right_view = np.flipud(self.stereo_renderer_right.render("rgb_array"))
+        
+        stereo_image = np.concatenate([left_view, right_view], axis=1)
+        if self.render_mode == "human":
+            cv2.imshow("Stereo view", stereo_image)
+            cv2.waitKey(1)
+        
+        return left_view, right_view
 
     @cached_property
     def sawyer_observation_space(self) -> Dict:
@@ -448,6 +463,35 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.set_state(qpos, qvel)
         return self._get_obs()
 
+    def reset_camera_placement(self):
+        camera_id = None
+        default_camera_config = None
+        max_geom = 1000
+        visual_options = {}
+        chosen_pair = random.choice(self.camera_pairs) # Switch to another random camera location
+        self.stereo_renderer_left = MujocoRenderer(
+            self.model,
+            self.data,
+            default_camera_config,
+            self.width,
+            self.height,
+            max_geom,
+            camera_id,
+            chosen_pair[0],
+            visual_options,
+        )
+        self.stereo_renderer_right = MujocoRenderer(
+            self.model,
+            self.data,
+            default_camera_config,
+            self.width,
+            self.height,
+            max_geom,
+            camera_id,
+            chosen_pair[1],
+            visual_options,
+        )
+
     def reset(
         self, seed: int | None = None, options: dict[str, Any] | None = None
     ) -> tuple[npt.NDArray[np.float64], dict[str, Any]]:
@@ -461,6 +505,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             The `(obs, info)` tuple.
         """
         self.curr_path_length = 0
+        self.reset_camera_placement()
         self.reset_model()
         obs, info = super().reset()
         return obs, info

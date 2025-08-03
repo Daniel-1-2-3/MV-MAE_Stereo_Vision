@@ -1,15 +1,14 @@
-import pybullet as p
-import pybullet_data
 import numpy as np
 import cv2
 import math
-import os
+import os, sys
 import hashlib
 from tqdm import tqdm
 from itertools import product
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
 from aug_dataset import Augment
+import argparse
 
 class StereoCamera:
     def __init__(self, r, cube_pos):
@@ -116,14 +115,37 @@ def save_and_split_dataset(all_images, base_dir='Dataset', split_ratio=0.7):
     print(f"Done. Saved {len(train_set)} training pairs and {len(val_set)} validation pairs.")
 
 if __name__ == "__main__":
-    zoom_range = range(4, 11)
-    pitch_range = range(2, 90, 2)
-    yaw_range = range(0, 360, 10)
-    combinations = list(product(zoom_range, pitch_range, yaw_range))
+    parser = argparse.ArgumentParser(description="Build Dataset")
+    parser.add_argument('--type', type=str, default='arm', help='Enter either "blocks" or "arm"')
+    args = parser.parse_args()
+    
+    images = []
+    if args.type == 'blocks':
+        import pybullet as p
+        import pybullet_data
+        
+        zoom_range = range(4, 11)
+        pitch_range = range(2, 90, 2)
+        yaw_range = range(0, 360, 10)
+        combinations = list(product(zoom_range, pitch_range, yaw_range))
+        with Pool(cpu_count()) as pool:
+            images = list(tqdm(pool.imap(render_combination, combinations), total=len(combinations), desc="Collecting images"))
+            
+    elif args.type == 'arm':
+        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+        from SawyerSim.stereo_env import SawyerReachEnvV3
+        
+        env = SawyerReachEnvV3(render_mode="rgb_array")
+        observation, info = env.reset()
 
-    with Pool(cpu_count()) as pool:
-        images = list(tqdm(pool.imap(render_combination, combinations), total=len(combinations), desc="Collecting images"))
-
+        for i in tqdm(range(2000)):
+            action = env.action_space.sample()
+            observation, reward, terminated, truncated, info = env.step(action)
+            if truncated:
+                env.reset()
+            left_view, right_view = env.render_for_test_dataset()
+            images.append((left_view, right_view))
+        
     save_and_split_dataset(images)
     aug = Augment()
     aug.augment_dataset()

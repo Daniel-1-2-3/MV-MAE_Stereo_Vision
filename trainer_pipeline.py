@@ -1,7 +1,12 @@
 import gymnasium as gym
 import numpy as np
 from SawyerSim.stereo_env import SawyerReachEnvV3
-from SawyerSim.sac_mae_policy import SAC_MAE
 
 env = SawyerReachEnvV3(render_mode="human")
-model = SAC_MAE(env).learn(total_timesteps=1000)
+observation, info = env.reset()
+
+for i in range(2000):
+    action = env.action_space.sample()
+    observation, reward, terminated, truncated, info = env.step(action)
+    if truncated:
+        env.reset()

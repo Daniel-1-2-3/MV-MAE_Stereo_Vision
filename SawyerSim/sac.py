@@ -2,8 +2,8 @@ import os
 import torch as T
 import torch.nn.functional as F
 import numpy as np
-from buffer import ReplayBuffer
-from networks import ActorNetwork, CriticNetwork
+from SawyerSim.buffer import ReplayBuffer
+from SawyerSim.networks import ActorNetwork, CriticNetwork
 
 class Agent():
     def __init__(self, alpha=0.0003, beta=0.0003, input_dims=[8],
@@ -82,7 +82,7 @@ class Agent():
             next_q2 = self.critic_2(state_, next_actions)
             next_q = T.min(next_q1, next_q2).view(-1)
             next_q -= self.alpha * next_log_probs.view(-1)
-            q_hat = self.scale * reward + self.gamma * next_q * (1 - done)
+            q_hat = self.scale * reward + self.gamma * next_q * (1 - done.float())
         
         q1_old_policy = self.critic_1.forward(state, action).view(-1)
         q2_old_policy = self.critic_2.forward(state, action).view(-1)
