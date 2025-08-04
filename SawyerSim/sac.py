@@ -89,7 +89,7 @@ class Agent():
         self.memory.store_transition(obs, action, reward, new_obs, done)
 
     def learn(self):
-        if self.memory.mem_cntr < self.batch_size:
+        if self.memory.mem_cntr < 10_000:
             return
 
         # Sample from the replay buffer

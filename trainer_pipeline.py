@@ -21,5 +21,3 @@ if __name__ == '__main__':
             
             observation = observation_
             env.render()
-            
-        print('Episode', i, 'Reward', reward)
