@@ -22,7 +22,7 @@ class Agent():
         beta=0.0003,
         gamma=0.99, # Discount factor
         tau=0.005, # Update rate
-        buffer_size=50_000, # Size for replay buffer
+        buffer_size=200_000, # Size for replay buffer
         nviews=2,
         patch_size=8,
         encoder_embed_dim=768,
@@ -89,9 +89,7 @@ class Agent():
         self.memory.store_transition(obs, action, reward, new_obs, done)
 
     def learn(self):
-        if (self.memory.mem_cntr < 10_000 and self.memory.mem_cntr % 1000 == 0):
-            print('Replay buffer', self.memory.mem_cntr)
-        if self.memory.mem_cntr < 10_000:
+        if self.memory.mem_cntr < 50_000:
             return
 
         # Sample from the replay buffer
