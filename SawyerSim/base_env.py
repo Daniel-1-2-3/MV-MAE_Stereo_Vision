@@ -355,10 +355,12 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             cv2.imshow("Stereo view", stereo_image)
             cv2.waitKey(1)
             
-        left_tensor = torch.from_numpy(np.transpose(left_view, (2, 0, 1)).copy()).unsqueeze(0).float()
+        left_tensor = torch.from_numpy(np.transpose(left_view, (2, 0, 1)).copy()).unsqueeze(0).float() / 255.0
         left_tensor = F.interpolate(left_tensor, size=(128, 128), mode='bilinear', align_corners=False)
-        right_tensor = torch.from_numpy(np.transpose(right_view, (2, 0, 1)).copy()).unsqueeze(0).float()
+
+        right_tensor = torch.from_numpy(np.transpose(right_view, (2, 0, 1)).copy()).unsqueeze(0).float() / 255.0
         right_tensor = F.interpolate(right_tensor, size=(128, 128), mode='bilinear', align_corners=False)
+
         stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor])
         
         return stereo_tensor
