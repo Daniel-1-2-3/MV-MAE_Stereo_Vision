@@ -93,8 +93,8 @@ class Agent():
             "image_observation": torch.as_tensor(obs_["image_observation"], dtype=torch.float32, device=self.device),
             "state_observation": torch.as_tensor(obs_["state_observation"], dtype=torch.float32, device=self.device)
         }
-        print(f"[DEBUG] image_observation AFTER SAMPLING FROM BUFFER : min={obs["image_observation"].min().item():.4f}, max={obs.max().item():.4f}")
-       
+        print(f"[DEBUG] image_observation AFTER SAMPLING FROM BUFFER : min={obs['image_observation'].min().item():.4f}, max={obs['image_observation'].max().item():.4f}")
+
         reward = torch.as_tensor(reward, dtype=torch.float).to(self.actor.device)
         done = torch.as_tensor(done).to(self.actor.device)
         action = torch.as_tensor(action, dtype=torch.float).to(self.actor.device)
