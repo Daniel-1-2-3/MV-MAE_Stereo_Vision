@@ -21,8 +21,6 @@ if __name__ == '__main__':
             agent.learn()
             
             observation = observation_
-            env.render()
-
             if timestep % 100 == 0:
                 print(timestep)
             timestep += 1

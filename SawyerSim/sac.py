@@ -89,6 +89,8 @@ class Agent():
         self.memory.store_transition(obs, action, reward, new_obs, done)
 
     def learn(self):
+        if (self.memory.mem_cntr < 10_000 and self.memory.mem_cntr % 1000 == 0):
+            print('Replay buffer', self.memory.mem_cntr)
         if self.memory.mem_cntr < 10_000:
             return
 
