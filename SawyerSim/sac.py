@@ -6,6 +6,15 @@ from SawyerSim.buffer import ReplayBuffer
 from SawyerSim.networks import ActorNetwork, CriticNetwork
 from MAE_Model.model import MAEModel
 
+import csv
+
+log_file = "loss_log.csv"
+
+# Clear and write header at the beginning of training
+with open(log_file, mode='w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(['MVMAE_Loss', 'Policy_Loss'])
+    
 class Agent():
     def __init__(self, 
         env=None, 
@@ -93,7 +102,6 @@ class Agent():
             "image_observation": torch.as_tensor(obs_["image_observation"], dtype=torch.float32, device=self.device),
             "state_observation": torch.as_tensor(obs_["state_observation"], dtype=torch.float32, device=self.device)
         }
-        print(f"[DEBUG] image_observation AFTER SAMPLING FROM BUFFER : min={obs['image_observation'].min().item():.4f}, max={obs['image_observation'].max().item():.4f}")
 
         reward = torch.as_tensor(reward, dtype=torch.float).to(self.actor.device)
         done = torch.as_tensor(done).to(self.actor.device)
@@ -109,9 +117,6 @@ class Agent():
         
         policy_loss = torch.mean(self.alpha * log_probs - critic_value)
         target = torch.as_tensor(obs["image_observation"], dtype=torch.float32, device=self.actor.device)
-        
-        print(f"[DEBUG] out: min={out.min().item():.4f}, max={out.max().item():.4f}")
-        print(f"[DEBUG] target: min={target.min().item():.4f}, max={target.max().item():.4f}")
 
         mvmae_loss = self.mvmae.compute_loss(out, target, mask)
         loss = policy_loss + mvmae_loss
@@ -141,4 +146,7 @@ class Agent():
         self.critic_1.optimizer.step()
         self.critic_2.optimizer.step()
         
-        print('MVMAE_Loss:', mvmae_loss.item(), 'Policy_Loss', policy_loss.item())
+        print('MVMAE_Loss:', mvmae_loss.item(), '\t\t', 'Policy_Loss:', policy_loss.item())
+        with open(log_file, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([mvmae_loss.item(), policy_loss.item()])
