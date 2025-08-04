@@ -146,7 +146,7 @@ class Agent():
         self.critic_1.optimizer.step()
         self.critic_2.optimizer.step()
         
-        print('MVMAE_Loss:', mvmae_loss.item(), '\t', 'Policy_Loss:', policy_loss.item(), '\t', 'Reward:', reward_float)
+        print('MVMAE_Loss:', mvmae_loss.item(), '\t', 'Policy_Loss:', policy_loss.item(), '\t', 'Reward:', sum(list(reward_float)) / len(list(reward_float)))
         with open(log_file, mode='a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([mvmae_loss.item(), policy_loss.item()])
