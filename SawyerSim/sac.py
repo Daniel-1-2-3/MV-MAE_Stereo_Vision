@@ -85,6 +85,14 @@ class Agent():
 
         # Sample from the replay buffer
         obs, action, reward, obs_, done = self.memory.sample_buffer(self.batch_size)
+        obs = {
+            "image_observation": torch.tensor(obs["image_observation"], dtype=torch.float32, device=self.device),
+            "state_observation": torch.tensor(obs["state_observation"], dtype=torch.float32, device=self.device)
+        }
+        obs_ = {
+            "image_observation": torch.tensor(obs_["image_observation"], dtype=torch.float32, device=self.device),
+            "state_observation": torch.tensor(obs_["state_observation"], dtype=torch.float32, device=self.device)
+        }
 
         reward = torch.tensor(reward, dtype=torch.float).to(self.actor.device)
         done = torch.tensor(done).to(self.actor.device)
@@ -99,7 +107,8 @@ class Agent():
         critic_value = critic_value.view(-1)
         
         policy_loss = torch.mean(self.alpha * log_probs - critic_value)
-        mvmae_loss = self.mvmae.compute_loss(out, torch.tensor(obs["image_observations"]), mask)
+        target = torch.tensor(obs["image_observation"], dtype=torch.float32, device=self.actor.device)
+        mvmae_loss = self.mvmae.compute_loss(out, target, mask)
         loss = policy_loss + mvmae_loss
         
         self.actor.optimizer.zero_grad()
