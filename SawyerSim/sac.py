@@ -18,11 +18,11 @@ with open(log_file, mode='w', newline='') as f:
 class Agent():
     def __init__(self, 
         env=None, 
-        alpha=0.0003, # Learning rate
+        alpha=0.0001, # Learning rate
         beta=0.0003,
         gamma=0.99, # Discount factor
         tau=0.005, # Update rate
-        buffer_size=5000, # Size for replay buffer
+        buffer_size=50_000, # Size for replay buffer
         nviews=2,
         patch_size=8,
         encoder_embed_dim=768,
@@ -93,7 +93,7 @@ class Agent():
             return
 
         # Sample from the replay buffer
-        obs, action, reward, obs_, done = self.memory.sample_buffer(self.batch_size)
+        obs, action, reward_float, obs_, done = self.memory.sample_buffer(self.batch_size)
         obs = {
             "image_observation": torch.as_tensor(obs["image_observation"], dtype=torch.float32, device=self.device),
             "state_observation": torch.as_tensor(obs["state_observation"], dtype=torch.float32, device=self.device)
@@ -102,8 +102,8 @@ class Agent():
             "image_observation": torch.as_tensor(obs_["image_observation"], dtype=torch.float32, device=self.device),
             "state_observation": torch.as_tensor(obs_["state_observation"], dtype=torch.float32, device=self.device)
         }
-
-        reward = torch.as_tensor(reward, dtype=torch.float).to(self.actor.device)
+        
+        reward = torch.as_tensor(reward_float, dtype=torch.float).to(self.actor.device)
         done = torch.as_tensor(done).to(self.actor.device)
         action = torch.as_tensor(action, dtype=torch.float).to(self.actor.device)
 
@@ -146,7 +146,7 @@ class Agent():
         self.critic_1.optimizer.step()
         self.critic_2.optimizer.step()
         
-        print('MVMAE_Loss:', mvmae_loss.item(), '\t\t', 'Policy_Loss:', policy_loss.item())
+        print('MVMAE_Loss:', mvmae_loss.item(), '\t', 'Policy_Loss:', policy_loss.item(), '\t', 'Reward:', reward_float)
         with open(log_file, mode='a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([mvmae_loss.item(), policy_loss.item()])
