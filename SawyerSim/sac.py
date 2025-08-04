@@ -108,6 +108,10 @@ class Agent():
         
         policy_loss = torch.mean(self.alpha * log_probs - critic_value)
         target = torch.as_tensor(obs["image_observation"], dtype=torch.float32, device=self.actor.device)
+        
+        print(f"[DEBUG] out: min={out.min().item():.4f}, max={out.max().item():.4f}")
+        print(f"[DEBUG] target: min={target.min().item():.4f}, max={target.max().item():.4f}")
+
         mvmae_loss = self.mvmae.compute_loss(out, target, mask)
         loss = policy_loss + mvmae_loss
         
