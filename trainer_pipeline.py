@@ -10,6 +10,7 @@ if __name__ == '__main__':
     env = SawyerReachEnvV3(render_mode="rgb_array")
     agent = Agent(env=env)
 
+    timestep = 0
     for i in tqdm(range(100)):
         observation, info = env.reset()
         truncated = False
@@ -21,3 +22,7 @@ if __name__ == '__main__':
             
             observation = observation_
             env.render()
+
+            if timestep % 100 == 0:
+                print(timestep)
+            timestep += 1
