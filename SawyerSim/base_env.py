@@ -337,7 +337,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             The flat observation array (39 elements)
         """
         state_obs = self._get_curr_obs_combined_no_goal()
-        state_obs = torch.as_tensor(state_obs.astype(np.float32)).unsqueeze(0)
+        state_obs = torch.from_numpy(state_obs.astype(np.float32)).unsqueeze(0)
         img_obs = self.render()
         obs = {
             "state_observation": state_obs,
@@ -362,7 +362,6 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         right_tensor = F.interpolate(right_tensor, size=(128, 128), mode='bilinear', align_corners=False)
 
         stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor])
-        
         return stereo_tensor
     
     def render_for_test_dataset(self):
