@@ -337,7 +337,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             The flat observation array (39 elements)
         """
         state_obs = self._get_curr_obs_combined_no_goal()
-        state_obs = torch.tensor(state_obs.astype(np.float32)).unsqueeze(0)
+        state_obs = torch.as_tensor(state_obs.astype(np.float32)).unsqueeze(0)
         img_obs = self.render()
         obs = {
             "state_observation": state_obs,

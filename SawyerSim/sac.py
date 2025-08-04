@@ -86,17 +86,17 @@ class Agent():
         # Sample from the replay buffer
         obs, action, reward, obs_, done = self.memory.sample_buffer(self.batch_size)
         obs = {
-            "image_observation": torch.tensor(obs["image_observation"], dtype=torch.float32, device=self.device),
-            "state_observation": torch.tensor(obs["state_observation"], dtype=torch.float32, device=self.device)
+            "image_observation": torch.as_tensor(obs["image_observation"], dtype=torch.float32, device=self.device),
+            "state_observation": torch.as_tensor(obs["state_observation"], dtype=torch.float32, device=self.device)
         }
         obs_ = {
-            "image_observation": torch.tensor(obs_["image_observation"], dtype=torch.float32, device=self.device),
-            "state_observation": torch.tensor(obs_["state_observation"], dtype=torch.float32, device=self.device)
+            "image_observation": torch.as_tensor(obs_["image_observation"], dtype=torch.float32, device=self.device),
+            "state_observation": torch.as_tensor(obs_["state_observation"], dtype=torch.float32, device=self.device)
         }
 
-        reward = torch.tensor(reward, dtype=torch.float).to(self.actor.device)
-        done = torch.tensor(done).to(self.actor.device)
-        action = torch.tensor(action, dtype=torch.float).to(self.actor.device)
+        reward = torch.as_tensor(reward, dtype=torch.float).to(self.actor.device)
+        done = torch.as_tensor(done).to(self.actor.device)
+        action = torch.as_tensor(action, dtype=torch.float).to(self.actor.device)
 
         # Step the actor, reparameterized allows for gradient flow
         actions, log_probs, out, mask = self.actor.sample_normal(obs, reparameterize=True)
@@ -107,7 +107,7 @@ class Agent():
         critic_value = critic_value.view(-1)
         
         policy_loss = torch.mean(self.alpha * log_probs - critic_value)
-        target = torch.tensor(obs["image_observation"], dtype=torch.float32, device=self.actor.device)
+        target = torch.as_tensor(obs["image_observation"], dtype=torch.float32, device=self.actor.device)
         mvmae_loss = self.mvmae.compute_loss(out, target, mask)
         loss = policy_loss + mvmae_loss
         
@@ -135,3 +135,5 @@ class Agent():
         critic_loss.backward()
         self.critic_1.optimizer.step()
         self.critic_2.optimizer.step()
+        
+        print('MVMAE_Loss:', mvmae_loss.item(), 'Policy_Loss', policy_loss.item())

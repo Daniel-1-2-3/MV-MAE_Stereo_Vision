@@ -27,12 +27,12 @@ class CriticNetwork(nn.Module):
 
     def forward(self, observation, action):
         with torch.no_grad():
-            image = torch.tensor(observation["image_observation"], dtype=torch.float32).to(self.device)
+            image = torch.as_tensor(observation["image_observation"], dtype=torch.float32).to(self.device)
             _, _, z = self.mvmae(image)
         
         z = self.z_projection(z)
         z_flat = z.view(z.size(0), -1)
-        state = torch.tensor(observation["state_observation"], dtype=torch.float32).to(self.device)
+        state = torch.as_tensor(observation["state_observation"], dtype=torch.float32).to(self.device)
         
         action = action.to(self.device)
         action_value = self.fc1(torch.cat([z_flat, state, action], dim=1))
@@ -85,11 +85,11 @@ class ActorNetwork(nn.Module):
                 state observation: a flat numpy vector of n elements, tensor of shape (batch, n)
             reparameterize (bool, optional): _description_. Defaults to True.
         """
-        image = torch.tensor(observation["image_observation"], dtype=torch.float32).to(self.device)
+        image = torch.as_tensor(observation["image_observation"], dtype=torch.float32).to(self.device)
         out, mask, z = self.mvmae(image)
         z = self.z_projection(z)
         z_flat = z.view(z.size(0), -1)
-        state = torch.tensor(observation["state_observation"], dtype=torch.float32).to(self.device)
+        state = torch.as_tensor(observation["state_observation"], dtype=torch.float32).to(self.device)
         
         mu, sigma = self.forward(torch.cat([z_flat, state], dim=1))
         probabilities = Normal(mu, sigma)
@@ -99,7 +99,7 @@ class ActorNetwork(nn.Module):
         else:
             actions = probabilities.sample()
 
-        action = torch.tanh(actions) * torch.tensor(self.max_action, dtype=actions.dtype, device=self.device)
+        action = torch.tanh(actions) * torch.as_tensor(self.max_action, dtype=actions.dtype, device=self.device)
         log_probs = probabilities.log_prob(actions)
         log_probs -= torch.log(1-action.pow(2)+self.reparam_noise)
         log_probs = log_probs.sum(1, keepdim=True)
