@@ -1,3 +1,6 @@
+import os
+os.environ["MUJOCO_GL"] = "egl"
+
 from tqdm import tqdm
 from SawyerSim.stereo_env import SawyerReachEnvV3
 import numpy as np
