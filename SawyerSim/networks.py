@@ -32,7 +32,7 @@ class CriticNetwork(nn.Module):
         
         z = self.z_projection(z)
         z_flat = z.view(z.size(0), -1)
-        state = observation["state_observation"].to(self.device)
+        state = observation["state_observation"].to(self.device).float()
         
         action = action.to(self.device)
         action_value = self.fc1(torch.cat([z_flat, state, action], dim=1))
@@ -89,7 +89,7 @@ class ActorNetwork(nn.Module):
         out, mask, z = self.mvmae(image)
         z = self.z_projection(z)
         z_flat = z.view(z.size(0), -1)
-        state = observation["state_observation"].to(self.device)
+        state = observation["state_observation"].to(self.device).float()
         
         mu, sigma = self.forward(torch.cat([z_flat, state], dim=1))
         probabilities = Normal(mu, sigma)
