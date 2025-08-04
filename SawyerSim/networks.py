@@ -89,7 +89,7 @@ class ActorNetwork(nn.Module):
         out, mask, z = self.mvmae(image)
         z = self.z_projection(z)
         z_flat = z.view(z.size(0), -1)
-        state = torch.tensor(observation["state_observation"], dtype=torch.float32)
+        state = torch.tensor(observation["state_observation"], dtype=torch.float32).to(self.device)
         
         mu, sigma = self.forward(torch.cat([z_flat, state], dim=1))
         probabilities = Normal(mu, sigma)
