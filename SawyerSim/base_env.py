@@ -97,6 +97,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             np.array([+1, +1, +1, +1]),
             dtype=np.float32,
         )
+        
         self.hand_init_pos: npt.NDArray[Any] | None = None  # OVERRIDE ME
         self._target_pos: npt.NDArray[Any] | None = None  # OVERRIDE ME
         self._random_reset_space: Box | None = None  # OVERRIDE ME
@@ -336,9 +337,10 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             The flat observation array (39 elements)
         """
         state_obs = self._get_curr_obs_combined_no_goal()
+        state_obs = torch.tensor(state_obs.astype(np.float32)).unsqueeze(0)
         img_obs = self.render()
         obs = {
-            "state_observation": state_obs.astype(np.float32),
+            "state_observation": state_obs,
             "image_observation": img_obs
         }
         return obs
@@ -357,7 +359,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         left_tensor = F.interpolate(left_tensor, size=(128, 128), mode='bilinear', align_corners=False)
         right_tensor = torch.from_numpy(np.transpose(right_view, (2, 0, 1)).copy()).unsqueeze(0).float()
         right_tensor = F.interpolate(right_tensor, size=(128, 128), mode='bilinear', align_corners=False)
-        stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor], )
+        stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor])
         
         return stereo_tensor
     
@@ -377,7 +379,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     def sawyer_observation_space(self) -> Dict:
         observation_space = Dict({
             "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float32),
-            "image_observation": Box(low=0, high=255, shape=(3, 128, 128), dtype=np.uint8)
+            "image_observation": Box(low=0, high=255, shape=(128, 256, 3), dtype=np.uint8)
         })
         return observation_space
  
@@ -435,13 +437,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         truncate = False
         if self.curr_path_length == self.max_path_length:
             truncate = True
-        return (
-            self._last_stable_obs,
-            reward,
-            False,
-            truncate,
-            info,
-        )
+            
+        return self._last_stable_obs, reward, False, truncate, info
 
     def evaluate_state(
         self, obs: npt.NDArray[np.float64], action: npt.NDArray[np.float32]

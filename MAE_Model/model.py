@@ -52,13 +52,13 @@ class MAEModel(nn.Module):
             mask (Tensor):      Has shape (batch, total_num_patches), where each vector in the 
                                 last dimension is a binary mask with 0 representing unmasked, and 
                                 1 representing masked
-            encoder_nomask_x (Tensor):    (batch, total_patches, patch_size^2 * channels) This is the input to the 
+            z (Tensor):    (batch, total_patches, patch_size^2 * channels) This is the input to the 
                                     actor in the pipeline. It is the input, without masking, passed through the encoder
         """
-        masked_x, mask, encoder_nomask_x = self.encoder(x)
+        masked_x, mask, z = self.encoder(x)
         out = self.decoder(masked_x, mask)
         out = self.out_proj(out)
-        return out, mask, encoder_nomask_x
+        return out, mask, z
     
     def compute_loss(self, out: Tensor, truth: Tensor, mask: Tensor):
         """
