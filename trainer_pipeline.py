@@ -4,7 +4,7 @@ import numpy as np
 from SawyerSim.sac import Agent
 
 if __name__ == '__main__':
-    env = SawyerReachEnvV3(render_mode="human")
+    env = SawyerReachEnvV3(render_mode="rgb_array")
     agent = Agent(env=env)
 
     for i in tqdm(range(100)):

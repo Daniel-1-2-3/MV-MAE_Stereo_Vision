@@ -98,9 +98,9 @@ class Agent():
         critic_value = torch.min(q1_new_policy, q2_new_policy)
         critic_value = critic_value.view(-1)
         
-        actor_loss = torch.mean(self.alpha * log_probs - critic_value)
+        policy_loss = torch.mean(self.alpha * log_probs - critic_value)
         mvmae_loss = self.mvmae.compute_loss(out, torch.tensor(obs["image_observations"]), mask)
-        loss = actor_loss + mvmae_loss
+        loss = policy_loss + mvmae_loss
         
         self.actor.optimizer.zero_grad()
         loss.backward()
