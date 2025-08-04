@@ -11,7 +11,7 @@ if __name__ == '__main__':
     agent = Agent(env=env)
 
     timestep = 0
-    for i in tqdm(range(100)):
+    for i in tqdm(range(10_000)):
         observation, info = env.reset()
         truncated = False
         while not truncated:
