@@ -85,6 +85,7 @@ class Agent():
 
         # Sample from the replay buffer
         obs, action, reward, obs_, done = self.memory.sample_buffer(self.batch_size)
+        print(f"[DEBUG] image_observation AFTER SAMPLING FROM BUFFER : min={obs.min().item():.4f}, max={obs.max().item():.4f}")
         obs = {
             "image_observation": torch.as_tensor(obs["image_observation"], dtype=torch.float32, device=self.device),
             "state_observation": torch.as_tensor(obs["state_observation"], dtype=torch.float32, device=self.device)
