@@ -6,9 +6,9 @@ class ReplayBuffer():
         self.mem_cntr = 0
 
         # Split storage for image and state parts
-        self.image_memory = np.zeros((self.mem_size, *image_shape), dtype=np.uint8)
+        self.image_memory = np.zeros((self.mem_size, *image_shape), dtype=np.float32) # If this was uint8 like before, it will undo normalization
         self.state_memory = np.zeros((self.mem_size, *state_shape), dtype=np.float32)
-        self.new_image_memory = np.zeros((self.mem_size, *image_shape), dtype=np.uint8)
+        self.new_image_memory = np.zeros((self.mem_size, *image_shape), dtype=np.float32)
         self.new_state_memory = np.zeros((self.mem_size, *state_shape), dtype=np.float32)
 
         self.action_memory = np.zeros((self.mem_size, n_actions), dtype=np.float32)
