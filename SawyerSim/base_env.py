@@ -339,6 +339,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         state_obs = self._get_curr_obs_combined_no_goal()
         state_obs = torch.from_numpy(state_obs.astype(np.float32)).unsqueeze(0)
         img_obs = self.render()
+        print(f"[DEBUG] _get_obs() image_observation: min={img_obs.min().item():.4f}, max={img_obs.max().item():.4f}")
         obs = {
             "state_observation": state_obs,
             "image_observation": img_obs
