@@ -263,7 +263,7 @@ class SAC(OffPolicyAlgorithm):
             mean_actions = self.actor.mu(latent_pi)
             log_std = self.actor.log_std(latent_pi)
             log_std = th.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
-            actions_pi = self.actor.action_dist.actions_from_params(mean_actions, log_std, reparameterize=True)
+            actions_pi = self.actor.action_dist.actions_from_params(mean_actions, log_std, {})
             log_prob = self.actor.action_dist.log_prob(actions_pi, mean_actions, log_std).reshape(-1, 1)
             log_prob = log_prob.reshape(-1, 1)
             mvmae_loss = self.actor.mvmae.compute_loss(out, truth, mask)
