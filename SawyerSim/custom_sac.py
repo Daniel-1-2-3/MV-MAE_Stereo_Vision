@@ -328,13 +328,14 @@ class SAC(OffPolicyAlgorithm):
             actor_losses.append(actor_loss.item())
             loss = actor_loss + mvmae_loss
             
-            print(round(actor_loss.item(), 3), '\t', round(mvmae_loss.item(), 3), '\t', round(critic_loss.item(), 3))
+            print('Actor loss:', round(actor_loss.item(), 3), '\t MVMAE:', round(mvmae_loss.item(), 3), '\t Critic:', round(critic_loss.item(), 3))
             # Optimize the actor    
             self.actor.optimizer.zero_grad()
             loss.backward()
             
-            for name, param in self.actor.mvmae.named_parameters():
-                print(name, param.grad.abs().mean().item() if param.grad is not None else "NO GRAD")
+            # Check for grad flow
+            # for name, param in self.actor.mvmae.named_parameters():
+                # print(name, param.grad.abs().mean().item() if param.grad is not None else "NO GRAD")
                 
             self.actor.optimizer.step()
 
