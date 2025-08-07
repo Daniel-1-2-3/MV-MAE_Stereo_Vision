@@ -32,8 +32,8 @@ class MAEModel(nn.Module):
         self.img_w_fused = self.nviews * self.img_w_size
         self.num_patches = int((self.img_h_size * self.img_w_size) // (patch_size ** 2) * nviews)
         
-        self.encoder = ViTMaskedEncoder(depth=4)
-        self.decoder = ViTMaskedDecoder(depth=2)
+        self.encoder = ViTMaskedEncoder(depth=4, embed_dim=self.encoder_embed_dim)
+        self.decoder = ViTMaskedDecoder(depth=2, encoder_embed_dim=self.encoder_embed_dim, decoder_embed_dim=self.decoder_embed_dim)
         self.out_proj = nn.Linear(decoder_embed_dim, self.patch_size ** 2 * in_channels)
     
     def forward(self, x: Tensor):

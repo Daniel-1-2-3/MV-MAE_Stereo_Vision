@@ -158,26 +158,34 @@ class SAC(OffPolicyAlgorithm):
             self._setup_model()
         
         # DEBUG the optimizers to make sure they include the required params in backpropagation
+        # Actor parameters
         with open("actor_optimizer_params.txt", "w") as f:
+            f.write("Actor Optimizer Parameter Groups:\n")
             for i, param_group in enumerate(self.actor.optimizer.param_groups):
-                f.write(f"Parameter Group {i}:\n")
+                f.write(f"\nParameter Group {i}:\n")
                 for key, value in param_group.items():
                     if key != 'params':
                         f.write(f"  {key}: {value}\n")
-                for j, param in enumerate(param_group['params']):
-                    f.write(f"    Param {j} shape: {tuple(param.shape)} requires_grad={param.requires_grad}\n")
-                f.write("\n")
-        
-        with open("critic_optimizer_params.txt", "w") as f:
-            for i, param_group in enumerate(self.critic.optimizer.param_groups):
-                f.write(f"Parameter Group {i}:\n")
-                for key, value in param_group.items():
-                    if key != 'params':
-                        f.write(f"  {key}: {value}\n")
-                for j, param in enumerate(param_group['params']):
-                    f.write(f"    Param {j} shape: {tuple(param.shape)} requires_grad={param.requires_grad}\n")
-                f.write("\n")
 
+                # Match parameters with names
+                named_params = dict(self.actor.named_parameters())
+                for j, param in enumerate(param_group['params']):
+                    name = next((n for n, p in named_params.items() if p is param), "<unknown>")
+                    f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
+
+        # Critic parameters
+        with open("critic_optimizer_params.txt", "w") as f:
+            f.write("Critic Optimizer Parameter Groups:\n")
+            for i, param_group in enumerate(self.critic.optimizer.param_groups):
+                f.write(f"\nParameter Group {i}:\n")
+                for key, value in param_group.items():
+                    if key != 'params':
+                        f.write(f"  {key}: {value}\n")
+
+                named_params = dict(self.critic.named_parameters())
+                for j, param in enumerate(param_group['params']):
+                    name = next((n for n, p in named_params.items() if p is param), "<unknown>")
+                    f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
 
     def _setup_model(self) -> None:
         super()._setup_model()
@@ -274,7 +282,7 @@ class SAC(OffPolicyAlgorithm):
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
                 # Compute the next Q values: min over all critics targets
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions, self.actor.mvmae), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
                 # add entropy term
                 next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
@@ -283,7 +291,7 @@ class SAC(OffPolicyAlgorithm):
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
-            current_q_values = self.critic(replay_data.observations, replay_data.actions)
+            current_q_values = self.critic(replay_data.observations, replay_data.actions, self.actor.mvmae)
 
             # Compute critic loss
             critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
@@ -298,7 +306,7 @@ class SAC(OffPolicyAlgorithm):
             # Compute actor loss
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
             # Min over all critic networks
-            q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
+            q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi, self.actor.mvmae), dim=1)
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())

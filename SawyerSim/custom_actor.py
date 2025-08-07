@@ -66,12 +66,18 @@ class Actor(BasePolicy):
             normalize_images=normalize_images,
             squash_output=True,
         )
+        
+        # Initialize MVMAE, default params, small embed dims to save memory
+        self.mvmae = MAEModel(encoder_embed_dim=256, decoder_embed_dim=128)
+        self.mvmae_loss = None # Can be fetched in SAC.train()
 
         # Save arguments to re-create object at loading
         self.use_sde = use_sde
         self.sde_features_extractor = None
         self.net_arch = net_arch
-        self.features_dim = features_dim
+        # self.features_dim = features_dim, OVERIRDE with z + state_obs dims
+        self.features_dim = self.mvmae.encoder_embed_dim * self.mvmae.num_patches + 18
+        
         self.activation_fn = activation_fn
         self.log_std_init = log_std_init
         self.use_expln = use_expln
@@ -79,13 +85,9 @@ class Actor(BasePolicy):
         self.clip_mean = clip_mean
 
         action_dim = get_action_dim(self.action_space)
-        latent_pi_net = create_mlp(features_dim, -1, net_arch, activation_fn)
+        latent_pi_net = create_mlp(self.features_dim, -1, net_arch, activation_fn)
         self.latent_pi = nn.Sequential(*latent_pi_net)
-        last_layer_dim = net_arch[-1] if len(net_arch) > 0 else features_dim
-        
-        # Initialize MVMAE, default params, small embed dims to save memory
-        self.mvmae = MAEModel(encoder_embed_dim=256, decoder_embed_dim=128)
-        self.mvmae_loss = None # Can be fetched in SAC.train()
+        last_layer_dim = net_arch[-1] if len(net_arch) > 0 else self.features_dim
         
         if self.use_sde:
             self.action_dist = StateDependentNoiseDistribution(
