@@ -316,6 +316,11 @@ class SAC(OffPolicyAlgorithm):
             # Optimize the actor
             self.actor.optimizer.zero_grad()
             loss.backward()
+            
+            for name, param in self.actor.mvmae.named_parameters():
+                print(name, param.grad.abs().mean().item() if param.grad is not None else "NO GRAD")
+
+
             self.actor.optimizer.step()
 
             # Update target networks
