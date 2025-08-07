@@ -182,7 +182,8 @@ class SACPolicy(BasePolicy):
 
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
-        return ContinuousCritic(**critic_kwargs, features_dim=self.actor.features_dim).to(self.device)
+        critic_kwargs["features_dim"] = self.actor.features_dim
+        return ContinuousCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
         return self._predict(obs, deterministic=deterministic)
