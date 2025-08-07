@@ -258,7 +258,7 @@ class SAC(OffPolicyAlgorithm):
 
             # Action by the current actor for the sampled state
             # actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
-            features, out, image, mask = self.actor.extract_features(replay_data.observations, self.actor.features_extractor)
+            features, out, truth, mask = self.actor.extract_features(replay_data.observations, self.actor.features_extractor)
             latent_pi = self.actor.latent_pi(features)
             mean_actions = self.actor.mu(latent_pi)
             log_std = self.actor.log_std(latent_pi)
@@ -266,7 +266,7 @@ class SAC(OffPolicyAlgorithm):
             actions_pi = self.actor.action_dist.actions_from_params(mean_actions, log_std, reparameterize=True)
             log_prob = self.actor.action_dist.log_prob(actions_pi, mean_actions, log_std).reshape(-1, 1)
             log_prob = log_prob.reshape(-1, 1)
-            mvmae_loss = self.actor.mvmae.compute_loss(out, image, mask)
+            mvmae_loss = self.actor.mvmae.compute_loss(out, truth, mask)
 
             ent_coef_loss = None
             if self.ent_coef_optimizer is not None and self.log_ent_coef is not None:
