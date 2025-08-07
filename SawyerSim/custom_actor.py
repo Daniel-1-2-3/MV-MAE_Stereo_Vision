@@ -158,6 +158,7 @@ class Actor(BasePolicy):
         """
         out, mask, z = self.mvmae(obs["image_observation"])
         self.mvmae_loss = self.mvmae.compute_loss(out, obs["image_observation"], mask)
+        self.mvmae.render_reconstruction(out)
         # z is a Tensor of shape (batch, total_patches, embed_dim)
         
         flatten = nn.Flatten()

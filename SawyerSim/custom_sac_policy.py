@@ -182,6 +182,7 @@ class SACPolicy(BasePolicy):
 
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        # OVERRIDE the feature dim
         critic_kwargs["features_dim"] = self.actor.features_dim
         return ContinuousCritic(**critic_kwargs).to(self.device)
 
