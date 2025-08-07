@@ -2,6 +2,7 @@ from torch import nn, Tensor
 import torch
 import einops
 import torch.nn.functional as F
+import os
 
 from MAE_Model.encoder import ViTMaskedEncoder
 from MAE_Model.decoder import ViTMaskedDecoder
@@ -90,8 +91,22 @@ class MAEModel(nn.Module):
         std = torch.tensor([0.17454, 0.20183, 0.19598], device=x.device).view(3, 1, 1)
         x = x * std + mean
         x = x.detach().cpu().clamp(0, 1).permute(1, 2, 0).numpy()
+        
+        base_path = "reconstructions/mvmae_recon.png"
+        directory = os.path.dirname(base_path)
+        filename, ext = os.path.splitext(os.path.basename(base_path))
+
+        os.makedirs(directory, exist_ok=True)
+        counter = 1 # Prevent overriding
+        save_path = base_path
+        while os.path.exists(save_path):
+            save_path = os.path.join(directory, f"{filename}_{counter}{ext}")
+            counter += 1
+
         plt.imshow(x)
-        plt.show()
+        plt.axis("off")
+        plt.savefig(save_path, bbox_inches="tight", pad_inches=0)
+        plt.close()
         
     def patchify(self, x: Tensor):
         """
