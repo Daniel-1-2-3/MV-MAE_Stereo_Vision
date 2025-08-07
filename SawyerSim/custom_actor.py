@@ -69,7 +69,9 @@ class Actor(BasePolicy):
         
         # Initialize MVMAE, default params, small embed dims to save memory
         self.mvmae = MAEModel(encoder_embed_dim=256, decoder_embed_dim=128)
-        self.mvmae_loss = None # Can be fetched in SAC.train()
+        self.cached_mvmae_out = None
+        self.cached_mvmae_in = None
+        self.cached_mvmae_mask = None
 
         # Save arguments to re-create object at loading
         self.use_sde = use_sde
@@ -157,9 +159,12 @@ class Actor(BasePolicy):
             }
         """
         out, mask, z = self.mvmae(obs["image_observation"])
-        self.mvmae_loss = self.mvmae.compute_loss(out, obs["image_observation"], mask)
+         # z is a Tensor of shape (batch, total_patches, embed_dim)
+        # So the gradients can flow through these 
+        self.cached_mvmae_out = out
+        self.cached_mvmae_in = obs["image_observation"]
+        self.cached_mvmae_mask = mask
         self.mvmae.render_reconstruction(out)
-        # z is a Tensor of shape (batch, total_patches, embed_dim)
         
         flatten = nn.Flatten()
         # OVERRIDE the feature extractor

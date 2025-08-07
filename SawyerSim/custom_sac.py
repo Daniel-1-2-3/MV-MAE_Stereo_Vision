@@ -310,8 +310,9 @@ class SAC(OffPolicyAlgorithm):
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
-
-            loss = actor_loss + self.actor.mvmae_loss
+            mvmae_loss = self.actor.mvmae.compute_loss(self.actor.cached_mvmae_out, self.actor.cached_mvmae_in, self.actor.cached_mvmae_mask)
+            loss = actor_loss + mvmae_loss
+            
             print(round(actor_loss.item(), 3), '\t', round(self.actor.mvmae_loss.item(), 3), '\t', round(critic_loss.item(), 3))
             # Optimize the actor
             self.actor.optimizer.zero_grad()
@@ -319,8 +320,7 @@ class SAC(OffPolicyAlgorithm):
             
             for name, param in self.actor.mvmae.named_parameters():
                 print(name, param.grad.abs().mean().item() if param.grad is not None else "NO GRAD")
-
-
+                
             self.actor.optimizer.step()
 
             # Update target networks
