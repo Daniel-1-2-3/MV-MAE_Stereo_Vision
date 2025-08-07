@@ -69,10 +69,7 @@ class Actor(BasePolicy):
         
         # Initialize MVMAE, default params, small embed dims to save memory
         self.mvmae = MAEModel(encoder_embed_dim=256, decoder_embed_dim=128)
-        self.cached_mvmae_out = None
-        self.cached_mvmae_in = None
-        self.cached_mvmae_mask = None
-
+        
         # Save arguments to re-create object at loading
         self.use_sde = use_sde
         self.sde_features_extractor = None
@@ -159,16 +156,12 @@ class Actor(BasePolicy):
             }
         """
         out, mask, z = self.mvmae(obs["image_observation"])
-         # z is a Tensor of shape (batch, total_patches, embed_dim)
-        # So the gradients can flow through these 
-        self.cached_mvmae_out = out
-        self.cached_mvmae_in = obs["image_observation"]
-        self.cached_mvmae_mask = mask
+        # z is a Tensor of shape (batch, total_patches, embed_dim)
         self.mvmae.render_reconstruction(out)
         
         flatten = nn.Flatten()
         # OVERRIDE the feature extractor
-        return torch.cat([flatten(z), obs["state_observation"]], dim=1)
+        return torch.cat([flatten(z), obs["state_observation"]], dim=1), out, obs["image_observation"], mask
         
     def get_action_dist_params(self, obs: PyTorchObs) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
