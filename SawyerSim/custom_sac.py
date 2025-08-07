@@ -313,7 +313,7 @@ class SAC(OffPolicyAlgorithm):
             mvmae_loss = self.actor.mvmae.compute_loss(self.actor.cached_mvmae_out, self.actor.cached_mvmae_in, self.actor.cached_mvmae_mask)
             loss = actor_loss + mvmae_loss
             
-            print(round(actor_loss.item(), 3), '\t', round(self.actor.mvmae_loss.item(), 3), '\t', round(critic_loss.item(), 3))
+            print(round(actor_loss.item(), 3), '\t', round(mvmae_loss.item(), 3), '\t', round(critic_loss.item(), 3))
             # Optimize the actor
             self.actor.optimizer.zero_grad()
             loss.backward()
