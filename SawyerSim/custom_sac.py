@@ -259,13 +259,14 @@ class SAC(OffPolicyAlgorithm):
             # Action by the current actor for the sampled state
             # actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
             # Implement that above line in SAC.train() instead of hidden in Actor.forward() to make gradients flow to mvmae decoder too
+            # Directly attach decoder output "out" into mvmae_loss, which is used in backprop together with policy loss
             features, out, truth, mask = self.actor.extract_features(replay_data.observations, self.actor.features_extractor)
             latent_pi = self.actor.latent_pi(features)
             mean_actions = self.actor.mu(latent_pi)
             log_std = self.actor.log_std(latent_pi)
             log_std = th.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
             
-            self.actor.action_dist.proba_distribution(mean_actions, log_std, {})
+            self.actor.action_dist.proba_distribution(mean_actions, log_std)
             dist = self.actor.action_dist.distribution
             actions_pi = dist.rsample()
             
