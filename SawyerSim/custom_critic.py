@@ -92,16 +92,16 @@ class ContinuousCritic(BaseModel):
         # Learn the features extractor using the policy loss only
         # when the features_extractor is shared with the actor
         with torch.set_grad_enabled(not self.share_features_extractor):
-            features = self.extract_features(obs, self.features_extractor, mvmae)
+            features = self.extract_features(obs, mvmae)
         qvalue_input = torch.cat([features, actions], dim=1)
         return tuple(q_net(qvalue_input) for q_net in self.q_networks)
 
-    def q1_forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    def q1_forward(self, obs: torch.Tensor, actions: torch.Tensor, mvmae) -> torch.Tensor:
         """
         Only predict the Q-value using the first network.
         This allows to reduce computation when all the estimates are not needed
         (e.g. when updating the policy in TD3).
         """
         with torch.no_grad():
-            features = self.extract_features(obs, self.features_extractor)
+            features = self.extract_features(obs, mvmae)
         return self.q_networks[0](torch.cat([features, actions], dim=1))
