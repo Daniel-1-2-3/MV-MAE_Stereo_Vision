@@ -311,9 +311,10 @@ class SAC(OffPolicyAlgorithm):
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
 
+            loss = actor_loss + self.actor.mvmae_loss
             # Optimize the actor
             self.actor.optimizer.zero_grad()
-            actor_loss.backward()
+            loss.backward()
             self.actor.optimizer.step()
 
             # Update target networks

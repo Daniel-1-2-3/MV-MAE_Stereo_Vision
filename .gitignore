@@ -1,4 +1,5 @@
 /Dataset
 /Results
 *.zip
-.csv
+*.exe
+*.csv
