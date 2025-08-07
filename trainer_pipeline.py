@@ -2,25 +2,6 @@ import os
 os.environ["MUJOCO_GL"] = "egl"
 
 from tqdm import tqdm
-from SawyerSim.stereo_env import SawyerReachEnvV3
-import numpy as np
-from SawyerSim.sac import Agent
+from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
+from SawyerSim.custom_sac import SAC
 
-if __name__ == '__main__':
-    env = SawyerReachEnvV3(render_mode="rgb_array")
-    agent = Agent(env=env)
-
-    timestep = 0
-    for i in tqdm(range(10_000)):
-        observation, info = env.reset()
-        truncated = False
-        while not truncated:
-            action = agent.choose_action(observation)
-            observation_, reward, terminated, truncated, info = env.step(action)
-            agent.remember(observation, action, reward, observation_, truncated)
-            agent.learn()
-            
-            observation = observation_
-            if timestep % 1000 == 0:
-                print(timestep)
-            timestep += 1

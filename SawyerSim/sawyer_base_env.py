@@ -328,10 +328,10 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         )
         return np.hstack((pos_hand, gripper_distance_apart, obs_obj_padded))
     
-    def _get_obs(self) -> npt.NDArray[np.float64]:
+    def _get_obs(self) -> dict[str, torch.Tensor]:
         """Returns a dictionary comprised of tensor representation of the image and state observations
-        Image observations: a single tensor of shape (batch, height, width_total, channels), for passing into mvmae
-        State observations: a flat numpy vector of n elements
+        Image observations: np.ndarray of shape (batch, height, width_total, channels), for passing into mvmae
+        State observations: np.ndarray of shape (batch, nstates)
 
         Returns:
             The flat observation array (39 elements)
@@ -346,7 +346,10 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         return obs
     
     def render(self):
-        """Override the Mujoco render method so that I can return two views for stereo vision"""
+        """Override the Mujoco render method so that I can return two views for stereo vision
+            Returns a tensor of (batch, height, width_total, channels)
+        """
+        
         left_view = np.flipud(self.stereo_renderer_left.render("rgb_array"))
         right_view = np.flipud(self.stereo_renderer_right.render("rgb_array"))
         
@@ -380,7 +383,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     def sawyer_observation_space(self) -> Dict:
         observation_space = Dict({
             "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float32),
-            "image_observation": Box(low=0, high=255, shape=(128, 256, 3), dtype=np.uint8)
+            "image_observation": Box(low=0, high=255, shape=(128, 256, 3), dtype=np.float32)
         })
         return observation_space
  

@@ -8,7 +8,7 @@ from gymnasium.spaces import Box
 from scipy.spatial.transform import Rotation
 
 from metaworld.asset_path_utils import full_V3_path_for
-from SawyerSim.base_env import RenderMode, SawyerXYZEnv
+from SawyerSim.sawyer_base_env import RenderMode, SawyerXYZEnv
 from metaworld.types import InitConfigDict
 from metaworld.utils import reward_utils
 
