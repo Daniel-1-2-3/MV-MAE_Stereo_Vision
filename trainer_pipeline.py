@@ -1,5 +1,5 @@
 import os
-os.environ["MUJOCO_GL"] = "egl"
+os.environ["MUJOCO_GL"] = "omesa"
 
 from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
 from SawyerSim.custom_sac import SAC
