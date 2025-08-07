@@ -312,6 +312,7 @@ class SAC(OffPolicyAlgorithm):
             actor_losses.append(actor_loss.item())
 
             loss = actor_loss + self.actor.mvmae_loss
+            print(round(actor_loss.item(), 3), '\t', round(self.actor.mvmae_loss.item(), 3), '\t', round(critic_loss.item(), 3))
             # Optimize the actor
             self.actor.optimizer.zero_grad()
             loss.backward()
