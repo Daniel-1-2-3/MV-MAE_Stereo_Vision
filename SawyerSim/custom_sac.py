@@ -1,6 +1,5 @@
 from typing import Any, ClassVar, Optional, TypeVar, Union
 
-
 import numpy as np
 import torch as th
 from gymnasium import spaces
@@ -9,10 +8,11 @@ from torch.nn import functional as F
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
+from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 from SawyerSim.custom_sac_policy import MultiInputPolicy, SACPolicy, Actor
+from SawyerSim.custom_critic import ContinuousCritic
 
 SelfSAC = TypeVar("SelfSAC", bound="SAC")
 
