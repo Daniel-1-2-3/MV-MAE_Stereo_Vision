@@ -68,7 +68,7 @@ class Actor(BasePolicy):
         )
         
         # Initialize MVMAE, default params, small embed dims to save memory
-        self.mvmae = MAEModel(encoder_embed_dim=256, decoder_embed_dim=128)
+        self.mvmae = MAEModel(encoder_embed_dim=768, decoder_embed_dim=512)
         
         # Save arguments to re-create object at loading
         self.use_sde = use_sde
