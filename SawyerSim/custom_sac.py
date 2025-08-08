@@ -251,6 +251,8 @@ class SAC(OffPolicyAlgorithm):
 
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
+        recon_losses = []
+        rewards = []
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
@@ -278,6 +280,7 @@ class SAC(OffPolicyAlgorithm):
             
             log_prob = dist.log_prob(actions_pi)
             mvmae_loss = self.actor.mvmae.compute_loss(out, truth, mask)
+            recon_losses.append(mvmae_loss.item())
 
             ent_coef_loss = None
             if self.ent_coef_optimizer is not None and self.log_ent_coef is not None:
@@ -334,11 +337,10 @@ class SAC(OffPolicyAlgorithm):
             actor_losses.append(actor_loss.item())
             loss = actor_loss + mvmae_loss
             
-            mean_reward = replay_data.rewards.mean().item()
-            print('Actor:', round(actor_loss.item(), 3), '\t MVMAE:', round(mvmae_loss.item(), 3), '\t Critic:', round(critic_loss.item(), 3), '\t Reward', round(mean_reward, 3))
-            with open("log.csv", mode="a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([round(actor_loss.item(), 3), round(mvmae_loss.item(), 3), round(critic_loss.item(), 3), round(mean_reward, 3)]) 
+            reward = replay_data.rewards.mean().item()
+            rewards.append(reward)
+            # print losses
+            # print('Actor:', round(actor_loss.item(), 3), '\t MVMAE:', round(mvmae_loss.item(), 3), '\t Critic:', round(critic_loss.item(), 3), '\t Reward', round(mean_reward, 3))
                         
             # Optimize the actor    
             self.actor.optimizer.zero_grad()
@@ -364,6 +366,14 @@ class SAC(OffPolicyAlgorithm):
         self.logger.record("train/critic_loss", np.mean(critic_losses))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
+            
+        # My logging
+        with open("log.csv", mode="a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([round(np.mean(actor_losses), 3), 
+                             round(np.mean(recon_losses), 3), 
+                             round(np.mean(critic_losses), 3), 
+                             round(np.mean(rewards), 3)]) 
 
     def learn(
         self: SelfSAC,
