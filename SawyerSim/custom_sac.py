@@ -1,9 +1,10 @@
 from typing import Any, ClassVar, Optional, TypeVar, Union
 
 import numpy as np
-import torch as th
+import torch
 from gymnasium import spaces
 from torch.nn import functional as F
+import csv
 
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
@@ -117,7 +118,7 @@ class SAC(OffPolicyAlgorithm):
         policy_kwargs: Optional[dict[str, Any]] = None,
         verbose: int = 0,
         seed: Optional[int] = None,
-        device: Union[th.device, str] = "auto",
+        device: Union[torch.device, str] = "auto",
         _init_setup_model: bool = True,
     ):
         super().__init__(
@@ -150,12 +151,12 @@ class SAC(OffPolicyAlgorithm):
         )
 
         self.target_entropy = target_entropy
-        self.log_ent_coef = None  # type: Optional[th.Tensor]
+        self.log_ent_coef = None  # type: Optional[torch.Tensor]
         # Entropy coefficient / Entropy temperature
         # Inverse of the reward scale
         self.ent_coef = ent_coef
         self.target_update_interval = target_update_interval
-        self.ent_coef_optimizer: Optional[th.optim.Adam] = None
+        self.ent_coef_optimizer: Optional[torch.optim.Adam] = None
 
         if _init_setup_model:
             self._setup_model()
@@ -189,6 +190,11 @@ class SAC(OffPolicyAlgorithm):
                 for j, param in enumerate(param_group['params']):
                     name = next((n for n, p in named_params.items() if p is param), "<unknown>")
                     f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
+        
+        # CSV file for logging
+        with open("log.csv", mode="w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["actor_loss", "recon_loss", "critic_loss", "reward"])
 
     def _setup_model(self) -> None:
         super()._setup_model()
@@ -217,13 +223,13 @@ class SAC(OffPolicyAlgorithm):
 
             # Note: we optimize the log of the entropy coeff which is slightly different from the paper
             # as discussed in https://github.com/rail-berkeley/softlearning/issues/37
-            self.log_ent_coef = th.log(th.ones(1, device=self.device) * init_value).requires_grad_(True)
-            self.ent_coef_optimizer = th.optim.Adam([self.log_ent_coef], lr=self.lr_schedule(1))
+            self.log_ent_coef = torch.log(torch.ones(1, device=self.device) * init_value).requires_grad_(True)
+            self.ent_coef_optimizer = torch.optim.Adam([self.log_ent_coef], lr=self.lr_schedule(1))
         else:
             # Force conversion to float
             # this will throw an error if a malformed string (different from 'auto')
             # is passed
-            self.ent_coef_tensor = th.tensor(float(self.ent_coef), device=self.device)
+            self.ent_coef_tensor = torch.tensor(float(self.ent_coef), device=self.device)
 
     def _create_aliases(self) -> None:
         self.actor = self.policy.actor
@@ -264,7 +270,7 @@ class SAC(OffPolicyAlgorithm):
             latent_pi = self.actor.latent_pi(features)
             mean_actions = self.actor.mu(latent_pi)
             log_std = self.actor.log_std(latent_pi)
-            log_std = th.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+            log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
             
             self.actor.action_dist.proba_distribution(mean_actions, log_std)
             dist = self.actor.action_dist.distribution
@@ -278,7 +284,7 @@ class SAC(OffPolicyAlgorithm):
                 # Important: detach the variable from the graph
                 # so we don't change it with other losses
                 # see https://github.com/rail-berkeley/softlearning/issues/60
-                ent_coef = th.exp(self.log_ent_coef.detach())
+                ent_coef = torch.exp(self.log_ent_coef.detach())
                 assert isinstance(self.target_entropy, float)
                 ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean()
                 ent_coef_losses.append(ent_coef_loss.item())
@@ -294,12 +300,12 @@ class SAC(OffPolicyAlgorithm):
                 ent_coef_loss.backward()
                 self.ent_coef_optimizer.step()
 
-            with th.no_grad():
+            with torch.no_grad():
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
                 # Compute the next Q values: min over all critics targets
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions, self.actor.mvmae), dim=1)
-                next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                next_q_values = torch.cat(self.critic_target(replay_data.next_observations, next_actions, self.actor.mvmae), dim=1)
+                next_q_values, _ = torch.min(next_q_values, dim=1, keepdim=True)
                 # add entropy term
                 next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
                 # td error + entropy term
@@ -311,7 +317,7 @@ class SAC(OffPolicyAlgorithm):
 
             # Compute critic loss
             critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
-            assert isinstance(critic_loss, th.Tensor)  # for type checker
+            assert isinstance(critic_loss, torch.Tensor)  # for type checker
             critic_losses.append(critic_loss.item())  # type: ignore[union-attr]
 
             # Optimize the critic
@@ -320,15 +326,20 @@ class SAC(OffPolicyAlgorithm):
             self.critic.optimizer.step()
 
             # Compute actor loss
-            # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
+            # Alternative: actor_loss = torch.mean(log_prob - qf1_pi)
             # Min over all critic networks
-            q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi, self.actor.mvmae), dim=1)
-            min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
+            q_values_pi = torch.cat(self.critic(replay_data.observations, actions_pi, self.actor.mvmae), dim=1)
+            min_qf_pi, _ = torch.min(q_values_pi, dim=1, keepdim=True)
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
             loss = actor_loss + mvmae_loss
             
-            print('Actor loss:', round(actor_loss.item(), 3), '\t MVMAE:', round(mvmae_loss.item(), 3), '\t Critic:', round(critic_loss.item(), 3))
+            mean_reward = replay_data.rewards.mean().item()
+            print('Actor:', round(actor_loss.item(), 3), '\t MVMAE:', round(mvmae_loss.item(), 3), '\t Critic:', round(critic_loss.item(), 3), '\t Reward', round(mean_reward, 3))
+            with open("log.csv", mode="a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([round(actor_loss.item(), 3), round(mvmae_loss.item(), 3), round(critic_loss.item(), 3), round(mean_reward, 3)]) 
+                        
             # Optimize the actor    
             self.actor.optimizer.zero_grad()
             loss.backward()
