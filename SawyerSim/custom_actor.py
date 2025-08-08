@@ -157,7 +157,9 @@ class Actor(BasePolicy):
         """
         out, mask, z = self.mvmae(obs["image_observation"])
         # z is a Tensor of shape (batch, total_patches, embed_dim)
-        self.mvmae.render_reconstruction(out)
+        
+        # Run this to look at mvmae decoder output 
+        # self.mvmae.render_reconstruction(out)
         
         flatten = nn.Flatten()
         # OVERRIDE the feature extractor
