@@ -161,36 +161,6 @@ class SAC(OffPolicyAlgorithm):
         if _init_setup_model:
             self._setup_model()
         
-        # DEBUG the optimizers to make sure they include the required params in backpropagation
-        # Actor parameters
-        with open("actor_optimizer_params.txt", "w") as f:
-            f.write("Actor Optimizer Parameter Groups:\n")
-            for i, param_group in enumerate(self.actor.optimizer.param_groups):
-                f.write(f"\nParameter Group {i}:\n")
-                for key, value in param_group.items():
-                    if key != 'params':
-                        f.write(f"  {key}: {value}\n")
-
-                # Match parameters with names
-                named_params = dict(self.actor.named_parameters())
-                for j, param in enumerate(param_group['params']):
-                    name = next((n for n, p in named_params.items() if p is param), "<unknown>")
-                    f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
-
-        # Critic parameters
-        with open("critic_optimizer_params.txt", "w") as f:
-            f.write("Critic Optimizer Parameter Groups:\n")
-            for i, param_group in enumerate(self.critic.optimizer.param_groups):
-                f.write(f"\nParameter Group {i}:\n")
-                for key, value in param_group.items():
-                    if key != 'params':
-                        f.write(f"  {key}: {value}\n")
-
-                named_params = dict(self.critic.named_parameters())
-                for j, param in enumerate(param_group['params']):
-                    name = next((n for n, p in named_params.items() if p is param), "<unknown>")
-                    f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
-        
         # CSV file for logging
         with open("log.csv", mode="w", newline="") as f:
             writer = csv.writer(f)
@@ -235,6 +205,36 @@ class SAC(OffPolicyAlgorithm):
         self.actor = self.policy.actor
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
+        # DEBUG the optimizers to make sure they include the required params in backpropagation
+        # Actor parameters
+        if hasattr(self.actor, "optimizer") and self.actor.optimizer is not None:
+            with open("actor_optimizer_params.txt", "w") as f:
+                f.write("Actor Optimizer Parameter Groups:\n")
+                for i, param_group in enumerate(self.actor.optimizer.param_groups):
+                    f.write(f"\nParameter Group {i}:\n")
+                    for key, value in param_group.items():
+                        if key != 'params':
+                            f.write(f"  {key}: {value}\n")
+
+                    # Match parameters with names
+                    named_params = dict(self.actor.named_parameters())
+                    for j, param in enumerate(param_group['params']):
+                        name = next((n for n, p in named_params.items() if p is param), "<unknown>")
+                        f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
+
+            # Critic parameters
+            with open("critic_optimizer_params.txt", "w") as f:
+                f.write("Critic Optimizer Parameter Groups:\n")
+                for i, param_group in enumerate(self.critic.optimizer.param_groups):
+                    f.write(f"\nParameter Group {i}:\n")
+                    for key, value in param_group.items():
+                        if key != 'params':
+                            f.write(f"  {key}: {value}\n")
+
+                    named_params = dict(self.critic.named_parameters())
+                    for j, param in enumerate(param_group['params']):
+                        name = next((n for n, p in named_params.items() if p is param), "<unknown>")
+                        f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)

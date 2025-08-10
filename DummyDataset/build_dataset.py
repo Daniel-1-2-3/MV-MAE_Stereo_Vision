@@ -133,7 +133,7 @@ if __name__ == "__main__":
             
     elif args.type == 'arm':
         sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-        from SawyerSim.stereo_env import SawyerReachEnvV3
+        from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
         
         env = SawyerReachEnvV3(render_mode="rgb_array")
         observation, info = env.reset()
