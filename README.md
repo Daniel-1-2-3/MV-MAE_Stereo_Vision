@@ -5,6 +5,8 @@
 - Install dependencies by running:
 
 ```bash
+git clone https://github.com/Daniel-1-2-3/MV-MAE_Stereo_Vision
+cd MV-MAE_Stereo_Vision
 pip install -r requirements.txt
 ```
 
