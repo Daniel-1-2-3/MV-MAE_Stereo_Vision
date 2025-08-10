@@ -157,15 +157,19 @@ class SAC(OffPolicyAlgorithm):
         self.ent_coef = ent_coef
         self.target_update_interval = target_update_interval
         self.ent_coef_optimizer: Optional[torch.optim.Adam] = None
+        
+        self.csv_logging = False
 
         if _init_setup_model:
             self._setup_model()
         
+    def begin_log_losses(self):
         # CSV file for logging
         with open("log.csv", mode="w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["actor_loss", "recon_loss", "critic_loss", "reward"])
-
+        self.csv_logging = True
+        
     def _setup_model(self) -> None:
         super()._setup_model()
         self._create_aliases()
@@ -367,13 +371,14 @@ class SAC(OffPolicyAlgorithm):
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
             
-        # My logging
-        with open("log.csv", mode="a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([round(np.mean(actor_losses), 3), 
-                             round(np.mean(recon_losses), 3), 
-                             round(np.mean(critic_losses), 3), 
-                             round(np.mean(rewards), 3)]) 
+        # Log
+        if self.csv_logging:
+            with open("log.csv", mode="a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([round(np.mean(actor_losses), 3), 
+                                round(np.mean(recon_losses), 3), 
+                                round(np.mean(critic_losses), 3), 
+                                round(np.mean(rewards), 3)]) 
 
     def learn(
         self: SelfSAC,

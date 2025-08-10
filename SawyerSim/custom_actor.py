@@ -155,7 +155,29 @@ class Actor(BasePolicy):
                 image_observation: Tensor of shape (batch, height, width_total, channels)
             }
         """
-        out, mask, z = self.mvmae(obs["image_observation"])
+        # Ensure image is float32 and on correct device
+        img = obs["image_observation"]
+        if not isinstance(img, torch.Tensor):
+            img = torch.as_tensor(img, dtype=torch.float32, device=self.device)
+        else:
+            if img.dtype != torch.float32:
+                img = img.to(dtype=torch.float32)
+            if img.device != self.device:
+                img = img.to(self.device)
+        if img.max() > 1.0:  # normalize if in [0,255]
+            img = img / 255.0
+
+        # Ensure state observation is float32 and on correct device
+        state_obs = obs["state_observation"]
+        if not isinstance(state_obs, torch.Tensor):
+            state_obs = torch.as_tensor(state_obs, dtype=torch.float32, device=self.device)
+        else:
+            if state_obs.dtype != torch.float32:
+                state_obs = state_obs.to(dtype=torch.float32)
+            if state_obs.device != self.device:
+                state_obs = state_obs.to(self.device)
+        
+        out, mask, z = self.mvmae(img)
         # z is a Tensor of shape (batch, total_patches, embed_dim)
         
         # Run this to look at mvmae decoder output 
@@ -163,7 +185,7 @@ class Actor(BasePolicy):
         
         flatten = nn.Flatten()
         # OVERRIDE the feature extractor
-        return torch.cat([flatten(z), obs["state_observation"]], dim=1), out, obs["image_observation"], mask
+        return torch.cat([flatten(z), state_obs], dim=1), out, img, mask
         
     def get_action_dist_params(self, obs: PyTorchObs) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
@@ -194,6 +216,7 @@ class Actor(BasePolicy):
         mean_actions, log_std, kwargs = self.get_action_dist_params(obs)
         # return action and associated log prob
         return self.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
-
+    
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
-        return self(observation, deterministic)
+        obs_tensor, _ = self.obs_to_tensor(observation)
+        return self(obs_tensor, deterministic)
