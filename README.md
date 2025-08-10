@@ -39,3 +39,18 @@ python trainer_pipeline.py
    - Image size may be hardcoded in a few places for debugging purposes (currently being refactored).
 
 ---
+
+## Evaluate Model
+
+- Training logs are saved to `log.csv` and include:
+  - Actor loss
+  - MVMAE reconstruction loss
+  - Critic loss
+  - Reward
+
+- Visualize metrics in Colab:  
+  [Colab Visualization Notebook](https://colab.research.google.com/drive/16gPPI8HYgLcdplrTIn5KxCcgwm1OSq_e#scrollTo=Jysv5pMR-6PQ)
+
+**Usage:**
+1. Run the first cell to load the `log.csv` file.
+2. Run the second cell to plot the metrics.
