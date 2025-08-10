@@ -8,9 +8,8 @@ from SawyerSim.custom_sac_policy import SACPolicy
 import numpy as np
 import os
 
-
 env = SawyerReachEnvV3(render_mode="human") # or "human" for rendering
-model = SAC(SACPolicy, env, buffer_size=100, verbose=1, batch_size=16, learning_starts=10)
+model = SAC(SACPolicy, env, buffer_size=1_000_000, verbose=1, batch_size=128, learning_starts=50_000)
 model.begin_log_losses()
 model.learn(total_timesteps=1, log_interval=4, progress_bar=True)
 model.save("metaworld_sac_mvmae")
