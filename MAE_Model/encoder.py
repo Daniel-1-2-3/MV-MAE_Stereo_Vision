@@ -7,11 +7,11 @@ import random
 class ViTMaskedEncoder(nn.Module):
     def __init__(self, 
             nviews=2,
-            patch_size=8,
+            patch_size=6,
             embed_dim=768,
             in_channels=3,
-            img_h_size=128,
-            img_w_size=256, # Width of the fused image, with both views
+            img_h_size=84,
+            img_w_size=168, # Width of the fused image, with both views
             heads=16,
             depth=12
         ):
@@ -192,19 +192,3 @@ class ViTMaskedEncoder(nn.Module):
         # total_num_patches = num_patches * nviews
         
         return x # (batch, total_num_patches, embed_dim)
-     
-if __name__ == "__main__":
-    batch, height, width, nviews, in_channels = 32, 128, 128, 2, 3
-    patch_size = 8
-    embed_dim = 768
-    width_total = nviews * width
-    
-    accurate_num_patches = (height * width) / (patch_size ** 2) * nviews
-    print('Accurate num patches across both views', accurate_num_patches)
-    
-    x = torch.randn(batch, height, width_total, in_channels)
-    print("(batch, height, fused_width, in_channels)", x.shape)
-    
-    encoder = ViTMaskedEncoder(nviews=nviews, patch_size=patch_size, 
-        embed_dim=embed_dim, in_channels=in_channels)
-    x, mask = encoder.forward(x)

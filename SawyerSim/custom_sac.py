@@ -15,12 +15,10 @@ from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 from SawyerSim.custom_sac_policy import MultiInputPolicy, SACPolicy, Actor
 from SawyerSim.custom_critic import ContinuousCritic
 
-SelfSAC = TypeVar("SelfSAC", bound="SAC")
-
 # CAP the standard deviation of the actor
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
-class SAC(OffPolicyAlgorithm):
+class Custom_SAC(OffPolicyAlgorithm):
     """
     Soft Actor-Critic (SAC)
     Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
@@ -368,6 +366,7 @@ class SAC(OffPolicyAlgorithm):
         self.logger.record("train/ent_coef", np.mean(ent_coefs))
         self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
+        
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
             
@@ -381,14 +380,14 @@ class SAC(OffPolicyAlgorithm):
                                 round(np.mean(rewards), 3)]) 
 
     def learn(
-        self: SelfSAC,
+        self,
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 4,
         tb_log_name: str = "SAC",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfSAC:
+    ):
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,

@@ -17,8 +17,8 @@ class MAEModel(nn.Module):
             encoder_heads=16,
             decoder_heads=16,
             in_channels=3,
-            img_h_size=128,
-            img_w_size=128, 
+            img_h_size=84,
+            img_w_size=84, 
         ):
         super().__init__()
         self.nviews = nviews
@@ -33,8 +33,27 @@ class MAEModel(nn.Module):
         self.img_w_fused = self.nviews * self.img_w_size
         self.num_patches = int((self.img_h_size * self.img_w_size) // (patch_size ** 2) * nviews)
         
-        self.encoder = ViTMaskedEncoder(depth=4, embed_dim=self.encoder_embed_dim)
-        self.decoder = ViTMaskedDecoder(depth=2, encoder_embed_dim=self.encoder_embed_dim, decoder_embed_dim=self.decoder_embed_dim)
+        self.encoder = ViTMaskedEncoder(
+            nviews=self.nviews,
+            patch_size=self.patch_size,
+            embed_dim=self.encoder_embed_dim,
+            in_channels=self.in_channels,
+            img_h_size=self.img_h_size,
+            img_w_size=self.img_w_fused,
+            heads=self.encoder_heads,
+            depth=8
+        )
+        self.decoder = ViTMaskedDecoder(
+            nviews=self.nviews,
+            patch_size=self.patch_size,
+            encoder_embed_dim=self.encoder_embed_dim,
+            img_h_size=self.img_h_size,
+            img_w_size=self.img_w_size,
+            decoder_embed_dim=self.decoder_embed_dim,
+            in_channels=self.in_channels,
+            heads=self.decoder_heads,
+            depth=4
+        )
         self.out_proj = nn.Linear(decoder_embed_dim, self.patch_size ** 2 * in_channels)
     
     def forward(self, x: Tensor):

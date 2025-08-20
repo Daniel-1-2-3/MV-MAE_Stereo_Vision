@@ -11,13 +11,13 @@ Parameter Group 0:
   capturable: False
   differentiable: False
   fused: None
-    Param 0 - qf0.0.weight: shape=(256, 393238), requires_grad=True
+    Param 0 - qf0.0.weight: shape=(256, 153622), requires_grad=True
     Param 1 - qf0.0.bias: shape=(256,), requires_grad=True
     Param 2 - qf0.2.weight: shape=(256, 256), requires_grad=True
     Param 3 - qf0.2.bias: shape=(256,), requires_grad=True
     Param 4 - qf0.4.weight: shape=(1, 256), requires_grad=True
     Param 5 - qf0.4.bias: shape=(1,), requires_grad=True
-    Param 6 - qf1.0.weight: shape=(256, 393238), requires_grad=True
+    Param 6 - qf1.0.weight: shape=(256, 153622), requires_grad=True
     Param 7 - qf1.0.bias: shape=(256,), requires_grad=True
     Param 8 - qf1.2.weight: shape=(256, 256), requires_grad=True
     Param 9 - qf1.2.bias: shape=(256,), requires_grad=True

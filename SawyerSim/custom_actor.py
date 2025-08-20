@@ -58,6 +58,16 @@ class Actor(BasePolicy):
         use_expln: bool = False,
         clip_mean: float = 2.0,
         normalize_images: bool = True,
+    
+        nviews=2,
+        mvmae_patch_size=8, 
+        mvmae_encoder_embed_dim=768, 
+        mvmae_decoder_embed_dim=512,
+        mvmae_encoder_heads=16, 
+        mvmae_decoder_heads=16,
+        in_channels=3,
+        img_h_size=84,
+        img_w_size=84
     ):
         super().__init__(
             observation_space,
@@ -68,7 +78,17 @@ class Actor(BasePolicy):
         )
         
         # Initialize MVMAE, default params, small embed dims to save memory
-        self.mvmae = MAEModel(encoder_embed_dim=768, decoder_embed_dim=512)
+        self.mvmae = MAEModel(
+            nviews=nviews,
+            patch_size=mvmae_patch_size,
+            encoder_embed_dim=mvmae_encoder_embed_dim,
+            decoder_embed_dim=mvmae_decoder_embed_dim,
+            encoder_heads=mvmae_encoder_heads,
+            decoder_heads=mvmae_decoder_heads,
+            in_channels=in_channels,
+            img_h_size=img_h_size,
+            img_w_size=img_w_size
+        )
         
         # Save arguments to re-create object at loading
         self.use_sde = use_sde

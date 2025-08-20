@@ -49,8 +49,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         render_mode: RenderMode | None = None,
         camera_id: int | None = None,
         camera_pairs: list | None = None,
-        width: int = 480,
-        height: int = 480,
+        img_width: int = 84,
+        img_height: int = 84,
     ):
         self.action_scale = action_scale
         self.action_rot_scale = action_rot_scale
@@ -69,8 +69,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.current_seed: int | None = None
         self.obj_init_pos: npt.NDArray[Any] | None = None
 
-        self.width = width
-        self.height = height
+        self.width = img_width
+        self.height = img_height
         
         self._obs_obj_max_len = 14
         
@@ -80,8 +80,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             render_mode=render_mode,
             camera_name=None,
             camera_id=None,
-            width=width,
-            height=height,
+            width=img_width,
+            height=img_height,
         )
 
         mujoco.mj_forward(
@@ -359,10 +359,10 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             cv2.waitKey(1)
             
         left_tensor = torch.from_numpy(np.transpose(left_view, (2, 0, 1)).copy()).unsqueeze(0).float() / 255.0
-        left_tensor = F.interpolate(left_tensor, size=(128, 128), mode='bilinear', align_corners=False)
+        left_tensor = F.interpolate(left_tensor, size=(self.height, self.width), mode='bilinear', align_corners=False)
 
         right_tensor = torch.from_numpy(np.transpose(right_view, (2, 0, 1)).copy()).unsqueeze(0).float() / 255.0
-        right_tensor = F.interpolate(right_tensor, size=(128, 128), mode='bilinear', align_corners=False)
+        right_tensor = F.interpolate(right_tensor, size=(self.height, self.width), mode='bilinear', align_corners=False)
 
         stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor])
         return stereo_tensor
@@ -383,7 +383,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     def sawyer_observation_space(self) -> Dict:
         observation_space = Dict({
             "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float32),
-            "image_observation": Box(low=0, high=255, shape=(128, 256, 3), dtype=np.float32)
+            "image_observation": Box(low=0, high=255, shape=(self.height, 2 * self.width, 3), dtype=np.float32)
         })
         return observation_space
  

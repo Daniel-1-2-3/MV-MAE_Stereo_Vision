@@ -67,6 +67,16 @@ class SACPolicy(BasePolicy):
         optimizer_kwargs: Optional[dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = False,
+        
+        nviews=2,
+        mvmae_patch_size=8, 
+        mvmae_encoder_embed_dim=768, 
+        mvmae_decoder_embed_dim=512,
+        mvmae_encoder_heads=16, 
+        mvmae_decoder_heads=16,
+        in_channels=3,
+        img_h_size=84,
+        img_w_size=84
     ):
         super().__init__(
             observation_space,
@@ -78,6 +88,16 @@ class SACPolicy(BasePolicy):
             squash_output=True,
             normalize_images=normalize_images,
         )
+        
+        self.nviews = nviews
+        self.mvmae_patch_size = mvmae_patch_size
+        self.mvmae_encoder_embed_dim = mvmae_encoder_embed_dim
+        self.mvmae_decoder_embed_dim = mvmae_decoder_embed_dim
+        self.mvmae_encoder_heads = mvmae_encoder_heads
+        self.mvmae_decoder_heads = mvmae_decoder_heads
+        self.in_channels = in_channels
+        self.img_h_size = img_h_size
+        self.img_w_size = img_w_size
 
         if net_arch is None:
             net_arch = [256, 256]
@@ -178,7 +198,17 @@ class SACPolicy(BasePolicy):
 
     def make_actor(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> Actor:
         actor_kwargs = self._update_features_extractor(self.actor_kwargs, features_extractor)
-        return Actor(**actor_kwargs).to(self.device)
+        return Actor(**actor_kwargs,
+                    nviews = self.nviews,
+                    mvmae_patch_size = self.mvmae_patch_size,
+                    mvmae_encoder_embed_dim = self.mvmae_encoder_embed_dim,
+                    mvmae_decoder_embed_dim = self.mvmae_decoder_embed_dim,
+                    mvmae_encoder_heads = self.mvmae_encoder_heads,
+                    mvmae_decoder_heads = self.mvmae_decoder_heads,
+                    in_channels = self.in_channels,
+                    img_h_size = self.img_h_size,
+                    img_w_size = self.img_w_size,
+                ).to(self.device)
 
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)

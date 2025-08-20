@@ -21,8 +21,8 @@ class SawyerReachEnvV3(SawyerXYZEnv):
                                      ("stereo_left3", "stereo_right3")],  # Reference xyz_base for camera names
         camera_id: int | None = None,
         reward_function_version: str = "v2",
-        height: int = 480,
-        width: int = 480,
+        img_height: int = 84,
+        img_width: int = 84,
     ) -> None:
         goal_low = (-0.1, 0.8, 0.05)
         goal_high = (0.1, 0.9, 0.3)
@@ -38,8 +38,8 @@ class SawyerReachEnvV3(SawyerXYZEnv):
             render_mode=render_mode,
             camera_pairs=camera_pairs,
             camera_id=camera_id,
-            height=height,
-            width=width,
+            img_height=img_height,
+            img_width=img_width,
         )
         self.reward_function_version = reward_function_version
 
