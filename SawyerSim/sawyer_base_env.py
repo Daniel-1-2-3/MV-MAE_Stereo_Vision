@@ -18,9 +18,9 @@ from gymnasium.utils.ezpickle import EzPickle
 from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 from typing_extensions import TypeAlias
 
-from metaworld.types import XYZ, ObservationDict
-from metaworld.sawyer_xyz_env import SawyerMocapBase
-from metaworld.utils import reward_utils
+from CustomMetaworld.metaworld.types import XYZ, ObservationDict
+from CustomMetaworld.metaworld.sawyer_xyz_env import SawyerMocapBase
+from CustomMetaworld.metaworld.utils import reward_utils
 
 from MAE_Model.prepare_input import Prepare
 
@@ -35,7 +35,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         dtype=np.float64,
     )
     TARGET_RADIUS: float = 0.05 # Upper bound for distance from the target when checking for task completion
-    max_path_length: int = 500 # Maximum episode length (task horizon)
+    max_path_length: int = 50 # Maximum episode length (task horizon)
     
     def __init__(
         self,
@@ -350,12 +350,13 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             Returns a tensor of (batch, height, width_total, channels)
         """
         
-        left_view = np.flipud(self.stereo_renderer_left.render("rgb_array"))
-        right_view = np.flipud(self.stereo_renderer_right.render("rgb_array"))
+        left_view = cv2.cvtColor(cv2.flip(self.stereo_renderer_left.render("rgb_array"), 0), cv2.COLOR_RGB2BGR)
+        right_view = cv2.cvtColor(cv2.flip(self.stereo_renderer_right.render("rgb_array"), 0), cv2.COLOR_RGB2BGR)
         
         stereo_image = np.concatenate([left_view, right_view], axis=1)
         if self.render_mode == "human":
-            cv2.imshow("Stereo view", stereo_image)
+            enlarged = cv2.resize(stereo_image, None, fx=5.0, fy=5.0, interpolation=cv2.INTER_NEAREST)
+            cv2.imshow("Stereo view", enlarged)
             cv2.waitKey(1)
             
         left_tensor = torch.from_numpy(np.transpose(left_view, (2, 0, 1)).copy()).unsqueeze(0).float() / 255.0
@@ -507,8 +508,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         """
         self.curr_path_length = 0
         self.reset_camera_placement()
-        self.reset_model()
-        obs, info = super().reset()
+        obs = self.reset_model()
+        info = {}
         return obs, info
 
     def _reset_hand(self, steps: int = 50) -> None:
