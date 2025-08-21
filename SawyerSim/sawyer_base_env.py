@@ -95,7 +95,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.action_space = Box(
             np.array([-1, -1, -1, -1]),
             np.array([+1, +1, +1, +1]),
-            dtype=np.float32,
+            dtype=np.float64,
         )
         
         self.hand_init_pos: npt.NDArray[Any] | None = None  # OVERRIDE ME
@@ -337,7 +337,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             The flat observation array (39 elements)
         """
         state_obs = self._get_curr_obs_combined_no_goal()
-        state_obs = torch.from_numpy(state_obs.astype(np.float32)).unsqueeze(0)
+        state_obs = torch.from_numpy(state_obs.astype(np.float64)).unsqueeze(0)
         img_obs = self.render()
         obs = {
             "state_observation": state_obs,
@@ -383,13 +383,13 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     @cached_property
     def sawyer_observation_space(self) -> Dict:
         observation_space = Dict({
-            "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float32),
-            "image_observation": Box(low=0, high=255, shape=(self.height, 2 * self.width, 3), dtype=np.float32)
+            "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float64),
+            "image_observation": Box(low=0, high=255, shape=(self.height, 2 * self.width, 3), dtype=np.float64)
         })
         return observation_space
  
     def step(
-        self, action: npt.NDArray[np.float32]
+        self, action: npt.NDArray[np.float64]
     ) -> tuple[npt.NDArray[np.float64], SupportsFloat, bool, bool, dict[str, Any]]:
         """
         Args:
@@ -446,7 +446,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         return self._last_stable_obs, reward, False, truncate, info
 
     def evaluate_state(
-        self, obs: npt.NDArray[np.float64], action: npt.NDArray[np.float32]
+        self, obs: npt.NDArray[np.float64], action: npt.NDArray[np.float64]
     ) -> tuple[float, dict[str, Any]]:
         """Does the heavy-lifting for `step()` -- namely, calculating reward and populating the `info` dict with training metrics.
 
@@ -539,7 +539,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
 
     def _gripper_caging_reward(
         self,
-        action: npt.NDArray[np.float32],
+        action: npt.NDArray[np.float64],
         obj_pos: npt.NDArray[Any],
         obj_radius: float,
         pad_success_thresh: float,

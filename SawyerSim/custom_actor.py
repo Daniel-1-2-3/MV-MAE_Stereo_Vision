@@ -175,25 +175,25 @@ class Actor(BasePolicy):
                 image_observation: Tensor of shape (batch, height, width_total, channels)
             }
         """
-        # Ensure image is float32 and on correct device
+        # Ensure image is float64 and on correct device
         img = obs["image_observation"]
         if not isinstance(img, torch.Tensor):
-            img = torch.as_tensor(img, dtype=torch.float32, device=self.device)
+            img = torch.as_tensor(img, dtype=torch.float64, device=self.device)
         else:
-            if img.dtype != torch.float32:
-                img = img.to(dtype=torch.float32)
+            if img.dtype != torch.float64:
+                img = img.to(dtype=torch.float64)
             if img.device != self.device:
                 img = img.to(self.device)
         if img.max() > 1.0:  # normalize if in [0,255]
             img = img / 255.0
 
-        # Ensure state observation is float32 and on correct device
+        # Ensure state observation is float64 and on correct device
         state_obs = obs["state_observation"]
         if not isinstance(state_obs, torch.Tensor):
-            state_obs = torch.as_tensor(state_obs, dtype=torch.float32, device=self.device)
+            state_obs = torch.as_tensor(state_obs, dtype=torch.float64, device=self.device)
         else:
-            if state_obs.dtype != torch.float32:
-                state_obs = state_obs.to(dtype=torch.float32)
+            if state_obs.dtype != torch.float64:
+                state_obs = state_obs.to(dtype=torch.float64)
             if state_obs.device != self.device:
                 state_obs = state_obs.to(self.device)
         

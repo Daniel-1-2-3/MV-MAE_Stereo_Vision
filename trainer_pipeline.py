@@ -16,7 +16,6 @@ class PipelineTrainer():
         buffer_size: int = 1_000_000,
         learning_starts: int = 50_000,
         batch_size: int = 256,
-        tau: float = 0.005,
         gamma: float = 0.99,
         n_steps: int = 1, # Number of steps before update
         ent_coef = "auto",
@@ -48,7 +47,6 @@ class PipelineTrainer():
             buffer_size = buffer_size,
             learning_starts = learning_starts,
             batch_size = batch_size,
-            tau = tau,
             gamma = gamma,
             n_steps = n_steps,
             ent_coef = ent_coef,
@@ -93,7 +91,6 @@ def get_args():
     parser.add_argument("--buffer_size", type=int, default=1_000_000)
     parser.add_argument("--learning_starts", type=int, default=50_000)
     parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--n_steps", type=int, default=1,
                         help="Number of steps before update")
@@ -104,14 +101,14 @@ def get_args():
 
     # MV-MAE hyperparameters
     parser.add_argument("--nviews", type=int, default=2)
-    parser.add_argument("--mvmae_patch_size", type=int, default=8)
+    parser.add_argument("--mvmae_patch_size", type=int, default=6)
     parser.add_argument("--mvmae_encoder_embed_dim", type=int, default=768)
     parser.add_argument("--mvmae_decoder_embed_dim", type=int, default=512)
     parser.add_argument("--mvmae_encoder_heads", type=int, default=16)
     parser.add_argument("--mvmae_decoder_heads", type=int, default=16)
     parser.add_argument("--in_channels", type=int, default=3)
-    parser.add_argument("--img_h_size", type=int, default=80)
-    parser.add_argument("--img_w_size", type=int, default=80)
+    parser.add_argument("--img_h_size", type=int, default=84)
+    parser.add_argument("--img_w_size", type=int, default=84)
     
     parser.add_argument("--total_timesteps", type=int, default=5_000_000)
     parser.add_argument("--episode_horizon", type=int, default=300)
@@ -120,6 +117,10 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
+    
+    warn_msg = "Image should have dimensions so that it is divisible, without remainder, into patches. Change either the image dims or patch size."
+    assert (args.img_h_size * args.img_w_size) % args.mvmae_patch_size == 0, warn_msg
+    
     trainer = PipelineTrainer(**vars(args))
     trainer.train()
     trainer.eval()

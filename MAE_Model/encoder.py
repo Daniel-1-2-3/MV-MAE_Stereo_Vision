@@ -144,22 +144,39 @@ class ViTMaskedEncoder(nn.Module):
         return x # (batch, total_num_patches, embed_dim)
     
     def construct_conv_layers(self):
-        # Conv layers
         layers = []
         in_channels = self.in_channels
-        nconvs = int(np.log2(self.patch_size)) 
-        for i in range(nconvs):
-            out_channels = self.embed_dim // (2 ** (nconvs - i + 1)) # The input channels of the next layer
-            layers.append(nn.Conv2d( # In and out channels are dim 1
-                in_channels=in_channels, out_channels=out_channels, kernel_size=4, stride=2, padding=1 # Output dims are halved 
+
+        # Instead of requiring patch_size to be a power of 2, compute stride factors that multiply to patch_size
+        stride_factors = []
+        while n > 1:
+            if n % 2 == 0:
+                stride_factors.append(2)
+                n //= 2
+            else:
+                stride_factors.append(n)
+                break
+
+        for i, s in enumerate(stride_factors):
+            out_channels = max(self.embed_dim // (2 ** (len(stride_factors) - i)), 32)  
+            layers.append(nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=max(3, s),
+                stride=s,
+                padding=max(3, s) // 2
             ))
+            layers.append(nn.ReLU())
             in_channels = out_channels
-        layers.append(nn.ReLU())
-        
+
+        # Final projection to embed_dim
         layers.append(nn.Conv2d(
-            in_channels=in_channels, out_channels=self.embed_dim, kernel_size=1, stride=1
-        )) # Final projection
-        
+            in_channels=in_channels,
+            out_channels=self.embed_dim,
+            kernel_size=1,
+            stride=1
+        ))
+
         forward_conv = nn.Sequential(*layers)
         return forward_conv
         

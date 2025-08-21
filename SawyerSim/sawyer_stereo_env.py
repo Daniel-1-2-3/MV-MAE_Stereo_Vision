@@ -68,7 +68,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
         return full_V3_path_for("sawyer_xyz/sawyer_reach_v3.xml")
 
     def evaluate_state(
-        self, obs: npt.NDArray[np.float64], action: npt.NDArray[np.float32]
+        self, obs: npt.NDArray[np.float64], action: npt.NDArray[np.float64]
     ) -> tuple[float, dict[str, Any]]:
         reward, reach_dist, in_place = self.compute_reward(action, obs["state_observation"])
         success = float(reach_dist <= 0.05)
