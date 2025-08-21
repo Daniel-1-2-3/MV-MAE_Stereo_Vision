@@ -10,15 +10,15 @@ import matplotlib.pyplot as plt
 
 class MAEModel(nn.Module):
     def __init__(self, 
-            nviews=2,
-            patch_size=8,
-            encoder_embed_dim=768,
-            decoder_embed_dim=512,
-            encoder_heads=16,
-            decoder_heads=16,
-            in_channels=3,
-            img_h_size=84,
-            img_w_size=84, 
+            nviews: int = 2,
+            patch_size: int = 6,
+            encoder_embed_dim: int = 768,
+            decoder_embed_dim: int = 512,
+            encoder_heads: int = 16,
+            decoder_heads: int = 16,
+            in_channels: int = 3,
+            img_h_size: int = 84,
+            img_w_size: int = 84, 
         ):
         super().__init__()
         self.nviews = nviews

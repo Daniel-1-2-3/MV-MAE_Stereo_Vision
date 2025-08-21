@@ -68,15 +68,15 @@ class SACPolicy(BasePolicy):
         n_critics: int = 2,
         share_features_extractor: bool = False,
         
-        nviews=2,
-        mvmae_patch_size=8, 
-        mvmae_encoder_embed_dim=768, 
-        mvmae_decoder_embed_dim=512,
-        mvmae_encoder_heads=16, 
-        mvmae_decoder_heads=16,
-        in_channels=3,
-        img_h_size=84,
-        img_w_size=84
+        nviews: int = 2,
+        mvmae_patch_size: int = 6, 
+        mvmae_encoder_embed_dim: int = 768, 
+        mvmae_decoder_embed_dim: int = 512,
+        mvmae_encoder_heads: int = 16, 
+        mvmae_decoder_heads: int = 16,
+        in_channels: int = 3,
+        img_h_size: int = 84,
+        img_w_size: int = 84
     ):
         super().__init__(
             observation_space,

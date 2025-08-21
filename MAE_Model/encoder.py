@@ -6,14 +6,14 @@ from MAE_Model.vit import VitBlock
 import random
 class ViTMaskedEncoder(nn.Module):
     def __init__(self, 
-            nviews=2,
-            patch_size=6,
-            embed_dim=768,
-            in_channels=3,
-            img_h_size=84,
-            img_w_size=168, # Width of the fused image, with both views
-            heads=16,
-            depth=12
+            nviews: int = 2,
+            patch_size: int = 6,
+            embed_dim: int = 768,
+            in_channels: int = 3,
+            img_h_size: int = 84,
+            img_w_size: int = 168, # Width of the fused image, with both views
+            heads: int = 16,
+            depth: int = 12
         ):
         
         super().__init__()

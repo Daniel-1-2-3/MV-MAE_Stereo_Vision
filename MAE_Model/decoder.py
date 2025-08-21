@@ -4,15 +4,15 @@ from MAE_Model.vit import VitBlock
 
 class ViTMaskedDecoder(nn.Module):
     def __init__(self,
-            nviews=2,
-            patch_size=8,
-            encoder_embed_dim=768,
-            img_h_size=128,
-            img_w_size=128,
-            decoder_embed_dim=512,
-            in_channels=3,
-            heads=16,
-            depth=8
+            nviews: int = 2,
+            patch_size: int = 6,
+            encoder_embed_dim: int = 768,
+            img_h_size: int = 84,
+            img_w_size: int = 84,
+            decoder_embed_dim: int = 512,
+            in_channels: int = 3,
+            heads: int = 16,
+            depth: int = 8
         ):
         
         super().__init__()
