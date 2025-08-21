@@ -31,12 +31,14 @@ class PipelineTrainer():
         in_channels: int = 3,
         img_h_size: int = 80,
         img_w_size: int = 80,
-        total_timesteps: int = 5_000_000
+        total_timesteps: int = 5_000_000,
+        episode_horizon: int = 300,
     ):
         self.env = SawyerReachEnvV3(
             render_mode = render_mode,
             img_width = img_w_size,
-            img_height = img_h_size
+            img_height = img_h_size,
+            max_path_length = episode_horizon
         )
 
         self.model = Custom_SAC(
@@ -112,6 +114,7 @@ def get_args():
     parser.add_argument("--img_w_size", type=int, default=80)
     
     parser.add_argument("--total_timesteps", type=int, default=5_000_000)
+    parser.add_argument("--episode_horizon", type=int, default=300)
 
     return parser.parse_args()
 

@@ -23,6 +23,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
         reward_function_version: str = "v2",
         img_height: int = 84,
         img_width: int = 84,
+        max_path_length: int = 300
     ) -> None:
         goal_low = (-0.1, 0.8, 0.05)
         goal_high = (0.1, 0.9, 0.3)
@@ -31,6 +32,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
         obj_low = (-0.1, 0.6, 0.02)
         obj_high = (0.1, 0.7, 0.02)
         self.goal_space = Box(np.array(goal_low), np.array(goal_high), dtype=np.float64)
+        self.max_path_length = max_path_length
 
         super().__init__(
             hand_low=hand_low,

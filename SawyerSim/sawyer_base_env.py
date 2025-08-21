@@ -35,7 +35,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         dtype=np.float64,
     )
     TARGET_RADIUS: float = 0.05 # Upper bound for distance from the target when checking for task completion
-    max_path_length: int = 50 # Maximum episode length (task horizon)
+    max_path_length: int = 500 # Maximum episode length (task horizon)
     
     def __init__(
         self,
