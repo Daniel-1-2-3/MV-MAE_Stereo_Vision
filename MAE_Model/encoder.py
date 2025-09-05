@@ -149,6 +149,8 @@ class ViTMaskedEncoder(nn.Module):
 
         # Instead of requiring patch_size to be a power of 2, compute stride factors that multiply to patch_size
         stride_factors = []
+        
+        n = self.patch_size
         while n > 1:
             if n % 2 == 0:
                 stride_factors.append(2)

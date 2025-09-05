@@ -11,175 +11,173 @@ Parameter Group 0:
   capturable: False
   differentiable: False
   fused: None
-    Param 0 - mvmae.encoder.forward_conv.0.weight: shape=(48, 3, 4, 4), requires_grad=True
-    Param 1 - mvmae.encoder.forward_conv.0.bias: shape=(48,), requires_grad=True
-    Param 2 - mvmae.encoder.forward_conv.1.weight: shape=(96, 48, 4, 4), requires_grad=True
-    Param 3 - mvmae.encoder.forward_conv.1.bias: shape=(96,), requires_grad=True
-    Param 4 - mvmae.encoder.forward_conv.2.weight: shape=(192, 96, 4, 4), requires_grad=True
-    Param 5 - mvmae.encoder.forward_conv.2.bias: shape=(192,), requires_grad=True
-    Param 6 - mvmae.encoder.forward_conv.4.weight: shape=(768, 192, 1, 1), requires_grad=True
-    Param 7 - mvmae.encoder.forward_conv.4.bias: shape=(768,), requires_grad=True
-    Param 8 - mvmae.encoder.vit_blocks.0.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
-    Param 9 - mvmae.encoder.vit_blocks.0.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
-    Param 10 - mvmae.encoder.vit_blocks.0.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
-    Param 11 - mvmae.encoder.vit_blocks.0.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
-    Param 12 - mvmae.encoder.vit_blocks.0.mlp.0.weight: shape=(3072, 768), requires_grad=True
-    Param 13 - mvmae.encoder.vit_blocks.0.mlp.0.bias: shape=(3072,), requires_grad=True
-    Param 14 - mvmae.encoder.vit_blocks.0.mlp.3.weight: shape=(768, 3072), requires_grad=True
-    Param 15 - mvmae.encoder.vit_blocks.0.mlp.3.bias: shape=(768,), requires_grad=True
-    Param 16 - mvmae.encoder.vit_blocks.0.norm_before_attn.weight: shape=(768,), requires_grad=True
-    Param 17 - mvmae.encoder.vit_blocks.0.norm_before_attn.bias: shape=(768,), requires_grad=True
-    Param 18 - mvmae.encoder.vit_blocks.0.norm_before_mlp.weight: shape=(768,), requires_grad=True
-    Param 19 - mvmae.encoder.vit_blocks.0.norm_before_mlp.bias: shape=(768,), requires_grad=True
-    Param 20 - mvmae.encoder.vit_blocks.1.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
-    Param 21 - mvmae.encoder.vit_blocks.1.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
-    Param 22 - mvmae.encoder.vit_blocks.1.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
-    Param 23 - mvmae.encoder.vit_blocks.1.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
-    Param 24 - mvmae.encoder.vit_blocks.1.mlp.0.weight: shape=(3072, 768), requires_grad=True
-    Param 25 - mvmae.encoder.vit_blocks.1.mlp.0.bias: shape=(3072,), requires_grad=True
-    Param 26 - mvmae.encoder.vit_blocks.1.mlp.3.weight: shape=(768, 3072), requires_grad=True
-    Param 27 - mvmae.encoder.vit_blocks.1.mlp.3.bias: shape=(768,), requires_grad=True
-    Param 28 - mvmae.encoder.vit_blocks.1.norm_before_attn.weight: shape=(768,), requires_grad=True
-    Param 29 - mvmae.encoder.vit_blocks.1.norm_before_attn.bias: shape=(768,), requires_grad=True
-    Param 30 - mvmae.encoder.vit_blocks.1.norm_before_mlp.weight: shape=(768,), requires_grad=True
-    Param 31 - mvmae.encoder.vit_blocks.1.norm_before_mlp.bias: shape=(768,), requires_grad=True
-    Param 32 - mvmae.encoder.vit_blocks.2.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
-    Param 33 - mvmae.encoder.vit_blocks.2.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
-    Param 34 - mvmae.encoder.vit_blocks.2.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
-    Param 35 - mvmae.encoder.vit_blocks.2.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
-    Param 36 - mvmae.encoder.vit_blocks.2.mlp.0.weight: shape=(3072, 768), requires_grad=True
-    Param 37 - mvmae.encoder.vit_blocks.2.mlp.0.bias: shape=(3072,), requires_grad=True
-    Param 38 - mvmae.encoder.vit_blocks.2.mlp.3.weight: shape=(768, 3072), requires_grad=True
-    Param 39 - mvmae.encoder.vit_blocks.2.mlp.3.bias: shape=(768,), requires_grad=True
-    Param 40 - mvmae.encoder.vit_blocks.2.norm_before_attn.weight: shape=(768,), requires_grad=True
-    Param 41 - mvmae.encoder.vit_blocks.2.norm_before_attn.bias: shape=(768,), requires_grad=True
-    Param 42 - mvmae.encoder.vit_blocks.2.norm_before_mlp.weight: shape=(768,), requires_grad=True
-    Param 43 - mvmae.encoder.vit_blocks.2.norm_before_mlp.bias: shape=(768,), requires_grad=True
-    Param 44 - mvmae.encoder.vit_blocks.3.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
-    Param 45 - mvmae.encoder.vit_blocks.3.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
-    Param 46 - mvmae.encoder.vit_blocks.3.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
-    Param 47 - mvmae.encoder.vit_blocks.3.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
-    Param 48 - mvmae.encoder.vit_blocks.3.mlp.0.weight: shape=(3072, 768), requires_grad=True
-    Param 49 - mvmae.encoder.vit_blocks.3.mlp.0.bias: shape=(3072,), requires_grad=True
-    Param 50 - mvmae.encoder.vit_blocks.3.mlp.3.weight: shape=(768, 3072), requires_grad=True
-    Param 51 - mvmae.encoder.vit_blocks.3.mlp.3.bias: shape=(768,), requires_grad=True
-    Param 52 - mvmae.encoder.vit_blocks.3.norm_before_attn.weight: shape=(768,), requires_grad=True
-    Param 53 - mvmae.encoder.vit_blocks.3.norm_before_attn.bias: shape=(768,), requires_grad=True
-    Param 54 - mvmae.encoder.vit_blocks.3.norm_before_mlp.weight: shape=(768,), requires_grad=True
-    Param 55 - mvmae.encoder.vit_blocks.3.norm_before_mlp.bias: shape=(768,), requires_grad=True
-    Param 56 - mvmae.encoder.vit_blocks.4.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
-    Param 57 - mvmae.encoder.vit_blocks.4.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
-    Param 58 - mvmae.encoder.vit_blocks.4.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
-    Param 59 - mvmae.encoder.vit_blocks.4.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
-    Param 60 - mvmae.encoder.vit_blocks.4.mlp.0.weight: shape=(3072, 768), requires_grad=True
-    Param 61 - mvmae.encoder.vit_blocks.4.mlp.0.bias: shape=(3072,), requires_grad=True
-    Param 62 - mvmae.encoder.vit_blocks.4.mlp.3.weight: shape=(768, 3072), requires_grad=True
-    Param 63 - mvmae.encoder.vit_blocks.4.mlp.3.bias: shape=(768,), requires_grad=True
-    Param 64 - mvmae.encoder.vit_blocks.4.norm_before_attn.weight: shape=(768,), requires_grad=True
-    Param 65 - mvmae.encoder.vit_blocks.4.norm_before_attn.bias: shape=(768,), requires_grad=True
-    Param 66 - mvmae.encoder.vit_blocks.4.norm_before_mlp.weight: shape=(768,), requires_grad=True
-    Param 67 - mvmae.encoder.vit_blocks.4.norm_before_mlp.bias: shape=(768,), requires_grad=True
-    Param 68 - mvmae.encoder.vit_blocks.5.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
-    Param 69 - mvmae.encoder.vit_blocks.5.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
-    Param 70 - mvmae.encoder.vit_blocks.5.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
-    Param 71 - mvmae.encoder.vit_blocks.5.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
-    Param 72 - mvmae.encoder.vit_blocks.5.mlp.0.weight: shape=(3072, 768), requires_grad=True
-    Param 73 - mvmae.encoder.vit_blocks.5.mlp.0.bias: shape=(3072,), requires_grad=True
-    Param 74 - mvmae.encoder.vit_blocks.5.mlp.3.weight: shape=(768, 3072), requires_grad=True
-    Param 75 - mvmae.encoder.vit_blocks.5.mlp.3.bias: shape=(768,), requires_grad=True
-    Param 76 - mvmae.encoder.vit_blocks.5.norm_before_attn.weight: shape=(768,), requires_grad=True
-    Param 77 - mvmae.encoder.vit_blocks.5.norm_before_attn.bias: shape=(768,), requires_grad=True
-    Param 78 - mvmae.encoder.vit_blocks.5.norm_before_mlp.weight: shape=(768,), requires_grad=True
-    Param 79 - mvmae.encoder.vit_blocks.5.norm_before_mlp.bias: shape=(768,), requires_grad=True
-    Param 80 - mvmae.encoder.vit_blocks.6.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
-    Param 81 - mvmae.encoder.vit_blocks.6.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
-    Param 82 - mvmae.encoder.vit_blocks.6.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
-    Param 83 - mvmae.encoder.vit_blocks.6.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
-    Param 84 - mvmae.encoder.vit_blocks.6.mlp.0.weight: shape=(3072, 768), requires_grad=True
-    Param 85 - mvmae.encoder.vit_blocks.6.mlp.0.bias: shape=(3072,), requires_grad=True
-    Param 86 - mvmae.encoder.vit_blocks.6.mlp.3.weight: shape=(768, 3072), requires_grad=True
-    Param 87 - mvmae.encoder.vit_blocks.6.mlp.3.bias: shape=(768,), requires_grad=True
-    Param 88 - mvmae.encoder.vit_blocks.6.norm_before_attn.weight: shape=(768,), requires_grad=True
-    Param 89 - mvmae.encoder.vit_blocks.6.norm_before_attn.bias: shape=(768,), requires_grad=True
-    Param 90 - mvmae.encoder.vit_blocks.6.norm_before_mlp.weight: shape=(768,), requires_grad=True
-    Param 91 - mvmae.encoder.vit_blocks.6.norm_before_mlp.bias: shape=(768,), requires_grad=True
-    Param 92 - mvmae.encoder.vit_blocks.7.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
-    Param 93 - mvmae.encoder.vit_blocks.7.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
-    Param 94 - mvmae.encoder.vit_blocks.7.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
-    Param 95 - mvmae.encoder.vit_blocks.7.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
-    Param 96 - mvmae.encoder.vit_blocks.7.mlp.0.weight: shape=(3072, 768), requires_grad=True
-    Param 97 - mvmae.encoder.vit_blocks.7.mlp.0.bias: shape=(3072,), requires_grad=True
-    Param 98 - mvmae.encoder.vit_blocks.7.mlp.3.weight: shape=(768, 3072), requires_grad=True
-    Param 99 - mvmae.encoder.vit_blocks.7.mlp.3.bias: shape=(768,), requires_grad=True
-    Param 100 - mvmae.encoder.vit_blocks.7.norm_before_attn.weight: shape=(768,), requires_grad=True
-    Param 101 - mvmae.encoder.vit_blocks.7.norm_before_attn.bias: shape=(768,), requires_grad=True
-    Param 102 - mvmae.encoder.vit_blocks.7.norm_before_mlp.weight: shape=(768,), requires_grad=True
-    Param 103 - mvmae.encoder.vit_blocks.7.norm_before_mlp.bias: shape=(768,), requires_grad=True
-    Param 104 - mvmae.encoder.norm_masked.weight: shape=(768,), requires_grad=True
-    Param 105 - mvmae.encoder.norm_masked.bias: shape=(768,), requires_grad=True
-    Param 106 - mvmae.encoder.norm_unmasked.weight: shape=(768,), requires_grad=True
-    Param 107 - mvmae.encoder.norm_unmasked.bias: shape=(768,), requires_grad=True
-    Param 108 - mvmae.decoder.mask_tokens: shape=(1, 1, 512), requires_grad=True
-    Param 109 - mvmae.decoder.pos_embeds: shape=(1, 220, 512), requires_grad=True
-    Param 110 - mvmae.decoder.proj.weight: shape=(512, 768), requires_grad=True
-    Param 111 - mvmae.decoder.proj.bias: shape=(512,), requires_grad=True
-    Param 112 - mvmae.decoder.vit_blocks.0.multi_head_self_attn.in_proj_weight: shape=(1536, 512), requires_grad=True
-    Param 113 - mvmae.decoder.vit_blocks.0.multi_head_self_attn.in_proj_bias: shape=(1536,), requires_grad=True
-    Param 114 - mvmae.decoder.vit_blocks.0.multi_head_self_attn.out_proj.weight: shape=(512, 512), requires_grad=True
-    Param 115 - mvmae.decoder.vit_blocks.0.multi_head_self_attn.out_proj.bias: shape=(512,), requires_grad=True
-    Param 116 - mvmae.decoder.vit_blocks.0.mlp.0.weight: shape=(2048, 512), requires_grad=True
-    Param 117 - mvmae.decoder.vit_blocks.0.mlp.0.bias: shape=(2048,), requires_grad=True
-    Param 118 - mvmae.decoder.vit_blocks.0.mlp.3.weight: shape=(512, 2048), requires_grad=True
-    Param 119 - mvmae.decoder.vit_blocks.0.mlp.3.bias: shape=(512,), requires_grad=True
-    Param 120 - mvmae.decoder.vit_blocks.0.norm_before_attn.weight: shape=(512,), requires_grad=True
-    Param 121 - mvmae.decoder.vit_blocks.0.norm_before_attn.bias: shape=(512,), requires_grad=True
-    Param 122 - mvmae.decoder.vit_blocks.0.norm_before_mlp.weight: shape=(512,), requires_grad=True
-    Param 123 - mvmae.decoder.vit_blocks.0.norm_before_mlp.bias: shape=(512,), requires_grad=True
-    Param 124 - mvmae.decoder.vit_blocks.1.multi_head_self_attn.in_proj_weight: shape=(1536, 512), requires_grad=True
-    Param 125 - mvmae.decoder.vit_blocks.1.multi_head_self_attn.in_proj_bias: shape=(1536,), requires_grad=True
-    Param 126 - mvmae.decoder.vit_blocks.1.multi_head_self_attn.out_proj.weight: shape=(512, 512), requires_grad=True
-    Param 127 - mvmae.decoder.vit_blocks.1.multi_head_self_attn.out_proj.bias: shape=(512,), requires_grad=True
-    Param 128 - mvmae.decoder.vit_blocks.1.mlp.0.weight: shape=(2048, 512), requires_grad=True
-    Param 129 - mvmae.decoder.vit_blocks.1.mlp.0.bias: shape=(2048,), requires_grad=True
-    Param 130 - mvmae.decoder.vit_blocks.1.mlp.3.weight: shape=(512, 2048), requires_grad=True
-    Param 131 - mvmae.decoder.vit_blocks.1.mlp.3.bias: shape=(512,), requires_grad=True
-    Param 132 - mvmae.decoder.vit_blocks.1.norm_before_attn.weight: shape=(512,), requires_grad=True
-    Param 133 - mvmae.decoder.vit_blocks.1.norm_before_attn.bias: shape=(512,), requires_grad=True
-    Param 134 - mvmae.decoder.vit_blocks.1.norm_before_mlp.weight: shape=(512,), requires_grad=True
-    Param 135 - mvmae.decoder.vit_blocks.1.norm_before_mlp.bias: shape=(512,), requires_grad=True
-    Param 136 - mvmae.decoder.vit_blocks.2.multi_head_self_attn.in_proj_weight: shape=(1536, 512), requires_grad=True
-    Param 137 - mvmae.decoder.vit_blocks.2.multi_head_self_attn.in_proj_bias: shape=(1536,), requires_grad=True
-    Param 138 - mvmae.decoder.vit_blocks.2.multi_head_self_attn.out_proj.weight: shape=(512, 512), requires_grad=True
-    Param 139 - mvmae.decoder.vit_blocks.2.multi_head_self_attn.out_proj.bias: shape=(512,), requires_grad=True
-    Param 140 - mvmae.decoder.vit_blocks.2.mlp.0.weight: shape=(2048, 512), requires_grad=True
-    Param 141 - mvmae.decoder.vit_blocks.2.mlp.0.bias: shape=(2048,), requires_grad=True
-    Param 142 - mvmae.decoder.vit_blocks.2.mlp.3.weight: shape=(512, 2048), requires_grad=True
-    Param 143 - mvmae.decoder.vit_blocks.2.mlp.3.bias: shape=(512,), requires_grad=True
-    Param 144 - mvmae.decoder.vit_blocks.2.norm_before_attn.weight: shape=(512,), requires_grad=True
-    Param 145 - mvmae.decoder.vit_blocks.2.norm_before_attn.bias: shape=(512,), requires_grad=True
-    Param 146 - mvmae.decoder.vit_blocks.2.norm_before_mlp.weight: shape=(512,), requires_grad=True
-    Param 147 - mvmae.decoder.vit_blocks.2.norm_before_mlp.bias: shape=(512,), requires_grad=True
-    Param 148 - mvmae.decoder.vit_blocks.3.multi_head_self_attn.in_proj_weight: shape=(1536, 512), requires_grad=True
-    Param 149 - mvmae.decoder.vit_blocks.3.multi_head_self_attn.in_proj_bias: shape=(1536,), requires_grad=True
-    Param 150 - mvmae.decoder.vit_blocks.3.multi_head_self_attn.out_proj.weight: shape=(512, 512), requires_grad=True
-    Param 151 - mvmae.decoder.vit_blocks.3.multi_head_self_attn.out_proj.bias: shape=(512,), requires_grad=True
-    Param 152 - mvmae.decoder.vit_blocks.3.mlp.0.weight: shape=(2048, 512), requires_grad=True
-    Param 153 - mvmae.decoder.vit_blocks.3.mlp.0.bias: shape=(2048,), requires_grad=True
-    Param 154 - mvmae.decoder.vit_blocks.3.mlp.3.weight: shape=(512, 2048), requires_grad=True
-    Param 155 - mvmae.decoder.vit_blocks.3.mlp.3.bias: shape=(512,), requires_grad=True
-    Param 156 - mvmae.decoder.vit_blocks.3.norm_before_attn.weight: shape=(512,), requires_grad=True
-    Param 157 - mvmae.decoder.vit_blocks.3.norm_before_attn.bias: shape=(512,), requires_grad=True
-    Param 158 - mvmae.decoder.vit_blocks.3.norm_before_mlp.weight: shape=(512,), requires_grad=True
-    Param 159 - mvmae.decoder.vit_blocks.3.norm_before_mlp.bias: shape=(512,), requires_grad=True
-    Param 160 - mvmae.decoder.norm.weight: shape=(512,), requires_grad=True
-    Param 161 - mvmae.decoder.norm.bias: shape=(512,), requires_grad=True
-    Param 162 - mvmae.out_proj.weight: shape=(192, 512), requires_grad=True
-    Param 163 - mvmae.out_proj.bias: shape=(192,), requires_grad=True
-    Param 164 - latent_pi.0.weight: shape=(256, 168978), requires_grad=True
-    Param 165 - latent_pi.0.bias: shape=(256,), requires_grad=True
-    Param 166 - latent_pi.2.weight: shape=(256, 256), requires_grad=True
-    Param 167 - latent_pi.2.bias: shape=(256,), requires_grad=True
-    Param 168 - mu.weight: shape=(4, 256), requires_grad=True
-    Param 169 - mu.bias: shape=(4,), requires_grad=True
-    Param 170 - log_std.weight: shape=(4, 256), requires_grad=True
-    Param 171 - log_std.bias: shape=(4,), requires_grad=True
+    Param 0 - mvmae.encoder.forward_conv.0.weight: shape=(192, 3, 3, 3), requires_grad=True
+    Param 1 - mvmae.encoder.forward_conv.0.bias: shape=(192,), requires_grad=True
+    Param 2 - mvmae.encoder.forward_conv.2.weight: shape=(384, 192, 3, 3), requires_grad=True
+    Param 3 - mvmae.encoder.forward_conv.2.bias: shape=(384,), requires_grad=True
+    Param 4 - mvmae.encoder.forward_conv.4.weight: shape=(768, 384, 1, 1), requires_grad=True
+    Param 5 - mvmae.encoder.forward_conv.4.bias: shape=(768,), requires_grad=True
+    Param 6 - mvmae.encoder.vit_blocks.0.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
+    Param 7 - mvmae.encoder.vit_blocks.0.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
+    Param 8 - mvmae.encoder.vit_blocks.0.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
+    Param 9 - mvmae.encoder.vit_blocks.0.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
+    Param 10 - mvmae.encoder.vit_blocks.0.mlp.0.weight: shape=(3072, 768), requires_grad=True
+    Param 11 - mvmae.encoder.vit_blocks.0.mlp.0.bias: shape=(3072,), requires_grad=True
+    Param 12 - mvmae.encoder.vit_blocks.0.mlp.3.weight: shape=(768, 3072), requires_grad=True
+    Param 13 - mvmae.encoder.vit_blocks.0.mlp.3.bias: shape=(768,), requires_grad=True
+    Param 14 - mvmae.encoder.vit_blocks.0.norm_before_attn.weight: shape=(768,), requires_grad=True
+    Param 15 - mvmae.encoder.vit_blocks.0.norm_before_attn.bias: shape=(768,), requires_grad=True
+    Param 16 - mvmae.encoder.vit_blocks.0.norm_before_mlp.weight: shape=(768,), requires_grad=True
+    Param 17 - mvmae.encoder.vit_blocks.0.norm_before_mlp.bias: shape=(768,), requires_grad=True
+    Param 18 - mvmae.encoder.vit_blocks.1.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
+    Param 19 - mvmae.encoder.vit_blocks.1.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
+    Param 20 - mvmae.encoder.vit_blocks.1.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
+    Param 21 - mvmae.encoder.vit_blocks.1.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
+    Param 22 - mvmae.encoder.vit_blocks.1.mlp.0.weight: shape=(3072, 768), requires_grad=True
+    Param 23 - mvmae.encoder.vit_blocks.1.mlp.0.bias: shape=(3072,), requires_grad=True
+    Param 24 - mvmae.encoder.vit_blocks.1.mlp.3.weight: shape=(768, 3072), requires_grad=True
+    Param 25 - mvmae.encoder.vit_blocks.1.mlp.3.bias: shape=(768,), requires_grad=True
+    Param 26 - mvmae.encoder.vit_blocks.1.norm_before_attn.weight: shape=(768,), requires_grad=True
+    Param 27 - mvmae.encoder.vit_blocks.1.norm_before_attn.bias: shape=(768,), requires_grad=True
+    Param 28 - mvmae.encoder.vit_blocks.1.norm_before_mlp.weight: shape=(768,), requires_grad=True
+    Param 29 - mvmae.encoder.vit_blocks.1.norm_before_mlp.bias: shape=(768,), requires_grad=True
+    Param 30 - mvmae.encoder.vit_blocks.2.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
+    Param 31 - mvmae.encoder.vit_blocks.2.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
+    Param 32 - mvmae.encoder.vit_blocks.2.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
+    Param 33 - mvmae.encoder.vit_blocks.2.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
+    Param 34 - mvmae.encoder.vit_blocks.2.mlp.0.weight: shape=(3072, 768), requires_grad=True
+    Param 35 - mvmae.encoder.vit_blocks.2.mlp.0.bias: shape=(3072,), requires_grad=True
+    Param 36 - mvmae.encoder.vit_blocks.2.mlp.3.weight: shape=(768, 3072), requires_grad=True
+    Param 37 - mvmae.encoder.vit_blocks.2.mlp.3.bias: shape=(768,), requires_grad=True
+    Param 38 - mvmae.encoder.vit_blocks.2.norm_before_attn.weight: shape=(768,), requires_grad=True
+    Param 39 - mvmae.encoder.vit_blocks.2.norm_before_attn.bias: shape=(768,), requires_grad=True
+    Param 40 - mvmae.encoder.vit_blocks.2.norm_before_mlp.weight: shape=(768,), requires_grad=True
+    Param 41 - mvmae.encoder.vit_blocks.2.norm_before_mlp.bias: shape=(768,), requires_grad=True
+    Param 42 - mvmae.encoder.vit_blocks.3.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
+    Param 43 - mvmae.encoder.vit_blocks.3.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
+    Param 44 - mvmae.encoder.vit_blocks.3.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
+    Param 45 - mvmae.encoder.vit_blocks.3.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
+    Param 46 - mvmae.encoder.vit_blocks.3.mlp.0.weight: shape=(3072, 768), requires_grad=True
+    Param 47 - mvmae.encoder.vit_blocks.3.mlp.0.bias: shape=(3072,), requires_grad=True
+    Param 48 - mvmae.encoder.vit_blocks.3.mlp.3.weight: shape=(768, 3072), requires_grad=True
+    Param 49 - mvmae.encoder.vit_blocks.3.mlp.3.bias: shape=(768,), requires_grad=True
+    Param 50 - mvmae.encoder.vit_blocks.3.norm_before_attn.weight: shape=(768,), requires_grad=True
+    Param 51 - mvmae.encoder.vit_blocks.3.norm_before_attn.bias: shape=(768,), requires_grad=True
+    Param 52 - mvmae.encoder.vit_blocks.3.norm_before_mlp.weight: shape=(768,), requires_grad=True
+    Param 53 - mvmae.encoder.vit_blocks.3.norm_before_mlp.bias: shape=(768,), requires_grad=True
+    Param 54 - mvmae.encoder.vit_blocks.4.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
+    Param 55 - mvmae.encoder.vit_blocks.4.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
+    Param 56 - mvmae.encoder.vit_blocks.4.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
+    Param 57 - mvmae.encoder.vit_blocks.4.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
+    Param 58 - mvmae.encoder.vit_blocks.4.mlp.0.weight: shape=(3072, 768), requires_grad=True
+    Param 59 - mvmae.encoder.vit_blocks.4.mlp.0.bias: shape=(3072,), requires_grad=True
+    Param 60 - mvmae.encoder.vit_blocks.4.mlp.3.weight: shape=(768, 3072), requires_grad=True
+    Param 61 - mvmae.encoder.vit_blocks.4.mlp.3.bias: shape=(768,), requires_grad=True
+    Param 62 - mvmae.encoder.vit_blocks.4.norm_before_attn.weight: shape=(768,), requires_grad=True
+    Param 63 - mvmae.encoder.vit_blocks.4.norm_before_attn.bias: shape=(768,), requires_grad=True
+    Param 64 - mvmae.encoder.vit_blocks.4.norm_before_mlp.weight: shape=(768,), requires_grad=True
+    Param 65 - mvmae.encoder.vit_blocks.4.norm_before_mlp.bias: shape=(768,), requires_grad=True
+    Param 66 - mvmae.encoder.vit_blocks.5.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
+    Param 67 - mvmae.encoder.vit_blocks.5.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
+    Param 68 - mvmae.encoder.vit_blocks.5.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
+    Param 69 - mvmae.encoder.vit_blocks.5.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
+    Param 70 - mvmae.encoder.vit_blocks.5.mlp.0.weight: shape=(3072, 768), requires_grad=True
+    Param 71 - mvmae.encoder.vit_blocks.5.mlp.0.bias: shape=(3072,), requires_grad=True
+    Param 72 - mvmae.encoder.vit_blocks.5.mlp.3.weight: shape=(768, 3072), requires_grad=True
+    Param 73 - mvmae.encoder.vit_blocks.5.mlp.3.bias: shape=(768,), requires_grad=True
+    Param 74 - mvmae.encoder.vit_blocks.5.norm_before_attn.weight: shape=(768,), requires_grad=True
+    Param 75 - mvmae.encoder.vit_blocks.5.norm_before_attn.bias: shape=(768,), requires_grad=True
+    Param 76 - mvmae.encoder.vit_blocks.5.norm_before_mlp.weight: shape=(768,), requires_grad=True
+    Param 77 - mvmae.encoder.vit_blocks.5.norm_before_mlp.bias: shape=(768,), requires_grad=True
+    Param 78 - mvmae.encoder.vit_blocks.6.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
+    Param 79 - mvmae.encoder.vit_blocks.6.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
+    Param 80 - mvmae.encoder.vit_blocks.6.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
+    Param 81 - mvmae.encoder.vit_blocks.6.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
+    Param 82 - mvmae.encoder.vit_blocks.6.mlp.0.weight: shape=(3072, 768), requires_grad=True
+    Param 83 - mvmae.encoder.vit_blocks.6.mlp.0.bias: shape=(3072,), requires_grad=True
+    Param 84 - mvmae.encoder.vit_blocks.6.mlp.3.weight: shape=(768, 3072), requires_grad=True
+    Param 85 - mvmae.encoder.vit_blocks.6.mlp.3.bias: shape=(768,), requires_grad=True
+    Param 86 - mvmae.encoder.vit_blocks.6.norm_before_attn.weight: shape=(768,), requires_grad=True
+    Param 87 - mvmae.encoder.vit_blocks.6.norm_before_attn.bias: shape=(768,), requires_grad=True
+    Param 88 - mvmae.encoder.vit_blocks.6.norm_before_mlp.weight: shape=(768,), requires_grad=True
+    Param 89 - mvmae.encoder.vit_blocks.6.norm_before_mlp.bias: shape=(768,), requires_grad=True
+    Param 90 - mvmae.encoder.vit_blocks.7.multi_head_self_attn.in_proj_weight: shape=(2304, 768), requires_grad=True
+    Param 91 - mvmae.encoder.vit_blocks.7.multi_head_self_attn.in_proj_bias: shape=(2304,), requires_grad=True
+    Param 92 - mvmae.encoder.vit_blocks.7.multi_head_self_attn.out_proj.weight: shape=(768, 768), requires_grad=True
+    Param 93 - mvmae.encoder.vit_blocks.7.multi_head_self_attn.out_proj.bias: shape=(768,), requires_grad=True
+    Param 94 - mvmae.encoder.vit_blocks.7.mlp.0.weight: shape=(3072, 768), requires_grad=True
+    Param 95 - mvmae.encoder.vit_blocks.7.mlp.0.bias: shape=(3072,), requires_grad=True
+    Param 96 - mvmae.encoder.vit_blocks.7.mlp.3.weight: shape=(768, 3072), requires_grad=True
+    Param 97 - mvmae.encoder.vit_blocks.7.mlp.3.bias: shape=(768,), requires_grad=True
+    Param 98 - mvmae.encoder.vit_blocks.7.norm_before_attn.weight: shape=(768,), requires_grad=True
+    Param 99 - mvmae.encoder.vit_blocks.7.norm_before_attn.bias: shape=(768,), requires_grad=True
+    Param 100 - mvmae.encoder.vit_blocks.7.norm_before_mlp.weight: shape=(768,), requires_grad=True
+    Param 101 - mvmae.encoder.vit_blocks.7.norm_before_mlp.bias: shape=(768,), requires_grad=True
+    Param 102 - mvmae.encoder.norm_masked.weight: shape=(768,), requires_grad=True
+    Param 103 - mvmae.encoder.norm_masked.bias: shape=(768,), requires_grad=True
+    Param 104 - mvmae.encoder.norm_unmasked.weight: shape=(768,), requires_grad=True
+    Param 105 - mvmae.encoder.norm_unmasked.bias: shape=(768,), requires_grad=True
+    Param 106 - mvmae.decoder.mask_tokens: shape=(1, 1, 512), requires_grad=True
+    Param 107 - mvmae.decoder.pos_embeds: shape=(1, 392, 512), requires_grad=True
+    Param 108 - mvmae.decoder.proj.weight: shape=(512, 768), requires_grad=True
+    Param 109 - mvmae.decoder.proj.bias: shape=(512,), requires_grad=True
+    Param 110 - mvmae.decoder.vit_blocks.0.multi_head_self_attn.in_proj_weight: shape=(1536, 512), requires_grad=True
+    Param 111 - mvmae.decoder.vit_blocks.0.multi_head_self_attn.in_proj_bias: shape=(1536,), requires_grad=True
+    Param 112 - mvmae.decoder.vit_blocks.0.multi_head_self_attn.out_proj.weight: shape=(512, 512), requires_grad=True
+    Param 113 - mvmae.decoder.vit_blocks.0.multi_head_self_attn.out_proj.bias: shape=(512,), requires_grad=True
+    Param 114 - mvmae.decoder.vit_blocks.0.mlp.0.weight: shape=(2048, 512), requires_grad=True
+    Param 115 - mvmae.decoder.vit_blocks.0.mlp.0.bias: shape=(2048,), requires_grad=True
+    Param 116 - mvmae.decoder.vit_blocks.0.mlp.3.weight: shape=(512, 2048), requires_grad=True
+    Param 117 - mvmae.decoder.vit_blocks.0.mlp.3.bias: shape=(512,), requires_grad=True
+    Param 118 - mvmae.decoder.vit_blocks.0.norm_before_attn.weight: shape=(512,), requires_grad=True
+    Param 119 - mvmae.decoder.vit_blocks.0.norm_before_attn.bias: shape=(512,), requires_grad=True
+    Param 120 - mvmae.decoder.vit_blocks.0.norm_before_mlp.weight: shape=(512,), requires_grad=True
+    Param 121 - mvmae.decoder.vit_blocks.0.norm_before_mlp.bias: shape=(512,), requires_grad=True
+    Param 122 - mvmae.decoder.vit_blocks.1.multi_head_self_attn.in_proj_weight: shape=(1536, 512), requires_grad=True
+    Param 123 - mvmae.decoder.vit_blocks.1.multi_head_self_attn.in_proj_bias: shape=(1536,), requires_grad=True
+    Param 124 - mvmae.decoder.vit_blocks.1.multi_head_self_attn.out_proj.weight: shape=(512, 512), requires_grad=True
+    Param 125 - mvmae.decoder.vit_blocks.1.multi_head_self_attn.out_proj.bias: shape=(512,), requires_grad=True
+    Param 126 - mvmae.decoder.vit_blocks.1.mlp.0.weight: shape=(2048, 512), requires_grad=True
+    Param 127 - mvmae.decoder.vit_blocks.1.mlp.0.bias: shape=(2048,), requires_grad=True
+    Param 128 - mvmae.decoder.vit_blocks.1.mlp.3.weight: shape=(512, 2048), requires_grad=True
+    Param 129 - mvmae.decoder.vit_blocks.1.mlp.3.bias: shape=(512,), requires_grad=True
+    Param 130 - mvmae.decoder.vit_blocks.1.norm_before_attn.weight: shape=(512,), requires_grad=True
+    Param 131 - mvmae.decoder.vit_blocks.1.norm_before_attn.bias: shape=(512,), requires_grad=True
+    Param 132 - mvmae.decoder.vit_blocks.1.norm_before_mlp.weight: shape=(512,), requires_grad=True
+    Param 133 - mvmae.decoder.vit_blocks.1.norm_before_mlp.bias: shape=(512,), requires_grad=True
+    Param 134 - mvmae.decoder.vit_blocks.2.multi_head_self_attn.in_proj_weight: shape=(1536, 512), requires_grad=True
+    Param 135 - mvmae.decoder.vit_blocks.2.multi_head_self_attn.in_proj_bias: shape=(1536,), requires_grad=True
+    Param 136 - mvmae.decoder.vit_blocks.2.multi_head_self_attn.out_proj.weight: shape=(512, 512), requires_grad=True
+    Param 137 - mvmae.decoder.vit_blocks.2.multi_head_self_attn.out_proj.bias: shape=(512,), requires_grad=True
+    Param 138 - mvmae.decoder.vit_blocks.2.mlp.0.weight: shape=(2048, 512), requires_grad=True
+    Param 139 - mvmae.decoder.vit_blocks.2.mlp.0.bias: shape=(2048,), requires_grad=True
+    Param 140 - mvmae.decoder.vit_blocks.2.mlp.3.weight: shape=(512, 2048), requires_grad=True
+    Param 141 - mvmae.decoder.vit_blocks.2.mlp.3.bias: shape=(512,), requires_grad=True
+    Param 142 - mvmae.decoder.vit_blocks.2.norm_before_attn.weight: shape=(512,), requires_grad=True
+    Param 143 - mvmae.decoder.vit_blocks.2.norm_before_attn.bias: shape=(512,), requires_grad=True
+    Param 144 - mvmae.decoder.vit_blocks.2.norm_before_mlp.weight: shape=(512,), requires_grad=True
+    Param 145 - mvmae.decoder.vit_blocks.2.norm_before_mlp.bias: shape=(512,), requires_grad=True
+    Param 146 - mvmae.decoder.vit_blocks.3.multi_head_self_attn.in_proj_weight: shape=(1536, 512), requires_grad=True
+    Param 147 - mvmae.decoder.vit_blocks.3.multi_head_self_attn.in_proj_bias: shape=(1536,), requires_grad=True
+    Param 148 - mvmae.decoder.vit_blocks.3.multi_head_self_attn.out_proj.weight: shape=(512, 512), requires_grad=True
+    Param 149 - mvmae.decoder.vit_blocks.3.multi_head_self_attn.out_proj.bias: shape=(512,), requires_grad=True
+    Param 150 - mvmae.decoder.vit_blocks.3.mlp.0.weight: shape=(2048, 512), requires_grad=True
+    Param 151 - mvmae.decoder.vit_blocks.3.mlp.0.bias: shape=(2048,), requires_grad=True
+    Param 152 - mvmae.decoder.vit_blocks.3.mlp.3.weight: shape=(512, 2048), requires_grad=True
+    Param 153 - mvmae.decoder.vit_blocks.3.mlp.3.bias: shape=(512,), requires_grad=True
+    Param 154 - mvmae.decoder.vit_blocks.3.norm_before_attn.weight: shape=(512,), requires_grad=True
+    Param 155 - mvmae.decoder.vit_blocks.3.norm_before_attn.bias: shape=(512,), requires_grad=True
+    Param 156 - mvmae.decoder.vit_blocks.3.norm_before_mlp.weight: shape=(512,), requires_grad=True
+    Param 157 - mvmae.decoder.vit_blocks.3.norm_before_mlp.bias: shape=(512,), requires_grad=True
+    Param 158 - mvmae.decoder.norm.weight: shape=(512,), requires_grad=True
+    Param 159 - mvmae.decoder.norm.bias: shape=(512,), requires_grad=True
+    Param 160 - mvmae.out_proj.weight: shape=(108, 512), requires_grad=True
+    Param 161 - mvmae.out_proj.bias: shape=(108,), requires_grad=True
+    Param 162 - latent_pi.0.weight: shape=(256, 301074), requires_grad=True
+    Param 163 - latent_pi.0.bias: shape=(256,), requires_grad=True
+    Param 164 - latent_pi.2.weight: shape=(256, 256), requires_grad=True
+    Param 165 - latent_pi.2.bias: shape=(256,), requires_grad=True
+    Param 166 - mu.weight: shape=(4, 256), requires_grad=True
+    Param 167 - mu.bias: shape=(4,), requires_grad=True
+    Param 168 - log_std.weight: shape=(4, 256), requires_grad=True
+    Param 169 - log_std.bias: shape=(4,), requires_grad=True
