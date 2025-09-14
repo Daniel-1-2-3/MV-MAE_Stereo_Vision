@@ -331,7 +331,9 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
         assert isinstance(self.train_freq, TrainFreq)  # check done in _setup_learn()
 
         while self.num_timesteps < total_timesteps:
-            print(self.num_timesteps, "/", total_timesteps)
+            if self.num_timesteps % 500 == 0:
+                print("Timestep", self.num_timesteps, "/", total_timesteps)
+                
             rollout = self.collect_rollouts(
                 self.env,
                 train_freq=self.train_freq,
