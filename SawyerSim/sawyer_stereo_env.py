@@ -16,9 +16,9 @@ class SawyerReachEnvV3(SawyerXYZEnv):
     def __init__(
         self,
         render_mode: RenderMode | None = None,
-        camera_pairs: list | None = [("stereo_left1", "stereo_right1"), 
-                                     ("stereo_left2", "stereo_right2"), 
-                                     ("stereo_left3", "stereo_right3")],  # Reference xyz_base for camera names
+        camera_pairs: list | None = [# ("stereo_left1", "stereo_right1"), 
+                                     ("stereo_left2", "stereo_right2"),],
+                                     #("stereo_left3", "stereo_right3")],  # Reference xyz_base for camera names
         camera_id: int | None = None,
         reward_function_version: str = "v2",
         img_height: int = 84,
@@ -31,7 +31,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
         hand_high = (0.5, 1, 0.5)
         obj_low = (-0.1, 0.6, 0.02)
         obj_high = (0.1, 0.7, 0.02)
-        self.goal_space = Box(np.array(goal_low), np.array(goal_high), dtype=np.float64)
+        self.goal_space = Box(np.array(goal_low), np.array(goal_high), dtype=np.float32)
         self.max_path_length = max_path_length
 
         super().__init__(
@@ -60,7 +60,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
         self._random_reset_space = Box(
             np.hstack((obj_low, goal_low)),
             np.hstack((obj_high, goal_high)),
-            dtype=np.float64,
+            dtype=np.float32,
         )
 
     @property
@@ -68,7 +68,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
         return full_V3_path_for("sawyer_xyz/sawyer_reach_v3.xml")
 
     def evaluate_state(
-        self, obs: npt.NDArray[np.float64], action: npt.NDArray[np.float64]
+        self, obs: npt.NDArray[np.float32], action: npt.NDArray[np.float32]
     ) -> tuple[float, dict[str, Any]]:
         reward, reach_dist, in_place = self.compute_reward(action, obs["state_observation"])
         success = float(reach_dist <= 0.05)
@@ -104,7 +104,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
             [adjusted_pos[0], adjusted_pos[1], self.get_body_com("obj")[-1]]
         )
 
-    def reset_model(self) -> npt.NDArray[np.float64]:
+    def reset_model(self) -> npt.NDArray[np.float32]:
         self._reset_hand()
         self._target_pos = self.goal.copy()
         self.obj_init_pos = self.fix_extreme_obj_pos(self.init_config["obj_init_pos"])
@@ -125,7 +125,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
         return self._get_obs()
 
     def compute_reward(
-        self, actions: npt.NDArray[Any], obs: npt.NDArray[np.float64]
+        self, actions: npt.NDArray[Any], obs: npt.NDArray[np.float32]
     ) -> tuple[float, float, float]:
         assert self._target_pos is not None
         if self.reward_function_version == "v2":

@@ -32,7 +32,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     _HAND_SPACE = Box( # Constraints for hand positions
         np.array([-0.525, 0.348, -0.0525]),
         np.array([+0.525, 1.025, 0.7]),
-        dtype=np.float64,
+        dtype=np.float32,
     )
     TARGET_RADIUS: float = 0.05 # Upper bound for distance from the target when checking for task completion
     max_path_length: int = 500 # Maximum episode length (task horizon)
@@ -95,14 +95,14 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.action_space = Box(
             np.array([-1, -1, -1, -1]),
             np.array([+1, +1, +1, +1]),
-            dtype=np.float64,
+            dtype=np.float32,
         )
         
         self.hand_init_pos: npt.NDArray[Any] | None = None  # OVERRIDE ME
         self._target_pos: npt.NDArray[Any] | None = None  # OVERRIDE ME
         self._random_reset_space: Box | None = None  # OVERRIDE ME
         self.goal_space: Box | None = None  # OVERRIDE ME
-        self._last_stable_obs: npt.NDArray[np.float64] | None = None
+        self._last_stable_obs: npt.NDArray[np.float32] | None = None
 
         self.init_qpos = np.copy(self.data.qpos)
         self.init_qvel = np.copy(self.data.qvel)
@@ -191,7 +191,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         qvel[9:15] = 0
         self.set_state(qpos, qvel)
 
-    def _get_site_pos(self, site_name: str) -> npt.NDArray[np.float64]:
+    def _get_site_pos(self, site_name: str) -> npt.NDArray[np.float32]:
         """Gets the position of a given site.
         Args:
             site_name: The name of the site to get the position of.
@@ -292,7 +292,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         assert self._target_pos.ndim == 1
         return self._target_pos
     
-    def _get_curr_obs_combined_no_goal(self) -> npt.NDArray[np.float64]:
+    def _get_curr_obs_combined_no_goal(self) -> npt.NDArray[np.float32]:
         """Combines the end effector's {pos, closed amount} and the object(s)' {pos, quat} into a single flat observation.
         Note: The goal's position is *not* included in this.
         
@@ -337,7 +337,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             The flat observation array (39 elements)
         """
         state_obs = self._get_curr_obs_combined_no_goal()
-        state_obs = torch.from_numpy(state_obs.astype(np.float64)).unsqueeze(0)
+        state_obs = torch.from_numpy(state_obs.astype(np.float32)).unsqueeze(0)
         img_obs = self.render()
         obs = {
             "state_observation": state_obs,
@@ -383,14 +383,14 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     @cached_property
     def sawyer_observation_space(self) -> Dict:
         observation_space = Dict({
-            "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float64),
-            "image_observation": Box(low=0, high=255, shape=(self.height, 2 * self.width, 3), dtype=np.float64)
+            "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float32),
+            "image_observation": Box(low=0, high=255, shape=(self.height, 2 * self.width, 3), dtype=np.float32)
         })
         return observation_space
  
     def step(
-        self, action: npt.NDArray[np.float64]
-    ) -> tuple[npt.NDArray[np.float64], SupportsFloat, bool, bool, dict[str, Any]]:
+        self, action: npt.NDArray[np.float32]
+    ) -> tuple[npt.NDArray[np.float32], SupportsFloat, bool, bool, dict[str, Any]]:
         """
         Args:
             action: The action to take. Must be a 4 element array of floats.
@@ -434,7 +434,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             self._last_stable_obs["state_observation"],
             a_max=self.sawyer_observation_space["state_observation"].high,
             a_min=self.sawyer_observation_space["state_observation"].low,
-            dtype=np.float64,
+            dtype=np.float32,
         )
         reward, info = self.evaluate_state(self._last_stable_obs, action)
         # step will never return a terminate==True if there is a success
@@ -446,7 +446,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         return self._last_stable_obs, reward, False, truncate, info
 
     def evaluate_state(
-        self, obs: npt.NDArray[np.float64], action: npt.NDArray[np.float64]
+        self, obs: npt.NDArray[np.float32], action: npt.NDArray[np.float32]
     ) -> tuple[float, dict[str, Any]]:
         """Does the heavy-lifting for `step()` -- namely, calculating reward and populating the `info` dict with training metrics.
 
@@ -459,7 +459,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         # V1 environments don't have to implement it
         raise NotImplementedError
 
-    def reset_model(self) -> npt.NDArray[np.float64]:
+    def reset_model(self) -> npt.NDArray[np.float32]:
         qpos = self.init_qpos
         qvel = self.init_qvel
         self.set_state(qpos, qvel)
@@ -496,7 +496,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
 
     def reset(
         self, seed: int | None = None, options: dict[str, Any] | None = None
-    ) -> tuple[npt.NDArray[np.float64], dict[str, Any]]:
+    ) -> tuple[npt.NDArray[np.float32], dict[str, Any]]:
         """Resets the environment.
 
         Args:
@@ -525,21 +525,21 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             self.do_simulation([-1, 1], self.frame_skip)
         self.init_tcp = self.tcp_center
 
-    def _get_state_rand_vec(self) -> npt.NDArray[np.float64]:
+    def _get_state_rand_vec(self) -> npt.NDArray[np.float32]:
         """Gets or generates a random vector for the hand position at reset."""
         # Removed caching, simply generate a random hand position
         assert self._random_reset_space is not None
-        rand_vec: npt.NDArray[np.float64] = np.random.uniform(
+        rand_vec: npt.NDArray[np.float32] = np.random.uniform(
             self._random_reset_space.low,
             self._random_reset_space.high,
             size=self._random_reset_space.low.size,
-        ).astype(np.float64)
+        ).astype(np.float32)
         self._last_rand_vec = rand_vec
         return rand_vec
 
     def _gripper_caging_reward(
         self,
-        action: npt.NDArray[np.float64],
+        action: npt.NDArray[np.float32],
         obj_pos: npt.NDArray[Any],
         obj_radius: float,
         pad_success_thresh: float,

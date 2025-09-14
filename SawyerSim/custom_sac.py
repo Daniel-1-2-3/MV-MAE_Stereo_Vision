@@ -177,7 +177,7 @@ class Custom_SAC(OffPolicyAlgorithm):
         # Target entropy is used when learning the entropy coefficient
         if self.target_entropy == "auto":
             # automatically set target entropy if needed
-            self.target_entropy = float(-np.prod(self.env.action_space.shape).astype(np.float64))  # type: ignore
+            self.target_entropy = float(-np.prod(self.env.action_space.shape).astype(np.float32))  # type: ignore
         else:
             # Force conversion
             # this will also throw an error for unexpected string
