@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --mem=80G
 #SBATCH --time=08:00:00
 #SBATCH --output=%x-%j.out
@@ -22,13 +22,9 @@ if [[ ! -f "$IMG" ]]; then
   echo "ERROR: $IMG not found"; exit 2
 fi
 
-# Optional: export tokens here or before sbatch
-# export HF_TOKEN=...
-# export WANDB_API_KEY=...
-
 # Make both /opt/src and /opt/src/MV_MAE_Implementation visible to Python inside the container
 export APPTAINERENV_PYTHONPATH="/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # Run the image's %runscript (starts Xvfb and launches trainer_pipeline.py in the image)
 apptainer run --nv "$IMG" \
-  --batch_size 256 --buffer_size 200000 --render_mode human
+  --batch_size 64 --buffer_size 200000 --render_mode rgb_array
