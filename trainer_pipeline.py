@@ -1,6 +1,7 @@
 # Only when running in RunPod hosted GPU, not local environment
 import os
-os.environ["MUJOCO_GL"] = "osmesa"
+os.environ.setdefault("MUJOCO_GL", "osmesa")
+os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
 from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
 from SawyerSim.custom_sac import Custom_SAC
