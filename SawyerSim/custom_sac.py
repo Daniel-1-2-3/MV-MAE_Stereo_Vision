@@ -207,6 +207,7 @@ class Custom_SAC(OffPolicyAlgorithm):
         self.actor = self.policy.actor
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
+        """
         # DEBUG the optimizers to make sure they include the required params in backpropagation
         # Actor parameters
         if hasattr(self.actor, "optimizer") and self.actor.optimizer is not None:
@@ -237,7 +238,7 @@ class Custom_SAC(OffPolicyAlgorithm):
                     for j, param in enumerate(param_group['params']):
                         name = next((n for n, p in named_params.items() if p is param), "<unknown>")
                         f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
-
+        """
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
