@@ -8,17 +8,17 @@ import csv
 
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
-from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 from SawyerSim.custom_sac_policy import MultiInputPolicy, SACPolicy, Actor
 from SawyerSim.custom_critic import ContinuousCritic
+from SawyerSim.custom_off_policy_algorithm import CustomOffPolicyAlgorithm
 
 # CAP the standard deviation of the actor
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
-class Custom_SAC(OffPolicyAlgorithm):
+class Custom_SAC(CustomOffPolicyAlgorithm):
     """
     Soft Actor-Critic (SAC)
     Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
