@@ -85,9 +85,9 @@ class ContinuousCritic(BaseModel):
             _, _, z = mvmae(obs["image_observation"])
         # z is a Tensor of shape (batch, total_patches, embed_dim)
         
-        flatten = nn.Flatten()
+        z_feat = z.mean(dim=1)
         # OVERRIDE the feature extractor
-        return torch.cat([flatten(z), obs["state_observation"]], dim=1)
+        return torch.cat([z_feat, obs["state_observation"]], dim=1)
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor, mvmae) -> tuple[torch.Tensor, ...]:
         # Learn the features extractor using the policy loss only
