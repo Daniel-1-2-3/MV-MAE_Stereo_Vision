@@ -78,6 +78,7 @@ class Actor(BasePolicy):
         )
         
         # Initialize MVMAE, default params, small embed dims to save memory
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.mvmae = MAEModel(
             nviews=nviews,
             patch_size=mvmae_patch_size,
@@ -95,7 +96,8 @@ class Actor(BasePolicy):
         self.sde_features_extractor = None
         self.net_arch = net_arch
         # self.features_dim = features_dim, OVERIRDE with z + state_obs dims
-        self.features_dim = self.mvmae.encoder_embed_dim * self.mvmae.num_patches + 18
+        self.nviews = nviews
+        self.features_dim = self.mvmae.encoder_embed_dim * self.nviews + 18
         
         self.activation_fn = activation_fn
         self.log_std_init = log_std_init
@@ -123,6 +125,8 @@ class Actor(BasePolicy):
             self.action_dist = SquashedDiagGaussianDistribution(action_dim)  # type: ignore[assignment]
             self.mu = nn.Linear(last_layer_dim, action_dim)
             self.log_std = nn.Linear(last_layer_dim, action_dim)  # type: ignore[assignment]
+            
+        self.to(self.device)
 
     def _get_constructor_parameters(self) -> dict[str, Any]:
         data = super()._get_constructor_parameters()
@@ -197,15 +201,14 @@ class Actor(BasePolicy):
             if state_obs.device != self.device:
                 state_obs = state_obs.to(self.device)
         
-        out, mask, z = self.mvmae(img)
-        # z is a Tensor of shape (batch, total_patches, embed_dim)
-        
-        # Run this to look at mvmae decoder output 
-        # self.mvmae.render_reconstruction(out)
-        
-        flatten = nn.Flatten()
+        out, mask, z = self.mvmae(img) # z: [B, N, D]
+        B, N, D = z.shape
+        assert N % self.nviews == 0, f"num_patches ({N}) must be divisible by nviews ({self.nviews})"
+        z = z.reshape(B, self.nviews, N // self.nviews, D).mean(dim=2)
+        z_feat = z.reshape(B, self.nviews * D)
+
         # OVERRIDE the feature extractor
-        return torch.cat([flatten(z), state_obs], dim=1), out, img, mask
+        return torch.cat([z_feat, state_obs], dim=1), out, img, mask
         
     def get_action_dist_params(self, obs: PyTorchObs) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
