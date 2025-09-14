@@ -78,7 +78,7 @@ class Actor(BasePolicy):
         )
         
         # Initialize MVMAE, default params, small embed dims to save memory
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.mvmae = MAEModel(
             nviews=nviews,
             patch_size=mvmae_patch_size,
@@ -95,9 +95,12 @@ class Actor(BasePolicy):
         self.use_sde = use_sde
         self.sde_features_extractor = None
         self.net_arch = net_arch
+        
         # self.features_dim = features_dim, OVERIRDE with z + state_obs dims
-        self.nviews = nviews
-        self.features_dim = self.mvmae.encoder_embed_dim * self.nviews + 18
+        self.nviews = nviews  # fine to keep if used elsewhere
+        self.state_dim = int(observation_space["state_observation"].shape[-1])
+        self.features_dim = self.mvmae.encoder_embed_dim + self.state_dim
+        print("STATE_DIM:", self.state_dim, "FEATURES_DIM:", self.features_dim)
         
         self.activation_fn = activation_fn
         self.log_std_init = log_std_init
@@ -126,7 +129,7 @@ class Actor(BasePolicy):
             self.mu = nn.Linear(last_layer_dim, action_dim)
             self.log_std = nn.Linear(last_layer_dim, action_dim)  # type: ignore[assignment]
             
-        self.to(self.device)
+        self.to(dev)
 
     def _get_constructor_parameters(self) -> dict[str, Any]:
         data = super()._get_constructor_parameters()
@@ -202,10 +205,7 @@ class Actor(BasePolicy):
                 state_obs = state_obs.to(self.device)
         
         out, mask, z = self.mvmae(img) # z: [B, N, D]
-        B, N, D = z.shape
-        assert N % self.nviews == 0, f"num_patches ({N}) must be divisible by nviews ({self.nviews})"
-        z = z.reshape(B, self.nviews, N // self.nviews, D).mean(dim=2)
-        z_feat = z.reshape(B, self.nviews * D)
+        z_feat = z.mean(dim=1)  
 
         # OVERRIDE the feature extractor
         return torch.cat([z_feat, state_obs], dim=1), out, img, mask
