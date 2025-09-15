@@ -16,9 +16,9 @@ class SawyerReachEnvV3(SawyerXYZEnv):
     def __init__(
         self,
         render_mode: RenderMode | None = None,
-        camera_pairs: list | None = [# ("stereo_left1", "stereo_right1"), 
-                                     ("stereo_left2", "stereo_right2"),],
-                                     #("stereo_left3", "stereo_right3")],  # Reference xyz_base for camera names
+        camera_pairs: list | None = [("stereo_left1", "stereo_right1"), 
+                                     ("stereo_left2", "stereo_right2"),
+                                     ("stereo_left3", "stereo_right3")],  # Reference xyz_base for camera names
         camera_id: int | None = None,
         reward_function_version: str = "v2",
         img_height: int = 84,

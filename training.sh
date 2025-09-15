@@ -30,4 +30,4 @@ apptainer exec --nv \
   --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" \
   --pwd  "$SLURM_SUBMIT_DIR" \
   "$IMG" \
-  bash -lc 'export MUJOCO_GL=egl; export PYTHONUNBUFFERED=1; stdbuf -oL -eL python -u -m MV_MAE_Implementation.trainer_pipeline --learning_starts 25000 --batch_size 64 --buffer_size 200000 --render_mode rgb_array 2>&1'
+  bash -lc 'export MUJOCO_GL=egl; export PYTHONUNBUFFERED=1; stdbuf -oL -eL python -u -m MV_MAE_Implementation.trainer_pipeline --learning_starts 15000 --batch_size 64 --buffer_size 200000 --render_mode rgb_array 2>&1'
