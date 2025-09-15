@@ -26,9 +26,8 @@ fi
 # Make both /opt/src and /opt/src/MV_MAE_Implementation visible to Python inside the container
 export APPTAINERENV_PYTHONPATH="/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
-# Run the trainer directly (no %runscript), with CWD = submit dir (writable)
 apptainer exec --nv \
   --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" \
   --pwd  "$SLURM_SUBMIT_DIR" \
   "$IMG" \
-  bash -lc 'export MUJOCO_GL=egl; python -m MV_MAE_Implementation.trainer_pipeline --learning_starts 25000 --batch_size 64 --buffer_size 200000 --render_mode rgb_array'
+  bash -lc 'export MUJOCO_GL=egl; export PYTHONUNBUFFERED=1; stdbuf -oL -eL python -u -m MV_MAE_Implementation.trainer_pipeline --learning_starts 25000 --batch_size 64 --buffer_size 200000 --render_mode rgb_array 2>&1'
