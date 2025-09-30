@@ -28,6 +28,7 @@ class MAEModel(nn.Module):
         self.decoder_embed_dim = decoder_embed_dim
         self.encoder_heads = encoder_heads
         self.decoder_heads = decoder_heads
+        self.masking_ratio = masking_ratio
         self.in_channels = in_channels
         self.img_h_size = img_h_size
         self.img_w_size = img_w_size
@@ -42,6 +43,7 @@ class MAEModel(nn.Module):
             img_h_size=self.img_h_size,
             img_w_size=self.img_w_fused,
             heads=self.encoder_heads,
+            masking_ratio=self.masking_ratio,
             depth=8
         )
         self.decoder = ViTMaskedDecoder(
