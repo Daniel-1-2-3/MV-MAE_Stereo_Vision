@@ -8,6 +8,7 @@ from SawyerSim.custom_sac import Custom_SAC
 from SawyerSim.custom_sac_policy import SACPolicy
 import numpy as np
 import argparse
+import torch
 
 class PipelineTrainer():
     def __init__(
@@ -28,6 +29,8 @@ class PipelineTrainer():
         mvmae_decoder_embed_dim: int = 512,
         mvmae_encoder_heads: int = 16, 
         mvmae_decoder_heads: int = 16,
+        masking_ratio: float = 0.75,
+        coef_mvmae: float = 0.1,
         in_channels: int = 3,
         img_h_size: int = 84,
         img_w_size: int = 84,
@@ -44,6 +47,7 @@ class PipelineTrainer():
         self.model = Custom_SAC(
             SACPolicy,
             self.env,
+            device="cuda" if torch.cuda.is_available() else "cpu",
             learning_rate = learning_rate,
             buffer_size = buffer_size,
             learning_starts = learning_starts,
@@ -53,6 +57,7 @@ class PipelineTrainer():
             ent_coef = ent_coef,
             target_entropy = target_entropy,
             verbose = verbose,
+            coef_mvmae = coef_mvmae,
             policy_kwargs= {
                 "nviews" : nviews,
                 "mvmae_patch_size" : mvmae_patch_size, 
@@ -61,8 +66,15 @@ class PipelineTrainer():
                 "mvmae_encoder_heads" : mvmae_encoder_heads, 
                 "mvmae_decoder_heads" : mvmae_decoder_heads,
                 "in_channels" : in_channels,
+                "masking_ratio": masking_ratio,
             }
         )
+        # Assuming self.model is your Custom_SAC instance
+        self.print_model_devices(self.model.policy, name="SAC Policy")
+
+        # If you want to drill into your custom actor/MAE
+        self.print_model_devices(self.model.policy.actor, name="Actor Network")
+        self.print_model_devices(self.model.policy.critic, name="Critic Network")
         
         self.total_timesteps = total_timesteps
     
@@ -82,6 +94,19 @@ class PipelineTrainer():
             obs, reward, terminated, truncated, info = self.env.step(action)
             if terminated or truncated:
                 obs, info = self.env.reset()
+    
+    def print_model_devices(self, model, name="Model"):
+        """Print which device each submodule is on."""
+        print(f"\n=== Device report for {name} ===")
+        for module_name, module in model.named_modules():
+            if module_name == "":
+                continue
+            try:
+                p = next(module.parameters())
+                print(f"{module_name:<40} -> {p.device}")
+            except StopIteration:
+                continue
+        print("================================\n")
 
 def get_args():
     parser = argparse.ArgumentParser(description="Trainer Pipeline Config")
@@ -113,15 +138,18 @@ def get_args():
     
     parser.add_argument("--total_timesteps", type=int, default=5_000_000)
     parser.add_argument("--episode_horizon", type=int, default=300)
+    parser.add_argument("--coef_mvmae", type=float, default=0.1)
+    parser.add_argument("--masking_ratio", type=float, default=0.75)
 
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = get_args()
     
-    warn_msg = "Image should have dimensions so that it is divisible, without remainder, into patches. Change either the image dims or patch size."
-    assert (args.img_h_size * args.img_w_size) % args.mvmae_patch_size == 0, warn_msg
-    
+    assert args.img_h_size % args.mvmae_patch_size == 0 and args.img_w_size % args.mvmae_patch_size == 0, \
+    "Height and width must be divisible by patch size."
+
     trainer = PipelineTrainer(**vars(args))
+    
     trainer.train()
     trainer.eval()

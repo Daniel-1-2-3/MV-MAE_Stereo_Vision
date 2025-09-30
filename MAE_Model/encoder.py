@@ -13,7 +13,8 @@ class ViTMaskedEncoder(nn.Module):
             img_h_size: int = 84,
             img_w_size: int = 168, # Width of the fused image, with both views
             heads: int = 16,
-            depth: int = 12
+            depth: int = 12,
+            masking_ratio: float = 0.75,
         ):
         
         super().__init__()
@@ -25,6 +26,7 @@ class ViTMaskedEncoder(nn.Module):
         self.img_w_size = img_w_size
         self.heads = heads
         self.depth = depth
+        self.masking_ratio = masking_ratio
         
         self.forward_conv = self.construct_conv_layers()
         self.vit_blocks = nn.ModuleList([
@@ -75,7 +77,7 @@ class ViTMaskedEncoder(nn.Module):
         
         return masked_x, mask, unmasked_x,
 
-    def random_view_masking(self, x: Tensor, mask_ratio=0.20):
+    def random_view_masking(self, x: Tensor):
         """
         The method masks the tensor, where either the left or right view is fully
         masked, while the other view is partially masked, with mask_ratio of the 
@@ -96,6 +98,7 @@ class ViTMaskedEncoder(nn.Module):
         
         x_kept = []
         mask_all = []
+        mask_ratio = (self.masking_ratio - 0.5) / 0.5 # self.masking_ratio is for the whole image, 1 side always covered, so determine how much to cover this half
         num_mask = int(mask_ratio * (num_patches / 2))
         for i in range(batch):
             mask_view = random.random()

@@ -118,6 +118,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
         seed: Optional[int] = None,
         device: Union[torch.device, str] = "auto",
         _init_setup_model: bool = True,
+        coef_mvmae = 0.1,
     ):
         super().__init__(
             policy,
@@ -148,6 +149,8 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             support_multi_env=True,
         )
 
+        self.coef_mvmae = coef_mvmae
+        
         self.target_entropy = target_entropy
         self.log_ent_coef = None  # type: Optional[torch.Tensor]
         # Entropy coefficient / Entropy temperature
@@ -338,7 +341,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             min_qf_pi, _ = torch.min(q_values_pi, dim=1, keepdim=True)
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
-            loss = actor_loss + mvmae_loss
+            loss = actor_loss + self.coef_mvmae * mvmae_loss
             
             reward = replay_data.rewards.mean().item()
             rewards.append(reward)

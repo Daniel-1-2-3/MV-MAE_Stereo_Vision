@@ -48,6 +48,7 @@ python trainer_pipeline.py
    - `--in_channels` (int, default: `3`) — Image channels (RGB=3).
    - `--img_h_size` (int, default: `84`) — Height of a single view.
    - `--img_w_size` (int, default: `84`) — Width of a single view.
+   - `--coef_mvmae` (float, default: `0.1`) — Total loss = actor loss * coef_mvmae * mvmae_recon_loss
    
    **Example**
    ```bash

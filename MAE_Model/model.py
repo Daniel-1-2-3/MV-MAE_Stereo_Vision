@@ -19,6 +19,7 @@ class MAEModel(nn.Module):
             in_channels: int = 3,
             img_h_size: int = 84,
             img_w_size: int = 84, 
+            masking_ratio: float = 0.75,
         ):
         super().__init__()
         self.nviews = nviews

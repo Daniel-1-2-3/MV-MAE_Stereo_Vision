@@ -65,9 +65,10 @@ class Actor(BasePolicy):
         mvmae_decoder_embed_dim: int = 512,
         mvmae_encoder_heads: int = 16, 
         mvmae_decoder_heads: int = 16,
+        masking_ratio: float = 0.75,
         in_channels: int = 3,
         img_h_size: int = 84,
-        img_w_size: int = 84
+        img_w_size: int = 84,
     ):
         super().__init__(
             observation_space,
@@ -86,10 +87,11 @@ class Actor(BasePolicy):
             decoder_embed_dim=mvmae_decoder_embed_dim,
             encoder_heads=mvmae_encoder_heads,
             decoder_heads=mvmae_decoder_heads,
+            masking_ratio=masking_ratio,
             in_channels=in_channels,
             img_h_size=img_h_size,
             img_w_size=img_w_size
-        )
+        ).to(self.device)
         
         # Save arguments to re-create object at loading
         self.use_sde = use_sde
@@ -182,16 +184,27 @@ class Actor(BasePolicy):
                 image_observation: Tensor of shape (batch, height, width_total, channels)
             }
         """
-        # Ensure image is float32 and on correct device
+        # Ensure image is float32 and on correct device, with fast host→GPU transfer
         img = obs["image_observation"]
+
         if not isinstance(img, torch.Tensor):
-            img = torch.as_tensor(img, dtype=torch.float32, device=self.device)
+            img = torch.from_numpy(img).float()
         else:
             if img.dtype != torch.float32:
                 img = img.to(dtype=torch.float32)
+
+        # Move to GPU with pinned memory + non_blocking if available
+        if self.device.type == "cuda":
+            if img.device.type == "cpu":
+                img = img.pin_memory().to(self.device, non_blocking=True)
+            elif img.device != self.device:
+                img = img.to(self.device, non_blocking=True)
+        else:
             if img.device != self.device:
                 img = img.to(self.device)
-        if img.max() > 1.0:  # normalize if in [0,255]
+
+        # Normalize if in [0,255]
+        if img.max() > 1.0:
             img = img / 255.0
 
         # Ensure state observation is float32 and on correct device

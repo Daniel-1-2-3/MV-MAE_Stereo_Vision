@@ -202,6 +202,7 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
                 **replay_buffer_kwargs,
             )
 
+        # Policy_kwargs gets passed into the policy here
         self.policy = self.policy_class(
             self.observation_space,
             self.action_space,

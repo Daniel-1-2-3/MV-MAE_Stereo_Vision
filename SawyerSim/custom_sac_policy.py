@@ -74,6 +74,7 @@ class SACPolicy(BasePolicy):
         mvmae_decoder_embed_dim: int = 512,
         mvmae_encoder_heads: int = 16, 
         mvmae_decoder_heads: int = 16,
+        masking_ratio: float = 0.75,
         in_channels: int = 3,
         img_h_size: int = 84,
         img_w_size: int = 84
@@ -95,6 +96,7 @@ class SACPolicy(BasePolicy):
         self.mvmae_decoder_embed_dim = mvmae_decoder_embed_dim
         self.mvmae_encoder_heads = mvmae_encoder_heads
         self.mvmae_decoder_heads = mvmae_decoder_heads
+        self.masking_ratio = masking_ratio
         self.in_channels = in_channels
         self.img_h_size = img_h_size
         self.img_w_size = img_w_size
