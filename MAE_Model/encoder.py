@@ -65,7 +65,7 @@ class ViTMaskedEncoder(nn.Module):
         # Add sin/cos positional embeddings to each patch, addition element wise along last dim
         unmasked_x = self.add_pos_embeds(x) 
         
-        masked_x, mask = self.random_view_masking(unmasked_x, mask_ratio=0.20)
+        masked_x, mask = self.random_view_masking(unmasked_x)
         # - (batch, unmasked_patches, embed_dim)
 
         # Masked x passed through vit
