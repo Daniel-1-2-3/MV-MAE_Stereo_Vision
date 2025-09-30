@@ -45,6 +45,7 @@ python trainer_pipeline.py
    - `--mvmae_decoder_embed_dim` (int, default: `512`) — Decoder embedding dim.
    - `--mvmae_encoder_heads` (int, default: `16`) — Encoder attention heads.
    - `--mvmae_decoder_heads` (int, default: `16`) — Decoder attention heads.
+   - `--masking_coef` (float, default: `0.75`) — The amount of all views that is masked. 
    - `--in_channels` (int, default: `3`) — Image channels (RGB=3).
    - `--img_h_size` (int, default: `84`) — Height of a single view.
    - `--img_w_size` (int, default: `84`) — Width of a single view.
