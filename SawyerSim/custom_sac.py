@@ -117,6 +117,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[torch.device, str] = "auto",
+        log_file: str = 'log.csv',
         _init_setup_model: bool = True,
         coef_mvmae = 0.1,
     ):
@@ -163,10 +164,12 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
 
         if _init_setup_model:
             self._setup_model()
+            
+        self.log_file = log_file
         
     def begin_log_losses(self):
         # CSV file for logging
-        with open("log.csv", mode="w", newline="") as f:
+        with open(self.log_file, mode="w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["actor_loss", "recon_loss", "critic_loss", "reward"])
         self.csv_logging = True
@@ -376,7 +379,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             
         # Log
         if self.csv_logging:
-            with open("log.csv", mode="a", newline="") as f:
+            with open(self.log_file, mode="a", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([round(np.mean(actor_losses), 3), 
                                 round(np.mean(recon_losses), 3), 

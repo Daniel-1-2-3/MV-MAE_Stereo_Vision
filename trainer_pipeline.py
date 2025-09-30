@@ -36,6 +36,7 @@ class PipelineTrainer():
         img_w_size: int = 84,
         total_timesteps: int = 5_000_000,
         episode_horizon: int = 300,
+        log_file: str = 'log.csv',
     ):
         self.env = SawyerReachEnvV3(
             render_mode = render_mode,
@@ -58,6 +59,7 @@ class PipelineTrainer():
             target_entropy = target_entropy,
             verbose = verbose,
             coef_mvmae = coef_mvmae,
+            log_file=log_file,
             policy_kwargs= {
                 "nviews" : nviews,
                 "mvmae_patch_size" : mvmae_patch_size, 
@@ -140,6 +142,8 @@ def get_args():
     parser.add_argument("--episode_horizon", type=int, default=300)
     parser.add_argument("--coef_mvmae", type=float, default=0.1)
     parser.add_argument("--masking_ratio", type=float, default=0.75)
+    
+    parser.add_argument("--log_file", type=str, default='log.csv')
 
     return parser.parse_args()
 
