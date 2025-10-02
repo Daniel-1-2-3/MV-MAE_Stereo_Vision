@@ -3,6 +3,9 @@ import torch
 import einops
 import torch.nn.functional as F
 import os
+import time
+import numpy as np
+import cv2
 
 from MAE_Model.encoder import ViTMaskedEncoder
 from MAE_Model.decoder import ViTMaskedDecoder
@@ -84,23 +87,13 @@ class MAEModel(nn.Module):
         return out, mask, z
     
     def compute_loss(self, out: Tensor, truth: Tensor, mask: Tensor):
-        """
-        Compute MSE loss
+        mask = mask.to(out.device).float()
+        truth_patchified = self.patchify(truth).to(out.device)
 
-        Args:
-            out (Tensor): (batch, total_patches, patch_size^2 * channels)
-            truth (Tensor): Fused views (batch, height, width_total, channels)
-            mask (Tensor):  Has shape (batch, total_num_patches), where each vector in the 
-                            last dimension is a binary mask with 0 representing unmasked, and 
-                            1 representing masked
+        loss_per_patch = F.mse_loss(out, truth_patchified, reduction='none').mean(dim=-1)
+        den = mask.sum()
+        loss = (loss_per_patch * mask).sum() / (den if den > 0 else loss_per_patch.numel())
 
-        Returns:
-            loss (Tensor): MSE loss, retains grad information
-        """
-        mask = mask.to(out.device)
-        truth = self.patchify(truth).to(out.device)
-        loss_per_patch = F.mse_loss(out, truth, reduction='none').mean(dim=-1) # Reduction 'None' for per-element loss
-        loss = (loss_per_patch * mask).sum() / mask.sum() # Only calculate loss for masked patches
         return loss
     
     def render_reconstruction(self, x: Tensor):
@@ -127,8 +120,7 @@ class MAEModel(nn.Module):
 
         plt.imshow(x)
         plt.axis("off")
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0)
-        plt.close()
+        plt.show()
         
     def patchify(self, x: Tensor):
         """

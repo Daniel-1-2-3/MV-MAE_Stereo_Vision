@@ -1,8 +1,10 @@
 from typing import Any
+import numpy as np
 
 import torch
 from gymnasium import spaces
 from torch import nn
+import cv2
 
 from stable_baselines3.common.distributions import SquashedDiagGaussianDistribution, StateDependentNoiseDistribution
 from stable_baselines3.common.policies import BasePolicy
@@ -184,16 +186,15 @@ class Actor(BasePolicy):
                 image_observation: Tensor of shape (batch, height, width_total, channels)
             }
         """
-        # Ensure image is float32 and on correct device, with fast host→GPU transfer
+        # Ensure image is float32 and on correct device
         img = obs["image_observation"]
-
         if not isinstance(img, torch.Tensor):
             img = torch.from_numpy(img).float()
         else:
             if img.dtype != torch.float32:
                 img = img.to(dtype=torch.float32)
 
-        # Move to GPU with pinned memory + non_blocking if available
+        # Move to GPU with pinned memory + non blocking if available
         if self.device.type == "cuda":
             if img.device.type == "cpu":
                 img = img.pin_memory().to(self.device, non_blocking=True)
@@ -202,10 +203,6 @@ class Actor(BasePolicy):
         else:
             if img.device != self.device:
                 img = img.to(self.device)
-
-        # Normalize if in [0,255]
-        if img.max() > 1.0:
-            img = img / 255.0
 
         # Ensure state observation is float32 and on correct device
         state_obs = obs["state_observation"]

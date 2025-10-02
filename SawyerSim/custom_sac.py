@@ -289,6 +289,10 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             
             log_prob = dist.log_prob(actions_pi)
             mvmae_loss = self.actor.mvmae.compute_loss(out, truth, mask)
+            
+            # RENDER RECON
+            # self.actor.mvmae.render_reconstruction(out)
+            
             recon_losses.append(mvmae_loss.item())
 
             ent_coef_loss = None
