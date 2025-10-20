@@ -319,24 +319,19 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
         progress_bar: bool = False,
     ) -> SelfOffPolicyAlgorithm:
         total_timesteps, callback = self._setup_learn(
-            total_timesteps,
-            callback,
-            reset_num_timesteps,
-            tb_log_name,
-            progress_bar,
+            total_timesteps, callback, reset_num_timesteps, tb_log_name, progress_bar
         )
-
         callback.on_training_start(locals(), globals())
 
         assert self.env is not None, "You must set the environment before calling learn()"
-        assert isinstance(self.train_freq, TrainFreq)  # check done in _setup_learn()
+        assert isinstance(self.train_freq, TrainFreq)
 
-        # DEBUG EDIT
+        # DEBUG
+        LOG_EVERY_STEPS = 100
+        last_t = time.perf_counter()
+        last_steps = self.num_timesteps
+
         while self.num_timesteps < total_timesteps:
-            if self.num_timesteps % 500 == 0:
-                t0 = time.time()
-                print("Timestep", self.num_timesteps, "/", total_timesteps)
-                
             rollout = self.collect_rollouts(
                 self.env,
                 train_freq=self.train_freq,
@@ -346,23 +341,24 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
                 replay_buffer=self.replay_buffer,
                 log_interval=log_interval,
             )
-
             if not rollout.continue_training:
                 break
 
-            if self.num_timesteps > 0 and self.num_timesteps > self.learning_starts:
-                # If no `gradient_steps` is specified,
-                # do as many gradients steps as steps performed during the rollout
+            if self.num_timesteps > self.learning_starts:
                 gradient_steps = self.gradient_steps if self.gradient_steps >= 0 else rollout.episode_timesteps
-                # Special case when the user passes `gradient_steps=0`
-                if gradient_steps > 0:
+                if gradient_steps and gradient_steps > 0:
                     self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
-            
-            if self.num_timesteps % 500 == 0:
-                print("Each timesteps approx", round(time.time() - t0, 3), "ms")
+
+            advanced = self.num_timesteps - last_steps
+            if advanced >= LOG_EVERY_STEPS:
+                dt = time.perf_counter() - last_t
+                sps = advanced / dt # Steps per second
+                ms_per_step = 1000.0 / sps
+                print(f"SPEED {self.num_timesteps}/{total_timesteps} | {ms_per_step:.2f} ms/step")
+                last_t = time.perf_counter()
+                last_steps = self.num_timesteps
 
         callback.on_training_end()
-
         return self
 
     def train(self, gradient_steps: int, batch_size: int) -> None:
