@@ -334,6 +334,7 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
         # DEBUG EDIT
         while self.num_timesteps < total_timesteps:
             if self.num_timesteps % 500 == 0:
+                t0 = time.time()
                 print("Timestep", self.num_timesteps, "/", total_timesteps)
                 
             rollout = self.collect_rollouts(
@@ -356,6 +357,9 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
                 # Special case when the user passes `gradient_steps=0`
                 if gradient_steps > 0:
                     self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
+            
+            if self.num_timesteps % 500 == 0:
+                print("Each timesteps approx", round(time.time() - t0, 3), "ms")
 
         callback.on_training_end()
 
