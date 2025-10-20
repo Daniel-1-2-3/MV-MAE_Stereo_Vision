@@ -24,7 +24,7 @@ from CustomMetaworld.metaworld.utils import reward_utils
 
 from MAE_Model.prepare_input import Prepare
 
-RenderMode: TypeAlias = "Literal['human', 'rgb_array', 'depth_array']"
+RenderMode: TypeAlias = Literal['human', 'rgb_array', 'depth_array']
 
 class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     """The base environment for all Sawyer Mujoco envs that use mocap for XYZ control."""
@@ -68,6 +68,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.num_resets: int = 0
         self.current_seed: int | None = None
         self.obj_init_pos: npt.NDArray[Any] | None = None
+        
+        self._partially_observable = False
 
         self.width = img_width
         self.height = img_height
@@ -92,6 +94,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.init_left_pad: npt.NDArray[Any] = self.get_body_com("leftpad") # Initial center of mass
         self.init_right_pad: npt.NDArray[Any] = self.get_body_com("rightpad")
 
+        self.observation_space = self.sawyer_observation_space
         self.action_space = Box(
             np.array([-1, -1, -1, -1]),
             np.array([+1, +1, +1, +1]),
@@ -102,7 +105,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self._target_pos: npt.NDArray[Any] | None = None  # OVERRIDE ME
         self._random_reset_space: Box | None = None  # OVERRIDE ME
         self.goal_space: Box | None = None  # OVERRIDE ME
-        self._last_stable_obs: npt.NDArray[np.float32] | None = None
+        self._last_stable_obs = None
 
         self.init_qpos = np.copy(self.data.qpos)
         self.init_qvel = np.copy(self.data.qvel)
@@ -328,45 +331,50 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         )
         return np.hstack((pos_hand, gripper_distance_apart, obs_obj_padded))
     
-    def _get_obs(self) -> dict[str, torch.Tensor]:
-        """Returns a dictionary comprised of tensor representation of the image and state observations
-        Image observations: np.ndarray of shape (batch, height, width_total, channels), for passing into mvmae
-        State observations: np.ndarray of shape (batch, nstates)
+    def _get_obs(self):
+        """
+        Returns a dict:
+            "state_observation": np.ndarray, shape (21,), dtype float32
+            "image_observation": np.ndarray, shape (H, 2*W, 3), dtype float32 in [0,1]
+        """
+        
+        pos_goal = self._get_pos_goal()
+        if self._partially_observable:
+            pos_goal = np.zeros_like(pos_goal)
 
-        Returns:
-            The flat observation array (39 elements)
-        """
-        state_obs = self._get_curr_obs_combined_no_goal()
-        state_obs = torch.from_numpy(state_obs.astype(np.float32)).unsqueeze(0)
-        img_obs = self.render()
-        obs = {
-            "state_observation": state_obs,
-            "image_observation": img_obs
+        obs_no_goal = self._get_curr_obs_combined_no_goal() # (18, )
+        state_obs_np = np.hstack((obs_no_goal, pos_goal)).astype(np.float32, copy=False) # (21, )
+        img_obs_np = self.render()
+        
+        return {
+            "state_observation": state_obs_np,
+            "image_observation": img_obs_np,
         }
-        return obs
-    
-    def render(self):
-        """Override the Mujoco render method so that I can return two views for stereo vision
-            Returns a tensor of (batch, height, width_total, channels)
+
+    def render(self) -> np.ndarray:
         """
-        
-        left_view = cv2.cvtColor(cv2.flip(self.stereo_renderer_left.render("rgb_array"), 0), cv2.COLOR_RGB2BGR)
-        right_view = cv2.cvtColor(cv2.flip(self.stereo_renderer_right.render("rgb_array"), 0), cv2.COLOR_RGB2BGR)
-        
+        Override Mujoco render to return a stereo view suitable for MV-MAE.
+        Returns:
+            np.ndarray of shape (H, W_total, C), dtype float32, values in [0, 1]
+        """
+        # Grab RGB arrays and flip to match your original view
+        left_view  = np.flipud(self.stereo_renderer_left.render("rgb_array")).copy()
+        right_view = np.flipud(self.stereo_renderer_right.render("rgb_array")).copy()
+
+        # Concatenate horizontally: (H, W_total, C)
         stereo_image = np.concatenate([left_view, right_view], axis=1)
-        if self.render_mode == "human":
+
+        if getattr(self, "render_mode", None) == "human":
             enlarged = cv2.resize(stereo_image, None, fx=5.0, fy=5.0, interpolation=cv2.INTER_NEAREST)
             cv2.imshow("Stereo view", enlarged)
             cv2.waitKey(1)
-            
-        left_tensor = torch.from_numpy(np.transpose(left_view, (2, 0, 1)).copy()).unsqueeze(0).float() / 255.0
-        left_tensor = F.interpolate(left_tensor, size=(self.height, self.width), mode='bilinear', align_corners=False)
 
-        right_tensor = torch.from_numpy(np.transpose(right_view, (2, 0, 1)).copy()).unsqueeze(0).float() / 255.0
-        right_tensor = F.interpolate(right_tensor, size=(self.height, self.width), mode='bilinear', align_corners=False)
-
-        stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor])
-        return stereo_tensor
+        left_tensor  = torch.from_numpy(left_view.transpose(2, 0, 1).copy()).unsqueeze(0).float() / 255.0  # (1, C, H, W)
+        right_tensor = torch.from_numpy(right_view.transpose(2, 0, 1).copy()).unsqueeze(0).float() / 255.0
+        stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor]) # (1, H, W, C)
+        stereo_np = stereo_tensor[0].detach().cpu().numpy().astype(np.float32, copy=False)  # (H, W_total, C)
+        
+        return stereo_np
     
     def render_for_test_dataset(self):
         """Override the Mujoco render method so that I can return two views for stereo vision"""
@@ -383,14 +391,12 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     @cached_property
     def sawyer_observation_space(self) -> Dict:
         observation_space = Dict({
-            "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len,), dtype=np.float32),
-            "image_observation": Box(low=0, high=255, shape=(self.height, 2 * self.width, 3), dtype=np.float32)
+            "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len + 3,), dtype=np.float32),
+            "image_observation": Box(low=0.0, high=1.0, shape=(self.height, 2 * self.width, 3), dtype=np.float32)
         })
         return observation_space
  
-    def step(
-        self, action: npt.NDArray[np.float32]
-    ) -> tuple[npt.NDArray[np.float32], SupportsFloat, bool, bool, dict[str, Any]]:
+    def step(self, action: npt.NDArray[np.float32]):
         """
         Args:
             action: The action to take. Must be a 4 element array of floats.
@@ -431,9 +437,9 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self._last_stable_obs = self._get_obs()
 
         self._last_stable_obs["state_observation"] = np.clip(
-            self._last_stable_obs["state_observation"],
-            a_max=self.sawyer_observation_space["state_observation"].high,
+            self._last_stable_obs["state_observation"].astype(np.float32, copy=False),
             a_min=self.sawyer_observation_space["state_observation"].low,
+            a_max=self.sawyer_observation_space["state_observation"].high,
             dtype=np.float32,
         )
         reward, info = self.evaluate_state(self._last_stable_obs, action)
@@ -459,7 +465,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         # V1 environments don't have to implement it
         raise NotImplementedError
 
-    def reset_model(self) -> npt.NDArray[np.float32]:
+    def reset_model(self):
         qpos = self.init_qpos
         qvel = self.init_qvel
         self.set_state(qpos, qvel)

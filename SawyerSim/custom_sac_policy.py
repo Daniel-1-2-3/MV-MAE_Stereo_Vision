@@ -215,7 +215,8 @@ class SACPolicy(BasePolicy):
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
         # OVERRIDE the feature dim
-        critic_kwargs["features_dim"] = self.actor.features_dim
+        state_dim = int(self.observation_space["state_observation"].shape[-1])
+        critic_kwargs["features_dim"] = state_dim
         return ContinuousCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> torch.Tensor:

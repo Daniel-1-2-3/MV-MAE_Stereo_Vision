@@ -11,8 +11,8 @@ class ViTMaskedDecoder(nn.Module):
             img_w_size: int = 84,
             decoder_embed_dim: int = 512,
             in_channels: int = 3,
-            heads: int = 16,
-            depth: int = 8
+            heads: int = 8,
+            depth: int = 4
         ):
         
         super().__init__()

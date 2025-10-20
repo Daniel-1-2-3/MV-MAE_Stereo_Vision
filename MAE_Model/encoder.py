@@ -12,8 +12,8 @@ class ViTMaskedEncoder(nn.Module):
             in_channels: int = 3,
             img_h_size: int = 84,
             img_w_size: int = 168, # Width of the fused image, with both views
-            heads: int = 16,
-            depth: int = 12,
+            heads: int = 8,
+            depth: int = 6,
             masking_ratio: float = 0.75,
         ):
         
@@ -75,7 +75,7 @@ class ViTMaskedEncoder(nn.Module):
         masked_x = self.norm_masked(masked_x)
         unmasked_x = self.norm_unmasked(unmasked_x)
         
-        return masked_x, mask, unmasked_x,
+        return masked_x, mask, unmasked_x
 
     def random_view_masking(self, x: Tensor):
         """

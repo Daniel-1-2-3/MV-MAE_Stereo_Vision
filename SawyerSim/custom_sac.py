@@ -277,7 +277,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             # actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
             # Implement that above line in SAC.train() instead of hidden in Actor.forward() to make gradients flow to mvmae decoder too
             # Directly attach decoder output "out" into mvmae_loss, which is used in backprop together with policy loss
-            features, out, truth, mask = self.actor.extract_features(replay_data.observations, self.actor.features_extractor)
+            features, out, truth, mask = self.actor.extract_features(replay_data.observations, use_only_encoder=False)
             latent_pi = self.actor.latent_pi(features)
             mean_actions = self.actor.mu(latent_pi)
             log_std = self.actor.log_std(latent_pi)
@@ -320,7 +320,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
                 # Compute the next Q values: min over all critics targets
-                next_q_values = torch.cat(self.critic_target(replay_data.next_observations, next_actions, self.actor.mvmae), dim=1)
+                next_q_values = torch.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = torch.min(next_q_values, dim=1, keepdim=True)
                 # add entropy term
                 next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
@@ -329,7 +329,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
-            current_q_values = self.critic(replay_data.observations, replay_data.actions, self.actor.mvmae)
+            current_q_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
             critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
@@ -344,7 +344,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             # Compute actor loss
             # Alternative: actor_loss = torch.mean(log_prob - qf1_pi)
             # Min over all critic networks
-            q_values_pi = torch.cat(self.critic(replay_data.observations, actions_pi, self.actor.mvmae), dim=1)
+            q_values_pi = torch.cat(self.critic(replay_data.observations, actions_pi), dim=1)
             min_qf_pi, _ = torch.min(q_values_pi, dim=1, keepdim=True)
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
@@ -368,7 +368,6 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
-                # Copy running stats, see GH issue #996
                 polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
 
         self._n_updates += gradient_steps

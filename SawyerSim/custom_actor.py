@@ -81,7 +81,6 @@ class Actor(BasePolicy):
         )
         
         # Initialize MVMAE, default params, small embed dims to save memory
-        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.mvmae = MAEModel(
             nviews=nviews,
             patch_size=mvmae_patch_size,
@@ -102,9 +101,8 @@ class Actor(BasePolicy):
         
         # self.features_dim = features_dim, OVERIRDE with z + state_obs dims
         self.nviews = nviews  # fine to keep if used elsewhere
-        self.state_dim = int(observation_space["state_observation"].shape[-1])
-        self.features_dim = self.mvmae.encoder_embed_dim + self.state_dim
-        print("STATE_DIM:", self.state_dim, "FEATURES_DIM:", self.features_dim)
+        self.features_dim = self.mvmae.encoder_embed_dim
+        print("ACTOR FEATURES_DIM:", self.features_dim)
         
         self.activation_fn = activation_fn
         self.log_std_init = log_std_init
@@ -133,7 +131,7 @@ class Actor(BasePolicy):
             self.mu = nn.Linear(last_layer_dim, action_dim)
             self.log_std = nn.Linear(last_layer_dim, action_dim)  # type: ignore[assignment]
             
-        self.to(dev)
+        self.to(self.device)
 
     def _get_constructor_parameters(self) -> dict[str, Any]:
         data = super()._get_constructor_parameters()
@@ -178,7 +176,7 @@ class Actor(BasePolicy):
         self.action_dist.sample_weights(self.log_std, batch_size=batch_size)
         
     # OVERRIDE the extract_features() to use mvmae, process obs using mvmae, then pass into feature extractor
-    def extract_features(self, obs: PyTorchObs, features_extractor: BaseFeaturesExtractor) -> torch.Tensor:
+    def extract_features(self, obs: PyTorchObs, use_only_encoder=True) -> torch.Tensor:
         """
             For this project, the observation will in the shape of a dictionary
             {
@@ -203,22 +201,14 @@ class Actor(BasePolicy):
         else:
             if img.device != self.device:
                 img = img.to(self.device)
-
-        # Ensure state observation is float32 and on correct device
-        state_obs = obs["state_observation"]
-        if not isinstance(state_obs, torch.Tensor):
-            state_obs = torch.as_tensor(state_obs, dtype=torch.float32, device=self.device)
-        else:
-            if state_obs.dtype != torch.float32:
-                state_obs = state_obs.to(dtype=torch.float32)
-            if state_obs.device != self.device:
-                state_obs = state_obs.to(self.device)
         
-        out, mask, z = self.mvmae(img) # z: [B, N, D]
-        z_feat = z.mean(dim=1)  
+        out, mask = None, None
+        if (use_only_encoder):
+            _, _, z = self.mvmae.encoder(img)
+        else:
+            out, mask, z = self.mvmae(img)
 
-        # OVERRIDE the feature extractor
-        return torch.cat([z_feat, state_obs], dim=1), out, img, mask
+        return z.mean(dim=1), out, img, mask # mean pool z
         
     def get_action_dist_params(self, obs: PyTorchObs) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
@@ -228,8 +218,8 @@ class Actor(BasePolicy):
         :return:
             Mean, standard deviation and optional keyword arguments.
         """
-        features, out, truth, mask = self.extract_features(obs, self.features_extractor)
-        latent_pi = self.latent_pi(features)
+        z, out, truth, mask = self.extract_features(obs)
+        latent_pi = self.latent_pi(z)
         mean_actions = self.mu(latent_pi)
 
         if self.use_sde:

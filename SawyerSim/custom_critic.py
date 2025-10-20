@@ -11,6 +11,7 @@ from stable_baselines3.common.torch_layers import (
     create_mlp,
 )
 from stable_baselines3.common.type_aliases import PyTorchObs
+from MAE_Model.model import MAEModel
 
 class ContinuousCritic(BaseModel):
     """
@@ -65,6 +66,7 @@ class ContinuousCritic(BaseModel):
         self.share_features_extractor = share_features_extractor
         self.n_critics = n_critics
         self.q_networks: list[nn.Module] = []
+        self.flatten = nn.Flatten()
         
         for idx in range(n_critics):
             q_net_list = create_mlp(features_dim + action_dim, 1, net_arch, activation_fn)
@@ -72,8 +74,8 @@ class ContinuousCritic(BaseModel):
             self.add_module(f"qf{idx}", q_net)
             self.q_networks.append(q_net)
             
-    #OVERRIDE extract_features, take mvmae model as an input
-    def extract_features(self, obs: PyTorchObs, mvmae) -> torch.Tensor:
+    #OVERRIDE extract_features, take the "state" in the dictionary that is my current observation
+    def extract_features(self, obs) -> torch.Tensor:
         """
             For this project, the observation will in the shape of a dictionary
             {
@@ -81,28 +83,34 @@ class ContinuousCritic(BaseModel):
                 image_observation: Tensor of shape (batch, height, width_total, channels)
             }
         """
-        with torch.no_grad():
-            _, _, z = mvmae(obs["image_observation"])
-        # z is a Tensor of shape (batch, total_patches, embed_dim)
+        # Ensure state observation is float32 and on correct device
+        state_obs = obs["state_observation"]
+        if not isinstance(state_obs, torch.Tensor):
+            state_obs = torch.as_tensor(state_obs, dtype=torch.float32, device=self.device)
+        else:
+            if state_obs.dtype != torch.float32:
+                state_obs = state_obs.to(dtype=torch.float32)
+            if state_obs.device != self.device:
+                state_obs = state_obs.to(self.device)
         
-        z_feat = z.mean(dim=1)
-        # OVERRIDE the feature extractor
-        return torch.cat([z_feat, obs["state_observation"]], dim=1)
+        # BaseModel implements a Flatten extractor
+        return self.flatten(state_obs)
+    
 
-    def forward(self, obs: torch.Tensor, actions: torch.Tensor, mvmae) -> tuple[torch.Tensor, ...]:
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # Learn the features extractor using the policy loss only
         # when the features_extractor is shared with the actor
         with torch.set_grad_enabled(not self.share_features_extractor):
-            features = self.extract_features(obs, mvmae)
+            features = self.extract_features(obs)
         qvalue_input = torch.cat([features, actions], dim=1)
         return tuple(q_net(qvalue_input) for q_net in self.q_networks)
 
-    def q1_forward(self, obs: torch.Tensor, actions: torch.Tensor, mvmae) -> torch.Tensor:
+    def q1_forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """
         Only predict the Q-value using the first network.
         This allows to reduce computation when all the estimates are not needed
         (e.g. when updating the policy in TD3).
         """
         with torch.no_grad():
-            features = self.extract_features(obs, mvmae)
-        return self.q_networks[0](torch.cat([features, actions], dim=1))
+            z = self.extract_features(obs)
+        return self.q_networks[0](torch.cat([z, actions], dim=1))

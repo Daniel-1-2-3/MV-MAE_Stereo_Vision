@@ -116,9 +116,9 @@ def get_args():
     # RL hyperparameters
     parser.add_argument("--render_mode", type=str, default="rgb_array")
     parser.add_argument("--learning_rate", type=float, default=3e-4)
-    parser.add_argument("--buffer_size", type=int, default=1_000_000)
+    parser.add_argument("--buffer_size", type=int, default=100_000)
     parser.add_argument("--learning_starts", type=int, default=50_000)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--n_steps", type=int, default=1,
                         help="Number of steps before update")
