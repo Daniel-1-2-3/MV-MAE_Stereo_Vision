@@ -42,13 +42,15 @@ class ViTMaskedEncoder(nn.Module):
         self.norm_masked = nn.LayerNorm(normalized_shape=self.embed_dim, eps=1e-6)
         self.norm_unmasked = nn.LayerNorm(normalized_shape=self.embed_dim, eps=1e-6)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, mask_x: bool):
         """
         Entire encoder feed forward operation
 
         Args:
             x (Tensor): Representing all the views stitched together horizontally,
                         with a shape of (batch, height, width_total, channels)
+            mask_x: Whether to mask 75% of x. Training pipeline masks when training mvmae,
+                        but does not mask when using the encoder output as input.
 
         Returns:
             masked_x (Tensor):      Has shape (batch, unmasked_patches, embed_dim)

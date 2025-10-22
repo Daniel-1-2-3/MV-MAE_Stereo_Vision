@@ -35,7 +35,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     )
     TARGET_RADIUS: float = 0.05 # Upper bound for distance from the target when checking for task completion
     max_path_length: int = 500 # Maximum episode length (task horizon)
-    
+
     def __init__(
         self,
         frame_skip: int = 5,
@@ -85,9 +85,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             height=img_height,
         )
 
-        mujoco.mj_forward(
-            self.model, self.data
-        )  # DO NOT REMOVE: EZPICKLE WON'T WORK
+        mujoco.mj_forward(self.model, self.data)  # DO NOT REMOVE: EZPICKLE WON'T WORK
 
         self._did_see_sim_exception: bool = False # If sim hits an unstable physics state
         self.init_left_pad: npt.NDArray[Any] = self.get_body_com("leftpad") # Initial center of mass
@@ -122,9 +120,33 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         )
         
         self.camera_pairs = camera_pairs
-        # mujoco.Renderer is much faster than the wrapper MujocoRenderer, no MSAA
-        self.renderer = mujoco.Renderer(self.model, height=self.height, width=self.width, max_geom=1000)
         self.left_cam_name, self.right_cam_name = random.choice(self.camera_pairs)
+
+        # Fast offscreen renderer
+        self._mjv_cam = mujoco.MjvCamera()
+        self._mjv_cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+
+        # Reduce maxgeom (1000 is plenty for these tasks)
+        self._mjv_opt = mujoco.MjvOption()
+        self._mjv_scene = mujoco.MjvScene(self.model, maxgeom=1000)
+        self._gl_ctx = None
+        if hasattr(mujoco, "GLContext") and mujoco.GLContext is not None:
+            # Size doesn't have to match exactly; use your render size
+            self._gl_ctx = mujoco.GLContext(int(self.width), int(self.height))
+            self._gl_ctx.make_current()
+        else:
+            raise RuntimeError(
+                "MuJoCo GLContext unavailable. Ensure MUJOCO_GL is set (e.g., 'egl' or 'osmesa') "
+                "BEFORE importing mujoco."
+            )
+        self._mjr_ctx = mujoco.MjrContext(self.model, mujoco.mjtFontScale.mjFONTSCALE_100)
+        mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, self._mjr_ctx)
+        self._mjr_ctx.readDepthMap = mujoco.mjtDepthMap.mjDEPTH_ZEROFAR
+        self._mjr_rect = mujoco.MjrRect(0, 0, int(self.width), int(self.height))
+        
+        # Preallocate CPU buffers used by mjr_readPixels (uint8, HxWx3)
+        self._rgb_left  = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        self._rgb_right = np.empty((self.height, self.width, 3), dtype=np.uint8)
 
     def seed(self, seed: int) -> list[int]:
         """Seeds the environment.
@@ -323,42 +345,63 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         
         return {
             "state_observation": state_obs_np,
-            "image_observation": img_obs_np,
+            "image_observation": img_obs_np,    
         }
+
+    def _render_one_camera(self, cam_name: str, out_buf: np.ndarray) -> np.ndarray:
+        """
+        Render a fixed camera into preallocated uint8 buffer, matching DeepMind
+        Renderer output (including vertical flip).
+        out_buf: (H, W, 3) uint8; returned buffer is vertically flipped in place.
+        """
+        # Keep EGL/OSMesa context current before GL calls
+        if getattr(self, "_gl_ctx", None) is not None:
+            self._gl_ctx.make_current()
+    
+        cam_id = self.model.camera(cam_name).id
+        self._mjv_cam.fixedcamid = int(cam_id)
+
+        mujoco.mjv_updateScene(
+            self.model, self.data, self._mjv_opt, None,
+            self._mjv_cam, mujoco.mjtCatBit.mjCAT_ALL, self._mjv_scene
+        )
+        mujoco.mjr_render(self._mjr_rect, self._mjv_scene, self._mjr_ctx)
+        mujoco.mjr_readPixels(out_buf, None, self._mjr_rect, self._mjr_ctx)
+
+        # DeepMind Renderer does out[:] = np.flipud(out); replicate exactly:
+        out_buf[:] = out_buf[::-1, ...]
+        return out_buf
 
     def render(self) -> np.ndarray:
         """
-        Override Mujoco render to return a stereo view suitable for MV-MAE.
         Returns:
-            np.ndarray of shape (H, W_total, C), dtype float32, values in [0, 1]
+            np.ndarray (H, 2*W, 3), dtype float32 in [0,1] then normalized,
+            identical to the previous implementation that used mujoco.Renderer.
         """
-        
-        # left/right views
-        self.renderer.update_scene(self.data, camera=self.left_cam_name)
-        left = self.renderer.render() # uint8 (H, W, 3)
-        left_tensor = torch.from_numpy(left).permute(2, 0, 1).unsqueeze(0).float() / 255.0 # (1, C, H, W)
-        
-        self.renderer.update_scene(self.data, camera=self.right_cam_name)
-        right = self.renderer.render()          
-        right_tensor = torch.from_numpy(right).permute(2, 0, 1).unsqueeze(0).float() / 255.0
-        
-        # Fuse and normalize views
-        stereo_tensor = Prepare.fuse_normalize([left_tensor, right_tensor]) # (1, H, W, C)
-        stereo_np = stereo_tensor[0].detach().cpu().numpy().astype(np.float32, copy=False)  # (H, W_total, C)
-        
+        # Render both views with the fast pathway
+        left_u8  = self._render_one_camera(self.left_cam_name,  self._rgb_left)
+        right_u8 = self._render_one_camera(self.right_cam_name, self._rgb_right)
+
+        # Convert to tensors exactly like before, fuse + normalize with your helper
+        left_t  = torch.from_numpy(left_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+        right_t = torch.from_numpy(right_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+
+        stereo_t = Prepare.fuse_normalize([left_t, right_t])  # (1, H, 2W, C)
+        stereo_np = stereo_t[0].detach().cpu().numpy().astype(np.float32, copy=False)
+
         if getattr(self, "render_mode", None) == "human":
-            stereo_image = np.concatenate([left, right], axis=1)
+            stereo_image = np.concatenate([left_u8, right_u8], axis=1)
             enlarged = cv2.resize(stereo_image, None, fx=5.0, fy=5.0, interpolation=cv2.INTER_NEAREST)
             cv2.imshow("Stereo view", enlarged)
             cv2.waitKey(1)
-        
+
         return stereo_np
 
     @cached_property
     def sawyer_observation_space(self) -> Dict:
         observation_space = Dict({
             "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len + 3,), dtype=np.float32),
-            "image_observation": Box(low=0.0, high=1.0, shape=(self.height, 2 * self.width, 3), dtype=np.float32)
+            "image_observation": Box(low=np.float32(-5.0), high=np.float32(5.0), shape=(self.height, 2 * self.width, 3), dtype=np.float32)
         })
         return observation_space
  
@@ -401,13 +444,11 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             )
         mujoco.mj_forward(self.model, self.data)
         self._last_stable_obs = self._get_obs()
+        x = self._last_stable_obs["state_observation"].astype(np.float32, copy=False)
+        low = self.sawyer_observation_space["state_observation"].low
+        high = self.sawyer_observation_space["state_observation"].high
+        self._last_stable_obs["state_observation"] = np.clip(x, a_min=low, a_max=high)
 
-        self._last_stable_obs["state_observation"] = np.clip(
-            self._last_stable_obs["state_observation"].astype(np.float32, copy=False),
-            a_min=self.sawyer_observation_space["state_observation"].low,
-            a_max=self.sawyer_observation_space["state_observation"].high,
-            dtype=np.float32,
-        )
         reward, info = self.evaluate_state(self._last_stable_obs, action)
         # step will never return a terminate==True if there is a success
         # but we can return truncate=True if the current path length == max path length
