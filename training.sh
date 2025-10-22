@@ -23,16 +23,50 @@ if [[ ! -f "$IMG" ]]; then
   echo "ERROR: $IMG not found"; exit 2
 fi
 
-# Make both /opt/src and /opt/src/MV_MAE_Implementation visible to Python inside the container
+# Make your code visible to Python inside the container
 export APPTAINERENV_PYTHONPATH="/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
+# Make sure EGL uses the NVIDIA driver inside the container
+export APPTAINERENV_MUJOCO_GL=egl
+export APPTAINERENV_PYOPENGL_PLATFORM=egl
+export APPTAINERENV_DISPLAY=
+export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
+export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
+export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+if [[ -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json ]]; then
+  export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+fi
+
+# Verify OpenGL is on the GPU (should say NVIDIA)
 apptainer exec --nv \
   --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" \
   --pwd  "$SLURM_SUBMIT_DIR" \
   "$IMG" \
   bash -lc '
-    export MUJOCO_GL=egl
+    python - << "PY"
+import torch, mujoco, OpenGL.GL as gl
+print("torch cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+ctx = mujoco.GLContext(64, 64); ctx.make_current()
+s = lambda b: b.decode("utf-8","ignore") if b else None
+print("OpenGL vendor  :", s(gl.glGetString(gl.GL_VENDOR)))
+print("OpenGL renderer:", s(gl.glGetString(gl.GL_RENDERER)))
+ctx.free()
+PY
+  '
+
+# Training run
+apptainer exec --nv \
+  --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" \
+  --pwd  "$SLURM_SUBMIT_DIR" \
+  "$IMG" \
+  bash -lc '
     export PYTHONUNBUFFERED=1
+    # (Optional) re-export for clarity; APPTAINERENV_* already applied
+    export MUJOCO_GL=egl
+    export PYOPENGL_PLATFORM=egl
+    export DISPLAY=
+    export LIBGL_ALWAYS_SOFTWARE=0
+    export MESA_LOADER_DRIVER_OVERRIDE=
     stdbuf -oL -eL python -u -m MV_MAE_Implementation.trainer_pipeline \
       --learning_starts 10_000 \
       --batch_size 64 \
