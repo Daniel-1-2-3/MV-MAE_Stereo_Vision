@@ -368,8 +368,6 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         mujoco.mjr_render(self._mjr_rect, self._mjv_scene, self._mjr_ctx)
         mujoco.mjr_readPixels(out_buf, None, self._mjr_rect, self._mjr_ctx)
 
-        # DeepMind Renderer does out[:] = np.flipud(out); replicate exactly:
-        out_buf[:] = out_buf[::-1, ...]
         return out_buf
 
     def render(self) -> np.ndarray:
