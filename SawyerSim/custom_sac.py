@@ -306,7 +306,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             
             # Train mvmae
             t0 = time.perf_counter()
-            out, mask, z = self.actor.mvmae(replay_data.observations, mask=True)
+            out, mask, z = self.actor.mvmae(replay_data.observations, mask_x=True)
             mvmae_loss = self.actor.mvmae.compute_loss(out, truth, mask)
             self.debugger.put((time.perf_counter() - t0) * 1e3, "speed_mvmae_grad")
             
