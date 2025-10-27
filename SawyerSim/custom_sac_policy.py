@@ -148,6 +148,8 @@ class SACPolicy(BasePolicy):
 
         if self.share_features_extractor:
             self.critic = self.make_critic(features_extractor=self.actor.features_extractor)
+            self.critic.features_dim = self.actor.features_dim
+            self.critic.make_q_networks()
             # Do not optimize the shared features extractor with the critic loss
             # otherwise, there are gradient computation issues
             critic_parameters = [param for name, param in self.critic.named_parameters() if "features_extractor" not in name]
@@ -215,7 +217,7 @@ class SACPolicy(BasePolicy):
 
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
-        return ContinuousCritic(**critic_kwargs).to(self.device)
+        return ContinuousCritic(**critic_kwargs, features_dim=self.actor.features_dim).to(self.device)
 
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
         return self._predict(obs, deterministic=deterministic)

@@ -66,9 +66,17 @@ class ContinuousCritic(BaseModel):
         self.activation_fn = activation_fn
         self.share_features_extractor = share_features_extractor
         self.n_critics = n_critics
+        self.features_dim = None
         self.q_networks: list[nn.Module] = []
         
         self.encoder = None
+    
+    def make_q_networks(self):
+        for idx in range(self.n_critics):
+            q_net_list = create_mlp(self.features_dim + self.action_dim, 1, self.net_arch, self.activation_fn)
+            q_net = nn.Sequential(*q_net_list)
+            self.add_module(f"qf{idx}", q_net)
+            self.q_networks.append(q_net)
             
     #OVERRIDE extract_features, take the "state" in the dictionary that is my current observation
     def extract_features(self, obs) -> torch.Tensor:
@@ -105,15 +113,6 @@ class ContinuousCritic(BaseModel):
 
     def set_encoder(self, encoder):
         self.encoder = encoder
-        
-        # With encoder set, we have the proper features_dim, so now we create the linear layers
-        self.total_patches = (self.encoder.img_h_size // self.encoder.patch_size) * (self.encoder.img_w_fused_size // self.encoder.patch_size)
-        self.features_dim = self.total_patches * self.encoder.embed_dim
-        for idx in range(self.n_critics):
-            q_net_list = create_mlp(self.features_dim + self.action_dim, 1, self.net_arch, self.activation_fn)
-            q_net = nn.Sequential(*q_net_list)
-            self.add_module(f"qf{idx}", q_net)
-            self.q_networks.append(q_net)
 
     def q1_forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """
