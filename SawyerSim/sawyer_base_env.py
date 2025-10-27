@@ -121,17 +121,15 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         
         self.camera_pairs = camera_pairs
         self.left_cam_name, self.right_cam_name = random.choice(self.camera_pairs)
+        self.render_mode = render_mode
 
         # Fast offscreen renderer
         self._mjv_cam = mujoco.MjvCamera()
         self._mjv_cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-
-        # Reduce maxgeom (1000 is plenty for these tasks)
         self._mjv_opt = mujoco.MjvOption()
         self._mjv_scene = mujoco.MjvScene(self.model, maxgeom=1000)
         self._gl_ctx = None
         if hasattr(mujoco, "GLContext") and mujoco.GLContext is not None:
-            # Size doesn't have to match exactly; use your render size
             self._gl_ctx = mujoco.GLContext(int(self.width), int(self.height))
             self._gl_ctx.make_current()
         else:
@@ -292,66 +290,17 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         assert self._target_pos.ndim == 1
         return self._target_pos
     
-    def _get_curr_obs_combined_no_goal(self) -> npt.NDArray[np.float32]:
-        """Combines the end effector's {pos, closed amount} and the object(s)' {pos, quat} into a single flat observation.
-        Note: The goal's position is *not* included in this.
-        
-        Returns:
-            The flat observation array (18 elements)
-        """
-
-        pos_hand = self.get_endeff_pos()
-        finger_right, finger_left = (
-            self.data.body("rightclaw"),
-            self.data.body("leftclaw"),
-        )
-        # the gripper can be at maximum about ~0.1 m apart.
-        # dividing by 0.1 normalized the gripper distance between
-        # 0 and 1. Further, we clip because sometimes the grippers
-        # are slightly more than 0.1m apart (~0.00045 m)
-        # clipping removes the effects of this random extra distance
-        # that is produced by mujoco
-
-        gripper_distance_apart = np.linalg.norm(finger_right.xpos - finger_left.xpos)
-        gripper_distance_apart = np.clip(gripper_distance_apart / 0.1, 0.0, 1.0)
-
-        obs_obj_padded = np.zeros(self._obs_obj_max_len)
-        obj_pos = self._get_pos_objects()
-        assert len(obj_pos) % 3 == 0
-        obj_pos_split = np.split(obj_pos, len(obj_pos) // 3)
-
-        obj_quat = self._get_quat_objects()
-        assert len(obj_quat) % 4 == 0
-        obj_quat_split = np.split(obj_quat, len(obj_quat) // 4)
-        obs_obj_padded[: len(obj_pos) + len(obj_quat)] = np.hstack(
-            [np.hstack((pos, quat)) for pos, quat in zip(obj_pos_split, obj_quat_split)]
-        )
-        return np.hstack((pos_hand, gripper_distance_apart, obs_obj_padded))
-    
     def _get_obs(self):
         """
-        Returns a dict:
-            "state_observation": np.ndarray, shape (21,), dtype float32
-            "image_observation": np.ndarray, shape (H, 2*W, 3), dtype float32 in [0,1]
+        Returns the image, both views fused, in numpy array format
+            np.ndarray, shape (H, 2*W, 3), dtype float32 roughly [-4, 4]
         """
-        
-        pos_goal = self._get_pos_goal()
-        if self._partially_observable:
-            pos_goal = np.zeros_like(pos_goal)
-
-        obs_no_goal = self._get_curr_obs_combined_no_goal() # (18, )
-        state_obs_np = np.hstack((obs_no_goal, pos_goal)).astype(np.float32, copy=False) # (21, )
         img_obs_np = self.render()
-        
-        return {
-            "state_observation": state_obs_np,
-            "image_observation": img_obs_np,    
-        }
-
+        return img_obs_np
+   
     def _render_one_camera(self, cam_name: str, out_buf: np.ndarray) -> np.ndarray:
         """
-        Render a fixed camera into preallocated uint8 buffer, matching DeepMind
-        Renderer output (including vertical flip).
+        Render a fixed camera into preallocated uint8 buffer, matching DeepMind Renderer output.
         out_buf: (H, W, 3) uint8; returned buffer is vertically flipped in place.
         """
         # Keep EGL/OSMesa context current before GL calls
@@ -373,7 +322,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
     def render(self) -> np.ndarray:
         """
         Returns:
-            np.ndarray (H, 2*W, 3), dtype float32 in [0,1] then normalized,
+            np.ndarray (H, 2*W, 3), dtype float32 roughly [-4, 4], normalized,
             identical to the previous implementation that used mujoco.Renderer.
         """
         # Render both views with the fast pathway
@@ -396,11 +345,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         return stereo_np
 
     @cached_property
-    def sawyer_observation_space(self) -> Dict:
-        observation_space = Dict({
-            "state_observation": Box(low=-np.inf, high=np.inf, shape=(3 + 1 + self._obs_obj_max_len + 3,), dtype=np.float32),
-            "image_observation": Box(low=np.float32(-5.0), high=np.float32(5.0), shape=(self.height, 2 * self.width, 3), dtype=np.float32)
-        })
+    def sawyer_observation_space(self) -> Box:
+        observation_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(self.height, 2 * self.width, 3), dtype=np.float32)
         return observation_space
  
     def step(self, action: npt.NDArray[np.float32]):
@@ -441,13 +387,12 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
                 },
             )
         mujoco.mj_forward(self.model, self.data)
-        self._last_stable_obs = self._get_obs()
-        x = self._last_stable_obs["state_observation"].astype(np.float32, copy=False)
-        low = self.sawyer_observation_space["state_observation"].low
-        high = self.sawyer_observation_space["state_observation"].high
-        self._last_stable_obs["state_observation"] = np.clip(x, a_min=low, a_max=high)
+        
+        x = self._get_obs().astype(np.float32, copy=False)
+        low, high = self.observation_space.low, self.observation_space.high
+        self._last_stable_obs = np.clip(x, a_min=low, a_max=high)
 
-        reward, info = self.evaluate_state(self._last_stable_obs, action)
+        reward, info = self.evaluate_state()
         # step will never return a terminate==True if there is a success
         # but we can return truncate=True if the current path length == max path length
         truncate = False
@@ -456,9 +401,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             
         return self._last_stable_obs, reward, False, truncate, info
 
-    def evaluate_state(
-        self, obs: npt.NDArray[np.float32], action: npt.NDArray[np.float32]
-    ) -> tuple[float, dict[str, Any]]:
+    def evaluate_state(self) -> tuple[float, dict[str, Any]]:
         """Does the heavy-lifting for `step()` -- namely, calculating reward and populating the `info` dict with training metrics.
 
         Returns:
