@@ -9,6 +9,7 @@ from scipy.spatial.transform import Rotation
 
 from CustomMetaworld.metaworld.asset_path_utils import full_V3_path_for
 from SawyerSim.sawyer_base_env import RenderMode, SawyerXYZEnv
+from SawyerSim.debugger import Debugger
 from CustomMetaworld.metaworld.types import InitConfigDict
 from CustomMetaworld.metaworld.utils import reward_utils
 
@@ -24,7 +25,8 @@ class SawyerReachEnvV3(SawyerXYZEnv):
         reward_function_version: str = "v2",
         img_height: int = 84,
         img_width: int = 84,
-        max_path_length: int = 300
+        max_path_length: int = 300,
+        debugger: Debugger | None = None,
     ) -> None:
         goal_low = (-0.1, 0.8, 0.05)
         goal_high = (0.1, 0.9, 0.3)
@@ -43,6 +45,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
             camera_id=camera_id,
             img_height=img_height,
             img_width=img_width,
+            debugger=debugger
         )
         self.reward_function_version = reward_function_version
 

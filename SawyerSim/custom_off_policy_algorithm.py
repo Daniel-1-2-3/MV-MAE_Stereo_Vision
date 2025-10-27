@@ -20,6 +20,7 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Rollout
 from stable_baselines3.common.utils import safe_mean, should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.her.her_replay_buffer import HerReplayBuffer
+from SawyerSim.debugger import Debugger
 
 SelfOffPolicyAlgorithm = TypeVar("SelfOffPolicyAlgorithm", bound="CustomOffPolicyAlgorithm")
 
@@ -107,6 +108,7 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
         use_sde_at_warmup: bool = False,
         sde_support: bool = True,
         supported_action_spaces: Optional[tuple[type[spaces.Space], ...]] = None,
+        debugger: Debugger | None = None, #OVERRIDE init to include the debugger
     ):
         super().__init__(
             policy=policy,
@@ -124,6 +126,7 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
             sde_sample_freq=sde_sample_freq,
             supported_action_spaces=supported_action_spaces,
         )
+        self.debugger = debugger
         self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.learning_starts = learning_starts
@@ -354,9 +357,12 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
                 dt = time.perf_counter() - last_t
                 sps = advanced / dt # Steps per second
                 ms_per_step = 1000.0 / sps
-                print(f"OVERALL SPEED {self.num_timesteps}/{total_timesteps} | {ms_per_step:.2f} ms/step")
+                print(f"OVERALLSPEED {self.num_timesteps}/{total_timesteps} | {ms_per_step:.2f} ms/step")
                 last_t = time.perf_counter()
                 last_steps = self.num_timesteps
+                
+                self.debugger.print_all()
+                self.debugger.clear()
 
         callback.on_training_end()
         return self

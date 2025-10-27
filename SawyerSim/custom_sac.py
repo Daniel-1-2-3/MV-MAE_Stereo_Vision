@@ -6,14 +6,16 @@ from gymnasium import spaces
 from torch.nn import functional as F
 import csv
 import copy
+import time
 
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from SawyerSim.custom_sac_policy import MultiInputPolicy, SACPolicy, Actor
+from SawyerSim.custom_sac_policy import SACPolicy, MultiInputPolicy
 from SawyerSim.custom_critic import ContinuousCritic
+from SawyerSim.custom_actor import Actor
 from SawyerSim.custom_off_policy_algorithm import CustomOffPolicyAlgorithm
 from SawyerSim.debugger import Debugger
 
@@ -151,6 +153,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             use_sde_at_warmup=use_sde_at_warmup,
             supported_action_spaces=(spaces.Box,),
             support_multi_env=True,
+            debugger=debugger,
         )
 
         self.coef_mvmae = coef_mvmae
@@ -165,7 +168,6 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
         
         self.csv_logging = False
         self.log_file = log_file
-        self.debugger = debugger
 
         if _init_setup_model:
             self._setup_model()
@@ -285,7 +287,11 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             # actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
             # Implement that above line in SAC.train() instead of hidden in Actor.forward() to make gradients flow to mvmae decoder too
             # Directly attach decoder output "out" into mvmae_loss, which is used in backprop together with policy loss
+            t0 = time.perf_counter()
             features, truth = self.actor.extract_features(replay_data.observations)
+            self.debugger.put((time.perf_counter() - t0) * 1000, "speed_encoder_grad")
+            
+            t0 = time.perf_counter()
             latent_pi = self.actor.latent_pi(features)
             mean_actions = self.actor.mu(latent_pi)
             log_std = self.actor.log_std(latent_pi)
@@ -294,12 +300,15 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             self.actor.action_dist.proba_distribution(mean_actions, log_std)
             dist = self.actor.action_dist.distribution
             actions_pi = dist.rsample()
-            
+
             log_prob = dist.log_prob(actions_pi)
+            self.debugger.put((time.perf_counter() - t0) * 1e3, "speed_actor_fwd")
             
             # Train mvmae
+            t0 = time.perf_counter()
             out, mask, z = self.actor.mvmae(replay_data.observations, mask=True)
             mvmae_loss = self.actor.mvmae.compute_loss(out, truth, mask)
+            self.debugger.put((time.perf_counter() - t0) * 1e3, "speed_mvmae_grad")
             
             # RENDER RECON
             # self.actor.mvmae.render_reconstruction(out)
@@ -339,8 +348,10 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
+            t0 = time.perf_counter()
             current_q_values = self.critic(replay_data.observations, replay_data.actions)
-
+            self.debugger.put((time.perf_counter() - t0) * 1e3, "speed_critics_fwd")
+            
             # Compute critic loss
             critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
             assert isinstance(critic_loss, torch.Tensor)  # for type checker

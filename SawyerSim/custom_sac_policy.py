@@ -49,6 +49,7 @@ class SACPolicy(BasePolicy):
     critic: ContinuousCritic
     critic_target: ContinuousCritic
 
+    # OVERRIDE init to include MVMAE parameters
     def __init__(
         self,
         observation_space: spaces.Space,
@@ -214,9 +215,6 @@ class SACPolicy(BasePolicy):
 
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
-        # OVERRIDE the feature dim
-        state_dim = int(self.observation_space["state_observation"].shape[-1])
-        critic_kwargs["features_dim"] = state_dim
         return ContinuousCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
