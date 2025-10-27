@@ -157,10 +157,14 @@ class SACPolicy(BasePolicy):
             # Create a separate features extractor for the critic
             # this requires more memory and computation
             self.critic = self.make_critic(features_extractor=None)
+            self.critic.features_dim = self.actor.features_dim
+            self.critic.make_q_networks()
             critic_parameters = list(self.critic.parameters())
 
         # Critic target should not share the features extractor with critic
         self.critic_target = self.make_critic(features_extractor=None)
+        self.critic_target.features_dim = self.actor.features_dim
+        self.critic_target.make_q_networks()
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         self.critic.optimizer = self.optimizer_class(
@@ -217,7 +221,7 @@ class SACPolicy(BasePolicy):
 
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> ContinuousCritic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
-        return ContinuousCritic(**critic_kwargs, features_dim=self.actor.features_dim).to(self.device)
+        return ContinuousCritic(**critic_kwargs).to(self.device)
 
     def forward(self, obs: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
         return self._predict(obs, deterministic=deterministic)
