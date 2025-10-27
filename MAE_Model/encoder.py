@@ -53,9 +53,8 @@ class ViTMaskedEncoder(nn.Module):
                         but does not mask when using the encoder output as input.
 
         Returns:
-            masked_x (Tensor):      Has shape (batch, unmasked_patches, embed_dim)
-            unmasked_x (Tensor):    Has shape (batch, total_patches, embed_dim)
-            
+            x (Tensor): Either has shape (batch, unmasked_patches, embed_dim) or
+                        shape (batch, total_patches, embed_dim)
             mask (Tensor):      Has shape (batch, total_num_patches), where each vector in the 
                                 last dimension is a binary mask with 0 representing unmasked, and 
                                 1 representing masked
@@ -65,19 +64,16 @@ class ViTMaskedEncoder(nn.Module):
         # - (batch, total patches across both views, embed_dim)
         
         # Add sin/cos positional embeddings to each patch, addition element wise along last dim
-        unmasked_x = self.add_pos_embeds(x) 
-        
-        masked_x, mask = self.random_view_masking(unmasked_x)
-        # - (batch, unmasked_patches, embed_dim)
+        x = self.add_pos_embeds(x)
+        mask = None
+        if mask_x:
+            x, mask = self.random_view_masking(x) # (batch, unmasked_patches, embed_dim)
 
-        # Masked x passed through vit
         for block in self.vit_blocks:
-            masked_x = block(masked_x)
-            unmasked_x = block(unmasked_x)
-        masked_x = self.norm_masked(masked_x)
-        unmasked_x = self.norm_unmasked(unmasked_x)
+            x = block(x)
         
-        return masked_x, mask, unmasked_x
+        x = self.norm_masked(x) if mask_x else self.norm_unmasked(x)
+        return x, mask
 
     def random_view_masking(self, x: Tensor):
         """

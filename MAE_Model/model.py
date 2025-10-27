@@ -62,7 +62,7 @@ class MAEModel(nn.Module):
         )
         self.out_proj = nn.Linear(decoder_embed_dim, self.patch_size ** 2 * in_channels)
     
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, mask_x: True):
         """
         Whole pipeline of the MV-MAE model: patchified, 
         then passed through encoder, mask tokens added, and 
@@ -81,8 +81,8 @@ class MAEModel(nn.Module):
             z (Tensor):    (batch, total_patches, patch_size^2 * channels) This is the input to the 
                                     actor in the pipeline. It is the input, without masking, passed through the encoder
         """
-        masked_x, mask, z = self.encoder(x)
-        out = self.decoder(masked_x, mask)
+        z, mask = self.encoder(x, mask_x)
+        out = self.decoder(z, mask)
         out = self.out_proj(out)
         return out, mask, z
     

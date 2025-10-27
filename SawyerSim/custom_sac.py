@@ -277,7 +277,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             # actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
             # Implement that above line in SAC.train() instead of hidden in Actor.forward() to make gradients flow to mvmae decoder too
             # Directly attach decoder output "out" into mvmae_loss, which is used in backprop together with policy loss
-            features, out, truth, mask = self.actor.extract_features(replay_data.observations, use_only_encoder=False)
+            features, out, truth, mask = self.actor.extract_features(replay_data.observations, use_only_encoder=False, mask_x=True, mixed=False)
             latent_pi = self.actor.latent_pi(features)
             mean_actions = self.actor.mu(latent_pi)
             log_std = self.actor.log_std(latent_pi)

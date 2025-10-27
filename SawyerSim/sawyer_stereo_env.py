@@ -16,9 +16,10 @@ class SawyerReachEnvV3(SawyerXYZEnv):
     def __init__(
         self,
         render_mode: RenderMode | None = None,
-        camera_pairs: list | None = [("stereo_left1", "stereo_right1"), 
-                                     ("stereo_left2", "stereo_right2"),
-                                     ("stereo_left3", "stereo_right3")],  # Reference xyz_base for camera names
+        camera_pairs = # Reference xyz_base for camera names
+            [("stereo_left1", "stereo_right1"), 
+            ("stereo_left2", "stereo_right2"),
+            ("stereo_left3", "stereo_right3")], 
         camera_id: int | None = None,
         reward_function_version: str = "v2",
         img_height: int = 84,
@@ -67,10 +68,8 @@ class SawyerReachEnvV3(SawyerXYZEnv):
     def model_name(self) -> str:
         return full_V3_path_for("sawyer_xyz/sawyer_reach_v3.xml")
 
-    def evaluate_state(
-        self, obs, action: npt.NDArray[np.float32]
-    ) -> tuple[float, dict[str, Any]]:
-        reward, reach_dist, in_place = self.compute_reward(action, obs["state_observation"])
+    def evaluate_state(self) -> tuple[float, dict[str, Any]]:
+        reward, reach_dist, in_place = self.compute_reward()
         success = float(reach_dist <= 0.05)
 
         info = {
@@ -124,20 +123,14 @@ class SawyerReachEnvV3(SawyerXYZEnv):
 
         return self._get_obs()
 
-    def compute_reward(
-        self, actions: npt.NDArray[Any], obs: npt.NDArray[np.float32]
-    ) -> tuple[float, float, float]:
+    def compute_reward(self) -> tuple[float, float, float]:
         assert self._target_pos is not None
         if self.reward_function_version == "v2":
             _TARGET_RADIUS: float = 0.05
             tcp = self.tcp_center
-            # obj = obs[4:7]
-            # tcp_opened = obs[3]
             target = self._target_pos
-
             tcp_to_target = float(np.linalg.norm(tcp - target))
-            # obj_to_target = float(np.linalg.norm(obj - target))
-
+            
             in_place_margin = float(np.linalg.norm(self.hand_init_pos - target))
             in_place = reward_utils.tolerance(
                 tcp_to_target,
@@ -147,23 +140,3 @@ class SawyerReachEnvV3(SawyerXYZEnv):
             )
 
             return (10 * in_place, tcp_to_target, in_place)
-        else:
-            rightFinger, leftFinger = self._get_site_pos(
-                "rightEndEffector"
-            ), self._get_site_pos("leftEndEffector")
-            fingerCOM = (rightFinger + leftFinger) / 2
-            goal = self._target_pos
-
-            del actions
-            del obs
-
-            c1 = 1000
-            c2 = 0.01
-            c3 = 0.001
-            reachDist = np.linalg.norm(fingerCOM - goal)
-            reachRew = c1 * (self.maxReachDist - reachDist) + c1 * (
-                np.exp(-(reachDist**2) / c2) + np.exp(-(reachDist**2) / c3)
-            )
-            reachRew = max(reachRew, 0)
-            reward = reachRew
-            return float(reward), float(reachDist), float(0.0)

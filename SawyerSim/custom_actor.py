@@ -176,7 +176,7 @@ class Actor(BasePolicy):
         self.action_dist.sample_weights(self.log_std, batch_size=batch_size)
         
     # OVERRIDE the extract_features() to use mvmae, process obs using mvmae, then pass into feature extractor
-    def extract_features(self, obs: PyTorchObs, use_only_encoder=True, mask_x=False) -> torch.Tensor:
+    def extract_features(self, obs: PyTorchObs, use_only_encoder=True, mask_x=False, mixed=False) -> torch.Tensor:
         """
             For this project, the observation will in the shape of a dictionary
             {
@@ -203,8 +203,13 @@ class Actor(BasePolicy):
                 img = img.to(self.device)
         
         out, mask = None, None
+        if mixed:
+            z_mask_x, mask = self.mvmae.encoder(img, True)
+            z_nomask_x, _ = self.mvmae.encoder(img, False)
+            return z_nomask_x, 
+        
         if (use_only_encoder):
-            _, _, z = self.mvmae.encoder(img, mask_x)
+            z, mask = self.mvmae.encoder(img, mask_x)
         else:
             out, mask, z = self.mvmae(img, mask_x)
 
