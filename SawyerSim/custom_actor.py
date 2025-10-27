@@ -199,7 +199,7 @@ class Actor(BasePolicy):
                 img = img.to(self.device)
         
         z, mask = self.mvmae.encoder(img, mask_x=False)
-        return z.flatten(start_dim=-2)
+        return z.flatten(start_dim=-2), img
         
     def get_action_dist_params(self, obs: PyTorchObs) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
@@ -209,7 +209,7 @@ class Actor(BasePolicy):
         :return:
             Mean, standard deviation and optional keyword arguments.
         """
-        z = self.extract_features(obs)
+        z, img = self.extract_features(obs)
         latent_pi = self.latent_pi(z)
         mean_actions = self.mu(latent_pi)
 

@@ -5,6 +5,7 @@ import torch
 from gymnasium import spaces
 from torch.nn import functional as F
 import csv
+import copy
 
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
@@ -215,6 +216,13 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
         self.actor = self.policy.actor
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
+        
+        # Target encoder uses EMA copy
+        self.encoder_online = self.policy.actor.mvmae.encoder
+        self.encoder_target = copy.deepcopy(self.encoder_online).eval()
+        self.policy.critic.set_encoder(self.encoder_online)
+        self.policy.critic_target.set_encoder(self.encoder_target)
+        
         """
         # DEBUG the optimizers to make sure they include the required params in backpropagation
         # Actor parameters
@@ -277,7 +285,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             # actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
             # Implement that above line in SAC.train() instead of hidden in Actor.forward() to make gradients flow to mvmae decoder too
             # Directly attach decoder output "out" into mvmae_loss, which is used in backprop together with policy loss
-            features, out, truth, mask = self.actor.extract_features(replay_data.observations, use_only_encoder=False, mask_x=True, mixed=False)
+            features, truth = self.actor.extract_features(replay_data.observations)
             latent_pi = self.actor.latent_pi(features)
             mean_actions = self.actor.mu(latent_pi)
             log_std = self.actor.log_std(latent_pi)
@@ -288,6 +296,9 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             actions_pi = dist.rsample()
             
             log_prob = dist.log_prob(actions_pi)
+            
+            # Train mvmae
+            out, mask, z = self.actor.mvmae(replay_data.observations, mask=True)
             mvmae_loss = self.actor.mvmae.compute_loss(out, truth, mask)
             
             # RENDER RECON
@@ -322,10 +333,9 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
                 # Compute the next Q values: min over all critics targets
                 next_q_values = torch.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = torch.min(next_q_values, dim=1, keepdim=True)
-                # add entropy term
-                next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
-                # td error + entropy term
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * discounts * next_q_values
+                
+                next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1) # add entropy term
+                target_q_values = replay_data.rewards + (1 - replay_data.dones) * discounts * next_q_values # td error + entropy term
 
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
@@ -344,11 +354,15 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             # Compute actor loss
             # Alternative: actor_loss = torch.mean(log_prob - qf1_pi)
             # Min over all critic networks
+            for p in self.critic.parameters(): # Turn off critic grads when computer actor loss
+                p.requires_grad_(False)
             q_values_pi = torch.cat(self.critic(replay_data.observations, actions_pi), dim=1)
             min_qf_pi, _ = torch.min(q_values_pi, dim=1, keepdim=True)
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
             loss = actor_loss + self.coef_mvmae * mvmae_loss
+            for p in self.critic.parameters():
+                p.requires_grad_(True)
             
             reward = replay_data.rewards.mean().item()
             rewards.append(reward)
@@ -365,21 +379,23 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
                 
             self.actor.optimizer.step()
 
-            # Update target networks
+            # Update target networks         
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
                 polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
+                self._soft_update_target_encoder(self.tau)
 
         self._n_updates += gradient_steps
 
+        """
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/ent_coef", np.mean(ent_coefs))
         self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
-        
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
-            
+        """
+        
         # Log
         if self.csv_logging:
             with open(self.log_file, mode="a", newline="") as f:
@@ -388,7 +404,14 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
                                 round(np.mean(recon_losses), 3), 
                                 round(np.mean(critic_losses), 3), 
                                 round(np.mean(rewards), 3)]) 
-
+                
+    def _soft_update_target_encoder(self, tau: float) -> None:
+        # EMA for trainable weights
+        polyak_update(self.encoder_online.parameters(), self.encoder_target.parameters(), tau)
+        # Copy non-trainable buffers (e.g., running stats) 1:1
+        for b_t, b in zip(self.encoder_target.buffers(), self.encoder_online.buffers()):
+            b_t.copy_(b)
+        
     def learn(
         self,
         total_timesteps: int,

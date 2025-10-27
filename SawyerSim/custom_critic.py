@@ -50,7 +50,7 @@ class ContinuousCritic(BaseModel):
         features_extractor: BaseFeaturesExtractor,
         features_dim: int,
         activation_fn: type[nn.Module] = nn.ReLU,
-        normalize_images: bool = True,
+        normalize_images: bool = False,
         n_critics: int = 2,
         share_features_extractor: bool = True,
     ):
@@ -66,44 +66,50 @@ class ContinuousCritic(BaseModel):
         self.share_features_extractor = share_features_extractor
         self.n_critics = n_critics
         self.q_networks: list[nn.Module] = []
-        self.flatten = nn.Flatten()
         
         for idx in range(n_critics):
             q_net_list = create_mlp(features_dim + action_dim, 1, net_arch, activation_fn)
             q_net = nn.Sequential(*q_net_list)
             self.add_module(f"qf{idx}", q_net)
             self.q_networks.append(q_net)
+        
+        self.encoder = None
             
     #OVERRIDE extract_features, take the "state" in the dictionary that is my current observation
     def extract_features(self, obs) -> torch.Tensor:
         """
-            For this project, the observation will in the shape of a dictionary
-            {
-                state_observation: Tensor of shape (batch, n_states)
-                image_observation: Tensor of shape (batch, height, width_total, channels)
-            }
+            Observation is a Tensor or np.ndarray, shape (B, H, 2W, C), float32 (standardized).
         """
-        # Ensure state observation is float32 and on correct device
-        state_obs = obs["state_observation"]
-        if not isinstance(state_obs, torch.Tensor):
-            state_obs = torch.as_tensor(state_obs, dtype=torch.float32, device=self.device)
+        # Ensure image is float32 and on correct device
+        img = obs
+        if not isinstance(img, torch.Tensor):
+            img = torch.from_numpy(img).float()
         else:
-            if state_obs.dtype != torch.float32:
-                state_obs = state_obs.to(dtype=torch.float32)
-            if state_obs.device != self.device:
-                state_obs = state_obs.to(self.device)
-        
-        # BaseModel implements a Flatten extractor
-        return self.flatten(state_obs)
-    
+            if img.dtype != torch.float32:
+                img = img.to(dtype=torch.float32)
+
+        # Move to GPU with pinned memory + non blocking if available
+        if self.device.type == "cuda":
+            if img.device.type == "cpu":
+                img = img.pin_memory().to(self.device, non_blocking=True)
+            elif img.device != self.device:
+                img = img.to(self.device, non_blocking=True)
+        else:
+            if img.device != self.device:
+                img = img.to(self.device)
+        with torch.no_grad():
+            z, mask = self.encoder(img, mask_x=False)
+        return z.flatten(start_dim=-2)
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # Learn the features extractor using the policy loss only
         # when the features_extractor is shared with the actor
-        with torch.set_grad_enabled(not self.share_features_extractor):
-            features = self.extract_features(obs)
+        features = self.extract_features(obs)
         qvalue_input = torch.cat([features, actions], dim=1)
         return tuple(q_net(qvalue_input) for q_net in self.q_networks)
+
+    def set_encoder(self, encoder):
+        self.encoder = encoder
 
     def q1_forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """
