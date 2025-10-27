@@ -59,7 +59,7 @@ class Actor(BasePolicy):
         full_std: bool = True,
         use_expln: bool = False,
         clip_mean: float = 2.0,
-        normalize_images: bool = True,
+        normalize_images: bool = False,
     
         nviews: int = 2,
         mvmae_patch_size: int = 6, 
@@ -99,9 +99,9 @@ class Actor(BasePolicy):
         self.sde_features_extractor = None
         self.net_arch = net_arch
         
-        # self.features_dim = features_dim, OVERIRDE with z + state_obs dims
-        self.nviews = nviews  # fine to keep if used elsewhere
-        self.features_dim = self.mvmae.encoder_embed_dim
+        self.nviews = nviews 
+        self.total_patches = (img_h_size // mvmae_patch_size) * (2 * img_w_size // mvmae_patch_size) # When fused view
+        self.features_dim = self.total_patches * self.mvmae.encoder_embed_dim
         print("ACTOR FEATURES_DIM:", self.features_dim)
         
         self.activation_fn = activation_fn
@@ -175,17 +175,13 @@ class Actor(BasePolicy):
         assert isinstance(self.action_dist, StateDependentNoiseDistribution), msg
         self.action_dist.sample_weights(self.log_std, batch_size=batch_size)
         
-    # OVERRIDE the extract_features() to use mvmae, process obs using mvmae, then pass into feature extractor
-    def extract_features(self, obs: PyTorchObs, use_only_encoder=True, mask_x=False, mixed=False) -> torch.Tensor:
+    # OVERRIDE the extract_features(): process obs using mvmae encoder
+    def extract_features(self, obs: PyTorchObs) -> torch.Tensor:
         """
-            For this project, the observation will in the shape of a dictionary
-            {
-                state_observation: Tensor of shape (batch, n_states)
-                image_observation: Tensor of shape (batch, height, width_total, channels)
-            }
+            Observation is a Tensor or np.ndarray, shape (B, H, 2W, C), float32 (standardized).
         """
         # Ensure image is float32 and on correct device
-        img = obs["image_observation"]
+        img = obs
         if not isinstance(img, torch.Tensor):
             img = torch.from_numpy(img).float()
         else:
@@ -202,18 +198,8 @@ class Actor(BasePolicy):
             if img.device != self.device:
                 img = img.to(self.device)
         
-        out, mask = None, None
-        if mixed:
-            z_mask_x, mask = self.mvmae.encoder(img, True)
-            z_nomask_x, _ = self.mvmae.encoder(img, False)
-            return z_nomask_x, 
-        
-        if (use_only_encoder):
-            z, mask = self.mvmae.encoder(img, mask_x)
-        else:
-            out, mask, z = self.mvmae(img, mask_x)
-
-        return z.mean(dim=1), out, img, mask # mean pool z
+        z, mask = self.mvmae.encoder(img, mask_x=False)
+        return z.flatten(start_dim=-2)
         
     def get_action_dist_params(self, obs: PyTorchObs) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
@@ -223,7 +209,7 @@ class Actor(BasePolicy):
         :return:
             Mean, standard deviation and optional keyword arguments.
         """
-        z, out, truth, mask = self.extract_features(obs)
+        z = self.extract_features(obs)
         latent_pi = self.latent_pi(z)
         mean_actions = self.mu(latent_pi)
 
@@ -246,5 +232,6 @@ class Actor(BasePolicy):
         return self.action_dist.log_prob_from_params(mean_actions, log_std, **kwargs)
     
     def _predict(self, observation: PyTorchObs, deterministic: bool = False) -> torch.Tensor:
-        obs_tensor, _ = self.obs_to_tensor(observation)
+        obs_tensor = torch.from_numpy(observation).float() if not isinstance(observation, torch.Tensor) else observation.to(dtype=torch.float32)
+        obs_tensor = obs_tensor.to(self.device, non_blocking=True)
         return self(obs_tensor, deterministic)

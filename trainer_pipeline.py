@@ -6,6 +6,7 @@
 from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
 from SawyerSim.custom_sac import Custom_SAC
 from SawyerSim.custom_sac_policy import SACPolicy
+from SawyerSim.debugger import Debugger
 import numpy as np
 import argparse
 import torch
@@ -37,8 +38,11 @@ class PipelineTrainer():
         total_timesteps: int = 5_000_000,
         episode_horizon: int = 300,
         log_file: str = 'log.csv',
-    ):
+    ):  
+        self.debugger = Debugger()
+        
         self.env = SawyerReachEnvV3(
+            debugger = self.debugger,
             render_mode = render_mode,
             img_width = img_w_size,
             img_height = img_h_size,
@@ -60,6 +64,7 @@ class PipelineTrainer():
             verbose = verbose,
             coef_mvmae = coef_mvmae,
             log_file=log_file,
+            debugger = self.debugger,
             policy_kwargs= {
                 "nviews" : nviews,
                 "mvmae_patch_size" : mvmae_patch_size, 

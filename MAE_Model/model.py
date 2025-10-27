@@ -44,7 +44,7 @@ class MAEModel(nn.Module):
             embed_dim=self.encoder_embed_dim,
             in_channels=self.in_channels,
             img_h_size=self.img_h_size,
-            img_w_size=self.img_w_fused,
+            img_w_fused_size=self.img_w_fused,
             heads=self.encoder_heads,
             masking_ratio=self.masking_ratio,
             depth=8

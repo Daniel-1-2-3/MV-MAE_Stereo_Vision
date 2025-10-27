@@ -8,6 +8,7 @@ from typing import Any, Literal, SupportsFloat
 import torch
 import torch.nn.functional as F
 import cv2
+import time
 import mujoco
 import random
 import numpy as np
@@ -20,6 +21,7 @@ from typing_extensions import TypeAlias
 from CustomMetaworld.metaworld.types import XYZ, ObservationDict
 from CustomMetaworld.metaworld.sawyer_xyz_env import SawyerMocapBase
 from CustomMetaworld.metaworld.utils import reward_utils
+from SawyerSim.debugger import Debugger
 
 from MAE_Model.prepare_input import Prepare
 
@@ -50,6 +52,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         camera_pairs: list | None = None,
         img_width: int = 84,
         img_height: int = 84,
+        debugger: Debugger | None = None,
     ):
         self.action_scale = action_scale
         self.action_rot_scale = action_rot_scale
@@ -141,10 +144,11 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, self._mjr_ctx)
         self._mjr_ctx.readDepthMap = mujoco.mjtDepthMap.mjDEPTH_ZEROFAR
         self._mjr_rect = mujoco.MjrRect(0, 0, int(self.width), int(self.height))
-        
         # Preallocate CPU buffers used by mjr_readPixels (uint8, HxWx3)
         self._rgb_left  = np.empty((self.height, self.width, 3), dtype=np.uint8)
         self._rgb_right = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        
+        self.debugger = debugger
 
     def seed(self, seed: int) -> list[int]:
         """Seeds the environment.
@@ -326,9 +330,14 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             identical to the previous implementation that used mujoco.Renderer.
         """
         # Render both views with the fast pathway
+        t0 = time.perf_counter()
         left_u8  = self._render_one_camera(self.left_cam_name,  self._rgb_left)
+        dt1 = (time.perf_counter() - t0) * 1000
         right_u8 = self._render_one_camera(self.right_cam_name, self._rgb_right)
-
+        dt2 = (time.perf_counter() - t0) * 1000
+        self.debugger.put(dt1, "speed_one_renderer")
+        self.debugger.put(dt2, "speed_both_renderer")
+        
         # Convert to tensors exactly like before, fuse + normalize with your helper
         left_t  = torch.from_numpy(left_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0
         right_t = torch.from_numpy(right_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0

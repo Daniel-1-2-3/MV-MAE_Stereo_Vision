@@ -11,7 +11,7 @@ class ViTMaskedEncoder(nn.Module):
             embed_dim: int = 768,
             in_channels: int = 3,
             img_h_size: int = 84,
-            img_w_size: int = 168, # Width of the fused image, with both views
+            img_w_fused_size: int = 168, # Width of the fused image, with both views
             heads: int = 8,
             depth: int = 6,
             masking_ratio: float = 0.75,
@@ -23,7 +23,7 @@ class ViTMaskedEncoder(nn.Module):
         self.embed_dim = embed_dim
         self.in_channels = in_channels
         self.img_h_size = img_h_size
-        self.img_w_size = img_w_size
+        self.img_w_fused_size = img_w_fused_size
         self.heads = heads
         self.depth = depth
         self.masking_ratio = masking_ratio
@@ -132,7 +132,7 @@ class ViTMaskedEncoder(nn.Module):
     def add_pos_embeds(self, x: Tensor):
         # Shape of x: (batch, total_num_patches, embed_dim)
         # total_num_patches = nviews * grid_h_size * grid_w_size
-        each_view_w = self.img_w_size // self.nviews
+        each_view_w = self.img_w_fused_size // self.nviews
         each_view_h = self.img_h_size
         
         pos_embed = PosEmbed.get_2d_sincos_pos_embed(

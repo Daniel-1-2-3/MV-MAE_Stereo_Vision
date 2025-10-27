@@ -14,6 +14,7 @@ from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 from SawyerSim.custom_sac_policy import MultiInputPolicy, SACPolicy, Actor
 from SawyerSim.custom_critic import ContinuousCritic
 from SawyerSim.custom_off_policy_algorithm import CustomOffPolicyAlgorithm
+from SawyerSim.debugger import Debugger
 
 # CAP the standard deviation of the actor
 LOG_STD_MAX = 2
@@ -117,6 +118,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[torch.device, str] = "auto",
+        debugger: Debugger | None = None,
         log_file: str = 'log.csv',
         _init_setup_model: bool = True,
         coef_mvmae = 0.1,
@@ -161,11 +163,11 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
         self.ent_coef_optimizer: Optional[torch.optim.Adam] = None
         
         self.csv_logging = False
+        self.log_file = log_file
+        self.debugger = debugger
 
         if _init_setup_model:
             self._setup_model()
-            
-        self.log_file = log_file
         
     def begin_log_losses(self):
         # CSV file for logging
@@ -246,10 +248,8 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
                         f.write(f"    Param {j} - {name}: shape={tuple(param.shape)}, requires_grad={param.requires_grad}\n")
         """
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
-        # Switch to train mode (this affects batch norm / dropout)
-        self.policy.set_training_mode(True)
-        # Update optimizers learning rate
-        optimizers = [self.actor.optimizer, self.critic.optimizer]
+        self.policy.set_training_mode(True) # Switch to train mode (this affects batch norm / dropout)
+        optimizers = [self.actor.optimizer, self.critic.optimizer] # Update optimizers learning rate
         
         # DEBUG the optimizers to make sure they include the required params in backpropagation
         if self.ent_coef_optimizer is not None:

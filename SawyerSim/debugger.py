@@ -1,21 +1,23 @@
 class Debugger():
     def __init__(self):
         self.debugs = {
-            "fps_renderer": [],
-            "fps_encoder_nograd": [],
-            "fps_encoder_grad": [],
-            "fps_mvmae_grad": [],
-            "fps_actor_fwd": [],
-            "fps_critics_fwd": []
+            "speed_one_renderer": [],
+            "speed_both_renderer": [],
+            "speed_encoder_nograd": [],
+            "speed_encoder_grad": [],
+            "speed_mvmae_grad": [],
+            "speed_actor_fwd": [],
+            "speed_critics_fwd": []
         }
         
         self.units = {
-            "fps_renderer": "ms",
-            "fps_encoder_nograd": "ms",
-            "fps_encoder_grad": "ms",
-            "fps_mvmae_grad": "ms",
-            "fps_actor_fwd": "ms",
-            "fps_critics_fwd": "ms"
+            "speed_one_renderer": "ms",
+            "speed_both_renderer": "ms",
+            "speed_encoder_nograd": "ms",
+            "speed_encoder_grad": "ms",
+            "speed_mvmae_grad": "ms",
+            "speed_actor_fwd": "ms",
+            "speed_critics_fwd": "ms"
         }
     
     def put(self, value, key):

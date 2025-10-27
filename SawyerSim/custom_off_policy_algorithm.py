@@ -354,7 +354,7 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
                 dt = time.perf_counter() - last_t
                 sps = advanced / dt # Steps per second
                 ms_per_step = 1000.0 / sps
-                print(f"SPEED {self.num_timesteps}/{total_timesteps} | {ms_per_step:.2f} ms/step")
+                print(f"OVERALL SPEED {self.num_timesteps}/{total_timesteps} | {ms_per_step:.2f} ms/step")
                 last_t = time.perf_counter()
                 last_steps = self.num_timesteps
 
