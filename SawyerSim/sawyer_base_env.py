@@ -21,7 +21,7 @@ from typing_extensions import TypeAlias
 from CustomMetaworld.metaworld.types import XYZ, ObservationDict
 from CustomMetaworld.metaworld.sawyer_xyz_env import SawyerMocapBase
 from CustomMetaworld.metaworld.utils import reward_utils
-from SawyerSim.debugger import Debugger
+from SB3_Architecture.debugger import Debugger
 
 from MAE_Model.prepare_input import Prepare
 
