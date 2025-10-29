@@ -59,12 +59,15 @@ class ViTMaskedDecoder(nn.Module):
         x = self.proj(x)
         
         batch, _, dim = x.shape
-        total_patches = mask.shape[1] 
-        unmasked_indices = (mask == 0)
-        x_full = self.mask_tokens.expand(batch, total_patches, dim).clone() # [MASK] tokens for all patches
-        x_full[unmasked_indices] = x.reshape(-1, dim) # Scatter the encoder outputs into the unmasked positions
-        x = x_full + self.pos_embeds
+        total_patches = mask.shape[1]
+        unmasked = (mask == 0) # Unmasked positions, invert 1 to 0 in binary mask
         
+        # 3D mask for applying onto x (batch, total_patches, decoder embed dim)
+        unmasked_3d = unmasked.unsqueeze(-1).expand(batch, total_patches, dim)
+        x_full = self.mask_tokens.expand(batch, total_patches, dim).clone()
+        x_full.masked_scatter_(unmasked_3d, x) # [MASK] tokens for all patches
+
+        x = x_full + self.pos_embeds
         for block in self.vit_blocks:
             x = block(x)
         x = self.norm(x)

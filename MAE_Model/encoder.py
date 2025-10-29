@@ -28,6 +28,16 @@ class ViTMaskedEncoder(nn.Module):
         self.depth = depth
         self.masking_ratio = masking_ratio
         
+        # Positional embeddings
+        with torch.no_grad():
+            each_view_w = img_w_fused_size // nviews
+            each_view_h = img_h_size
+            pe_np = PosEmbed.get_2d_sincos_pos_embed(
+                embed_dim, int(each_view_h // patch_size), int(each_view_w // patch_size)
+            )  # (grid_h * grid_w, embed_dim)
+            pe = torch.from_numpy(pe_np).repeat(nviews, 1)  # (total_patches, embed_dim)
+        self.register_buffer("pos_embed_all", pe, persistent=False)
+        
         self.forward_conv = self.construct_conv_layers()
         self.vit_blocks = nn.ModuleList([
             VitBlock(
@@ -75,15 +85,14 @@ class ViTMaskedEncoder(nn.Module):
         x = self.norm_masked(x) if mask_x else self.norm_unmasked(x)
         return x, mask
 
-    def random_view_masking(self, x: Tensor):
+    def random_view_masking(self, x: torch.Tensor):
         """
         The method masks the tensor, where either the left or right view is fully
         masked, while the other view is partially masked, with mask_ratio of the 
         patches masked. 
-        
+
         Args:
             x (Tensor): Shape (batch, patches_left_view + patches_right_view, embed_dim)
-            mask_ratio (float): Defaults to 0.20, ratio for partial masking.
 
         Returns:
             x_masked (Tensor):  Has shape (batch, num_unmasked_patches, embed_dim)
@@ -91,58 +100,33 @@ class ViTMaskedEncoder(nn.Module):
                                 last dimension is a binary mask with 0 representing unmasked, and 
                                 1 representing masked
         """
+        device = x.device
         batch, num_patches, embed_dim = x.shape
-        # x is currently (batch, patches_left_view + patches_right_view, embed_dim)
-        
-        x_kept = []
-        mask_all = []
-        mask_ratio = (self.masking_ratio - 0.5) / 0.5 # self.masking_ratio is for the whole image, 1 side always covered, so determine how much to cover this half
-        num_mask = int(mask_ratio * (num_patches / 2))
-        for i in range(batch):
-            mask_view = random.random()
-            mask = torch.ones(num_patches, dtype=torch.float32)
-            
-            # Address partial masking of views according to mask ratio
-            if mask_view > 0.5: # Masking right view, partial masking for left view
-                mask[:num_patches // 2].uniform_() # Fills left portion with random 
-                # Argsort sorts the indices based on the values at each indice
-                ids = torch.argsort(mask[:num_patches // 2], descending=False) # Sort ascending order
-                keep_ids = ids[:num_patches // 2 - num_mask]
-                # Assign 1 to all, and assign 0 to the unmasked patches
-                mask[:num_patches // 2] = 1
-                mask[keep_ids] = 0 
-                
-            else: # Masking left view, partial masking for right view
-                mask[num_patches // 2:].uniform_()
-                ids = torch.argsort(mask[num_patches // 2:], descending=False)
-                keep_ids = ids[:num_patches // 2 - num_mask] + num_patches // 2 # Addition since this is the right side; end half of list
-                mask[num_patches // 2:] = 1
-                mask[keep_ids] = 0
-            
-            # Shape of mask = (num_patches,)
-            keep_ids = torch.where(mask==0)[0] # Access list of indices where the value is 0 (unmasked)
-            x_sample_i = x[i][keep_ids]
-        
-            x_kept.append(x_sample_i)
-            mask_all.append(mask)
+        half = num_patches // 2
 
-        x = torch.stack(x_kept)
-        return x, torch.stack(mask_all)
+        # How many to mask on the partially-masked side
+        mask_ratio = (self.masking_ratio - 0.5) / 0.5
+        num_mask = int(mask_ratio * half)
+        keep_per_half = half - num_mask  # Fixed number of kept patches per sample
+
+        mask_right = torch.rand(batch, device=device) > 0.5 # Choose side to fully mask
+        scores = torch.rand(batch, half, device=device) # Random scores for each patch on 1 half, low scores get kept
+        keep_left  = torch.topk(-scores, keep_per_half, dim=1).indices # Indices to keep on partially masked side
+        keep_right = torch.topk(-scores, keep_per_half, dim=1).indices + half
+
+        # If fully masking right side, then use keep_left, is not fully masking right side, then keep_right
+        keep_idx = torch.where(mask_right.unsqueeze(1), keep_left, keep_right) # (batch, kept_indices)
+        mask = torch.ones(batch, num_patches, device=device, dtype=torch.float32)
+        row = torch.arange(batch, device=device).unsqueeze(1)
+        mask[row, keep_idx] = 0.0
+
+        gather_idx = keep_idx.unsqueeze(-1).expand(batch, keep_per_half, embed_dim)   # (B, K, D)
+        x_masked = torch.gather(x, dim=1, index=gather_idx)                           # (B, K, D)
+
+        return x_masked, mask
     
     def add_pos_embeds(self, x: Tensor):
-        # Shape of x: (batch, total_num_patches, embed_dim)
-        # total_num_patches = nviews * grid_h_size * grid_w_size
-        each_view_w = self.img_w_fused_size // self.nviews
-        each_view_h = self.img_h_size
-        
-        pos_embed = PosEmbed.get_2d_sincos_pos_embed(
-            self.embed_dim, int(each_view_h // self.patch_size), int(each_view_w // self.patch_size)
-        ) # (grid_h_size * grid_w_size, embed_dim)
-        pos_embed = torch.from_numpy(pos_embed).to(x.device)
-        pos_embed_all = pos_embed.repeat(self.nviews, 1) # (total_num_patches, embed_dim)
-        
-        x = x + pos_embed_all # Auto broadcasts over batch
-        return x # (batch, total_num_patches, embed_dim)
+        return x + self.pos_embed_all.to(dtype=x.dtype)
     
     def construct_conv_layers(self):
         layers = []
