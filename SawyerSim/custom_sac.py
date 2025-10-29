@@ -276,6 +276,7 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
+            
             # For n-step replay, discount factor is gamma**n_steps (when no early termination)
             discounts = replay_data.discounts if replay_data.discounts is not None else self.gamma
 
@@ -335,17 +336,16 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
                 self.ent_coef_optimizer.zero_grad()
                 ent_coef_loss.backward()
                 self.ent_coef_optimizer.step()
-
+                
             with torch.no_grad():
                 # Select action according to policy
                 next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
                 # Compute the next Q values: min over all critics targets
                 next_q_values = torch.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = torch.min(next_q_values, dim=1, keepdim=True)
-                
                 next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1) # add entropy term
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * discounts * next_q_values # td error + entropy term
-
+            
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
             t0 = time.perf_counter()
@@ -379,15 +379,11 @@ class Custom_SAC(CustomOffPolicyAlgorithm):
             rewards.append(reward)
             # print losses
             # print('Actor:', round(actor_loss.item(), 3), '\t MVMAE:', round(mvmae_loss.item(), 3), '\t Critic:', round(critic_loss.item(), 3), '\t Reward', round(mean_reward, 3))
-                        
+            
+            t = time.perf_counter()
             # Optimize the actor    
             self.actor.optimizer.zero_grad()
             loss.backward()
-            
-            # Check for grad flow
-            # for name, param in self.actor.mvmae.named_parameters():
-                # print(name, param.grad.abs().mean().item() if param.grad is not None else "NO GRAD")
-                
             self.actor.optimizer.step()
 
             # Update target networks         

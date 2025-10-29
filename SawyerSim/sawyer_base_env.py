@@ -407,7 +407,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         truncate = False
         if self.curr_path_length == self.max_path_length:
             truncate = True
-            
+        
         return self._last_stable_obs, reward, False, truncate, info
 
     def evaluate_state(self) -> tuple[float, dict[str, Any]]:

@@ -335,6 +335,7 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
         last_steps = self.num_timesteps
 
         while self.num_timesteps < total_timesteps:
+            t_env = time.perf_counter()
             rollout = self.collect_rollouts(
                 self.env,
                 train_freq=self.train_freq,
@@ -344,20 +345,25 @@ class CustomOffPolicyAlgorithm(BaseAlgorithm):
                 replay_buffer=self.replay_buffer,
                 log_interval=log_interval,
             )
+            t_env = (time.perf_counter() - t_env) * 1e3
+            
             if not rollout.continue_training:
                 break
 
             if self.num_timesteps > self.learning_starts:
                 gradient_steps = self.gradient_steps if self.gradient_steps >= 0 else rollout.episode_timesteps
+                t_train = time.perf_counter()
                 if gradient_steps and gradient_steps > 0:
                     self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
-
+                t_train = (time.perf_counter() - t_train) * 1e3
+                print(f"[wall] COLLECT_ROLLOUTS: {t_env:.1f} ms, TRAINING: {t_train:.1f} ms")
+        
             advanced = self.num_timesteps - last_steps
             if advanced >= LOG_EVERY_STEPS:
                 dt = time.perf_counter() - last_t
                 sps = advanced / dt # Steps per second
                 ms_per_step = 1000.0 / sps
-                print(f"OVERALLSPEED {self.num_timesteps}/{total_timesteps} | {ms_per_step:.2f} ms/step")
+                print(f"PIPELINE SPEED {self.num_timesteps}/{total_timesteps} | {ms_per_step:.2f} ms/step")
                 last_t = time.perf_counter()
                 last_steps = self.num_timesteps
                 

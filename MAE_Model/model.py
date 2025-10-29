@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 class MAEModel(nn.Module):
     def __init__(self, 
             nviews: int = 2,
-            patch_size: int = 6,
+            patch_size: int = 8,
             encoder_embed_dim: int = 768,
             decoder_embed_dim: int = 512,
             encoder_heads: int = 16,
@@ -38,6 +38,7 @@ class MAEModel(nn.Module):
         self.img_w_fused = self.nviews * self.img_w_size
         self.num_patches = int((self.img_h_size * self.img_w_size) // (patch_size ** 2) * nviews)
         
+        print('DEBUG SIZES', self.patch_size, self.img_h_size, self.img_w_fused)
         self.encoder = ViTMaskedEncoder(
             nviews=self.nviews,
             patch_size=self.patch_size,

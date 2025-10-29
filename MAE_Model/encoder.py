@@ -13,7 +13,7 @@ class ViTMaskedEncoder(nn.Module):
             img_h_size: int = 84,
             img_w_fused_size: int = 168, # Width of the fused image, with both views
             heads: int = 8,
-            depth: int = 6,
+            depth: int = 4,
             masking_ratio: float = 0.75,
         ):
         
@@ -27,6 +27,8 @@ class ViTMaskedEncoder(nn.Module):
         self.heads = heads
         self.depth = depth
         self.masking_ratio = masking_ratio
+        
+        print('DEBUG SHAPES AGAIN', self.patch_size, self.img_h_size, self.img_w_fused_size)
         
         # Positional embeddings
         with torch.no_grad():
