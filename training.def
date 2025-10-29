@@ -5,10 +5,10 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04   # CUDA 12.8 + nvcc
     Author        Daniel Zhu
     Description   CUDA 12.8 • MV-MAE env • offline wheelhouse install • runs trainer_pipeline.py
 
-# Copy THIS directory (MV_MAE_Implementation) into the image.
-# If you include a "wheelhouse/" folder here, it will be copied too.
+# Copy the ENTIRE repo (root) into the image at /opt/app
+# This expects the following at repo root: requirements.txt, wheelhouse/, trainer_pipeline.py, etc.
 %files
-    . /opt/src/MV_MAE_Implementation
+    . /opt/app
 
 %post
     set -e
@@ -34,9 +34,9 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04   # CUDA 12.8 + nvcc
     export PIP_DISABLE_PIP_VERSION_CHECK=1
     export PIP_DEFAULT_TIMEOUT=300
 
-    # --- OFFLINE install from local wheelhouse ------------------------------
-    REQ=/opt/src/MV_MAE_Implementation/requirements.txt
-    WHL=/opt/src/MV_MAE_Implementation/wheelhouse
+    # --- OFFLINE install from local wheelhouse at /opt/app ------------------
+    REQ=/opt/app/requirements.txt
+    WHL=/opt/app/wheelhouse
 
     if [ ! -f "$REQ" ]; then
         echo "[ERROR] requirements.txt not found at $REQ"; exit 2
@@ -56,8 +56,8 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04   # CUDA 12.8 + nvcc
     cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
-# Make 'import MV_MAE_Implementation' resolve inside the image
-export PYTHONPATH="/opt/src:${PYTHONPATH}"
+# Make your repo (now at /opt/app) importable
+export PYTHONPATH="/opt/app:${PYTHONPATH}"
 EOS
     chmod 644 /.singularity.d/env/99-autovenv.sh
 
@@ -66,9 +66,12 @@ EOS
     export DISPLAY=:1
     export HF_TOKEN=${HF_TOKEN:-}
     export WANDB_API_KEY=${WANDB_API_KEY:-}
+    # Common headless-EGL env (MuJoCo/PyOpenGL)
+    export MUJOCO_GL=egl
+    export PYOPENGL_PLATFORM=egl
 
 %runscript
-    # Optional headless X for anything that wants a display
+    # Optional headless X for libs that insist on a DISPLAY
     if command -v xdpyinfo >/dev/null 2>&1; then
         if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
             Xvfb :1 -screen 0 1280x720x24 -nolisten tcp &  sleep 2
@@ -77,26 +80,26 @@ EOS
 
     echo "[MVMAE] Python: $(python --version)"
     echo "[MVMAE] PYTHONPATH=$PYTHONPATH"
-    echo "[MVMAE] Running trainer_pipeline.py ..."
+    echo "[MVMAE] Running /opt/app/trainer_pipeline.py ..."
 
-    # Prefer module invocation so relative imports behave well
-    if [ -f /opt/src/MV_MAE_Implementation/trainer_pipeline.py ]; then
-        cd /opt/src
-        exec python -m MV_MAE_Implementation.trainer_pipeline "$@"
+    SCRIPT="/opt/app/trainer_pipeline.py"
+    if [ -f "$SCRIPT" ]; then
+        cd /opt/app
+        exec python -u "$SCRIPT" "$@"
     else
-        echo "[ERROR] trainer_pipeline.py not found at /opt/src/MV_MAE_Implementation/"
+        echo "[ERROR] $SCRIPT not found in image."
         echo "        Falling back to passed command..."
         exec "$@"
     fi
 
 %help
-    OFFLINE build. Prepare "wheelhouse/" first (see below).
+    OFFLINE build. Put "wheelhouse/" and "requirements.txt" at repo root before building.
 
-    Build (run this INSIDE MV_MAE_Implementation/):
-      apptainer build training.sif training.def
+    Build from repo root:
+      apptainer build --force training.sif training.def
 
     Run (defaults to trainer_pipeline.py):
-      apptainer run --nv training.sif --epochs 50 --batch-size 64
+      apptainer run --nv training.sif --batch_size 16 --buffer_size 2000
 
     Exec arbitrary commands:
-      apptainer exec --nv training.sif python -c "import MV_MAE_Implementation, sys; print(sys.path)"
+      apptainer exec --nv training.sif python -c "import sys, os; print(sys.path)"
