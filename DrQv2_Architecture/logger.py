@@ -9,7 +9,6 @@ from collections import defaultdict
 import numpy as np
 import torch
 import torchvision
-from termcolor import colored
 from torch.utils.tensorboard import SummaryWriter
 
 COMMON_TRAIN_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
@@ -105,8 +104,7 @@ class MetersGroup(object):
             raise f'invalid format type: {ty}'
 
     def _dump_to_console(self, data, prefix):
-        prefix = colored(prefix, 'yellow' if prefix == 'train' else 'green')
-        pieces = [f'| {prefix: <14}']
+        pieces = [f'| {str(prefix): <14}']
         for key, disp_key, ty in self._formating:
             value = data.get(key, 0)
             pieces.append(self._format(disp_key, value, ty))
