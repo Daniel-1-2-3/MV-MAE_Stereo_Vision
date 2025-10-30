@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=training_mvmae_rl
+#SBATCH --job-name=mvmae_drqv2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -12,61 +12,74 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
-# Load Apptainer
+# -------- Apptainer module --------
 module load apptainer/1.3.5 || module load apptainer
 
-# Apptainer image
+# -------- Image path (built from training.def) --------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
 if [[ ! -f "$IMG" ]]; then
   echo "ERROR: $IMG not found"; exit 2
 fi
 
-# Make /opt/app importable inside the container
-export APPTAINERENV_PYTHONPATH="/opt/app:${PYTHONPATH:-}"
+# -------- (Optional) pass extra Hydra overrides on the command line --------
+# Example: sbatch run_training.sh "save_video=false agent.device=cuda"
+EXTRA_ARGS="${1:-}"
 
-# EGL on GPU: env passed into container
-export APPTAINERENV_MUJOCO_GL=egl
-export APPTAINERENV_PYOPENGL_PLATFORM=egl
-export APPTAINERENV_DISPLAY=
-export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
-export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
+# ======== Export env into container (APPTAINERENV_* is the supported way) ========
+# Python path for your repo (redundant with %environment, but harmless)
+export APPTAINERENV_PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH:-}"
+
+# Headless EGL – force MuJoCo/PyOpenGL to use EGL (no X server needed)
+export APPTAINERENV_MUJOCO_GL="egl"
+export APPTAINERENV_PYOPENGL_PLATFORM="egl"
+export APPTAINERENV_DISPLAY=""
+export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE="0"
+export APPTAINERENV_MESA_EGL_NO_X11="1"
+
+# Thread sanity (can be overridden by your config)
+export APPTAINERENV_OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+
+# CUDA device visibility (use SLURM’s or fall back to 0)
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-# Paths on HOST we want visible inside the container (for NVIDIA EGL)
+# -------- Bind host EGL vendor + NVIDIA libs into the container for EGL --------
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 if [[ ! -f "$VENDOR_JSON" ]]; then
-  echo "FATAL: $VENDOR_JSON not found on host (NVIDIA EGL ICD missing). Ask admins to install GLVND/EGL for NVIDIA."
-  exit 3
+  echo "FATAL: $VENDOR_JSON missing on host. Ask admins to install GLVND NVIDIA EGL ICD."; exit 3
 fi
-# Tell EGL (inside the container) to use the NVIDIA vendor JSON we bind 1:1
+
+# Help EGL locate the vendor JSON inside the container
 export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
 
-# Try to locate the directory that contains libEGL_nvidia.so
+# Find a directory with libEGL_nvidia.so.*
 NV_EGL_DIR="$(ldconfig -p | awk '/libEGL_nvidia\.so/{print $NF; exit}' | xargs -r dirname || true)"
 for d in /usr/lib/x86_64-linux-gnu/nvidia /usr/lib/nvidia /usr/lib64/nvidia /usr/lib/x86_64-linux-gnu; do
   [[ -z "$NV_EGL_DIR" && -e "$d/libEGL_nvidia.so.0" ]] && NV_EGL_DIR="$d"
 done
 if [[ -z "${NV_EGL_DIR:-}" || ! -d "$NV_EGL_DIR" ]]; then
-  echo "FATAL: Could not find libEGL_nvidia.so* on host. Ask admins to install NVIDIA EGL libs."
-  exit 4
+  echo "FATAL: Could not find libEGL_nvidia.so* on host. Ask admins to install NVIDIA EGL libs."; exit 4
 fi
 
-# GLVND client lib directory
+# GLVND client libs (libEGL.so.1, etc.)
 GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
-# Build bind flags (also bind your submit dir so outputs land there)
+# -------- Build bind flags --------
 BIND_FLAGS=( --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" )
 BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d" )
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 
-# --- Probe (CUDA + EGL renderer) ---
+echo "[INFO] Using binds:"
+printf '  %s\n' "${BIND_FLAGS[@]}"
+
+# ================= Probe CUDA + EGL inside the container (sanity check) =================
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$SLURM_SUBMIT_DIR" \
   "$IMG" \
   bash -lc '
+set -e
 python - << "PY"
 import torch, mujoco, OpenGL.GL as gl
 print("torch cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
@@ -76,23 +89,17 @@ print("OpenGL vendor  :", to_s(gl.glGetString(gl.GL_VENDOR)))
 print("OpenGL renderer:", to_s(gl.glGetString(gl.GL_RENDERER)))
 ctx.free()
 PY
-  '
+'
 
-# --- Training ---
-apptainer exec --nv \
+# ================= Run training =================
+# The container's %runscript defaults to: DrQv2_Architecture/drqv2_architecture.py (no args)
+# You can pass Hydra overrides via $EXTRA_ARGS, e.g. "save_video=false agent.device=cuda"
+echo "[RUN] apptainer run --nv training.sif ${EXTRA_ARGS}"
+apptainer run --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$SLURM_SUBMIT_DIR" \
-  "$IMG" \
-  bash -lc '
-    set -e
-    export PYTHONUNBUFFERED=1
-    # (MuJoCo/PyOpenGL EGL env is already set via APPTAINERENV_*)
-    stdbuf -oL -eL python -u /opt/app/trainer_pipeline.py \
-      --learning_starts 10_000 \
-      --batch_size 64 \
-      --buffer_size 100_000 \
-      --total_timesteps 500_000 \
-      --coef_mvmae 0.005 \
-      --render_mode rgb_array \
-    2>&1
-  '
+  "$IMG" ${EXTRA_ARGS}
+
+# If you ever want to call a specific script manually instead of %runscript, uncomment:
+# apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$SLURM_SUBMIT_DIR" "$IMG" \
+#   bash -lc "python -u /opt/app/DrQv2_Architecture/drqv2_architecture.py ${EXTRA_ARGS}"

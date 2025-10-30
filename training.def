@@ -1,105 +1,146 @@
 Bootstrap: docker
-From: nvidia/cuda:12.8.0-devel-ubuntu24.04   # CUDA 12.8 + nvcc
+From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 %labels
     Author        Daniel Zhu
-    Description   CUDA 12.8 • MV-MAE env • offline wheelhouse install • runs trainer_pipeline.py
+    Description   CUDA 12.8 • MV-MAE (DrQv2) • headless EGL • dm_control 1.0.34 • mujoco 3.3.6
 
-# Copy the ENTIRE repo (root) into the image at /opt/app
-# This expects the following at repo root: requirements.txt, wheelhouse/, trainer_pipeline.py, etc.
+# Build context: run apptainer build from MV-MAE_Stereo_Vision repo root
+# This copies your whole repo into the image (incl. DrQv2_Architecture/, trainer_pipeline_drqv2.py, etc.)
 %files
     . /opt/app
 
 %post
-    set -e
+    set -euo pipefail
 
-    # --- base OS deps -------------------------------------------------------
+    echo "[post] Installing base OS deps..."
+    export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        git build-essential pkg-config curl ca-certificates \
-        xvfb x11-utils ffmpeg libx11-dev libxrandr-dev libxinerama-dev \
-        libxcursor-dev libxi-dev mesa-common-dev gpg lsb-release libglfw3 libegl-dev \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential pkg-config \
+        # Headless EGL/OpenGL stack
+        libegl1 libgles2 libgl1-mesa-glx libglfw3 libxext6 libx11-6 \
+        # video (optional but handy)
+        ffmpeg \
+        # Python
         python3 python3-venv python3-pip
     rm -rf /var/lib/apt/lists/*
 
-    # --- Python venv --------------------------------------------------------
+    echo "[post] Creating virtualenv..."
     python3 -m venv /opt/mvmae_venv
     . /opt/mvmae_venv/bin/activate
-    python -m pip install -U pip wheel setuptools
+    python -m pip install -U pip setuptools wheel
 
-    # --- Robust pip settings (avoid /tmp, quiet version check) --------------
+    # Make pip more reliable in container builds
     mkdir -p /opt/pip-tmp /opt/pip-cache
     export TMPDIR=/opt/pip-tmp
     export PIP_CACHE_DIR=/opt/pip-cache
     export PIP_DISABLE_PIP_VERSION_CHECK=1
     export PIP_DEFAULT_TIMEOUT=300
 
-    # --- OFFLINE install from local wheelhouse at /opt/app ------------------
-    REQ=/opt/app/requirements.txt
-    WHL=/opt/app/wheelhouse
+    # Your repo path
+    APP=/opt/app
+    REQ="$APP/requirements.txt"
+    WHL="$APP/wheelhouse"
 
-    if [ ! -f "$REQ" ]; then
-        echo "[ERROR] requirements.txt not found at $REQ"; exit 2
-    fi
-
-    if [ -d "$WHL" ]; then
-        echo "[post] Installing dependencies from local wheelhouse (offline)..."
+    echo "[post] Installing Python deps..."
+    set +e
+    if [ -d "$WHL" ] && [ -f "$REQ" ]; then
+        echo "[post] Found wheelhouse+requirements: installing offline..."
         python -m pip install --no-index --find-links "$WHL" -r "$REQ"
+        OFFLINE_OK=$?
     else
-        echo "[ERROR] wheelhouse directory missing at $WHL"
-        echo "        Build is offline-only. Please create wheelhouse before building."
-        exit 3
+        OFFLINE_OK=1
+    fi
+    set -e
+
+    if [ "$OFFLINE_OK" -ne 0 ]; then
+        echo "[post] Falling back to online install (no wheelhouse or offline install failed)..."
+        # Core runtime pins for dm_control + mujoco (EGL)
+        python -m pip install --no-cache-dir \
+            "dm_control==1.0.34" "mujoco==3.3.6" \
+            imageio imageio-ffmpeg glfw \
+            # common stack for your project (harmless if already in requirements)
+            numpy scipy pillow matplotlib tqdm \
+            einops omegaconf hydra-core hydra-submitit-launcher submitit \
+            torch torchvision --index-url https://download.pytorch.org/whl/cu121
+        # If you have a requirements.txt, do it now (lets it override/add)
+        if [ -f "$REQ" ]; then
+            python -m pip install --no-cache-dir -r "$REQ"
+        fi
     fi
 
-    # --- auto-activate venv & set PYTHONPATH on run -------------------------
+    # Auto-activate venv + set Python path for both repo root and DrQv2 package
+    echo "[post] Writing auto-env..."
     mkdir -p /.singularity.d/env
     cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
-# Make your repo (now at /opt/app) importable
-export PYTHONPATH="/opt/app:${PYTHONPATH}"
+# Import paths: repo root + DrQv2_Architecture
+export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
+# Headless EGL defaults for MuJoCo/PyOpenGL
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+# Prefer GPU GL if available; do not force software
+export LIBGL_ALWAYS_SOFTWARE=0
+# Keep thread count sane by default on shared nodes
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+# CUDA libraries
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 EOS
     chmod 644 /.singularity.d/env/99-autovenv.sh
 
 %environment
-    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-    export DISPLAY=:1
-    export HF_TOKEN=${HF_TOKEN:-}
-    export WANDB_API_KEY=${WANDB_API_KEY:-}
-    # Common headless-EGL env (MuJoCo/PyOpenGL)
+    # Redundant in case run without full env sourcing
+    export VIRTUAL_ENV=/opt/mvmae_venv
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+    export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
     export MUJOCO_GL=egl
     export PYOPENGL_PLATFORM=egl
+    export LIBGL_ALWAYS_SOFTWARE=0
+    export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
 %runscript
-    # Optional headless X for libs that insist on a DISPLAY
-    if command -v xdpyinfo >/dev/null 2>&1; then
-        if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
-            Xvfb :1 -screen 0 1280x720x24 -nolisten tcp &  sleep 2
-        fi
-    fi
+    # Default entry: run your *no-arg* script if present, else fall back.
+    set -e
+    . /opt/mvmae_venv/bin/activate
+    cd /opt/app
+
+    # Pick preferred entrypoint: DrQv2_Architecture/drqv2_architecture.py
+    MAIN_A="/opt/app/DrQv2_Architecture/drqv2_architecture.py"
+    # Fallback: trainer at repo root
+    MAIN_B="/opt/app/trainer_pipeline_drqv2.py"
 
     echo "[MVMAE] Python: $(python --version)"
+    echo "[MVMAE] CUDA:   $(python - <<'PY'
+import torch
+print("available=" + str(torch.cuda.is_available()), "version=" + str(torch.version.cuda))
+PY
+)"
     echo "[MVMAE] PYTHONPATH=$PYTHONPATH"
-    echo "[MVMAE] Running /opt/app/trainer_pipeline.py ..."
 
-    SCRIPT="/opt/app/trainer_pipeline.py"
-    if [ -f "$SCRIPT" ]; then
-        cd /opt/app
-        exec python -u "$SCRIPT" "$@"
+    if [ -f "$MAIN_A" ]; then
+        echo "[MVMAE] Running $MAIN_A ..."
+        exec python -u "$MAIN_A" "$@"
+    elif [ -f "$MAIN_B" ]; then
+        echo "[MVMAE] Running $MAIN_B ..."
+        exec python -u "$MAIN_B" "$@"
     else
-        echo "[ERROR] $SCRIPT not found in image."
+        echo "[ERROR] Could not find entry script."
+        echo "        Expected $MAIN_A or $MAIN_B"
         echo "        Falling back to passed command..."
         exec "$@"
     fi
 
 %help
-    OFFLINE build. Put "wheelhouse/" and "requirements.txt" at repo root before building.
+    Build from the MV-MAE_Stereo_Vision repo root (contains DrQv2_Architecture/):
 
-    Build from repo root:
       apptainer build --force training.sif training.def
 
-    Run (defaults to trainer_pipeline.py):
-      apptainer run --nv training.sif --batch_size 16 --buffer_size 2000
+    GPU run (EGL headless):
+      apptainer run --nv training.sif
 
-    Exec arbitrary commands:
-      apptainer exec --nv training.sif python -c "import sys, os; print(sys.path)"
+    Override entry, pass Hydra args, etc.:
+      apptainer run --nv training.sif save_video=false agent.device=cuda
+      apptainer exec --nv training.sif python -m pip list
