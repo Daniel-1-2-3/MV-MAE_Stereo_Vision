@@ -3,142 +3,131 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 %labels
     Author        Daniel Zhu
-    Description   CUDA 12.8 • MV-MAE (DrQv2) • headless EGL • dm_control 1.0.34 • mujoco 3.3.6
+    Description   CUDA 12.8 • MV-MAE (DrQv2) • headless EGL • dm_control 1.0.31 • mujoco 3.3.4
 
-# Build context: run apptainer build from MV-MAE_Stereo_Vision repo root
-# This copies your whole repo into the image (incl. DrQv2_Architecture/, trainer_pipeline_drqv2.py, etc.)
+# Build from MV-MAE_Stereo_Vision repo root (contains DrQv2_Architecture/ and trainer_pipeline_drqv2.py)
 %files
     . /opt/app
 
 %post -c /bin/bash
-    set -euo pipefail
+set -euo pipefail
 
-    apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl git build-essential pkg-config \
-    python3 python3-venv python3-pip \
-    ffmpeg \
-    libegl1 libgles2 libgl1-mesa-glx libglfw3 libxext6 libx11-6
-    rm -rf /var/lib/apt/lists/*
+apt-get update -y
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  ca-certificates \
+  curl \
+  git \
+  build-essential \
+  pkg-config \
+  python3 python3-venv python3-pip \
+  ffmpeg \
+  libegl1 libgles2 libgl1 libglfw3 libxext6 libx11-6
+rm -rf /var/lib/apt/lists/*
 
-    echo "[post] Creating virtualenv..."
-    python3 -m venv /opt/mvmae_venv
-    . /opt/mvmae_venv/bin/activate
-    python -m pip install -U pip setuptools wheel
+python3 -m venv /opt/mvmae_venv
+. /opt/mvmae_venv/bin/activate
+python -m pip install -U pip setuptools wheel
 
-    # Make pip more reliable in container builds
-    mkdir -p /opt/pip-tmp /opt/pip-cache
-    export TMPDIR=/opt/pip-tmp
-    export PIP_CACHE_DIR=/opt/pip-cache
-    export PIP_DISABLE_PIP_VERSION_CHECK=1
-    export PIP_DEFAULT_TIMEOUT=300
+mkdir -p /opt/pip-tmp /opt/pip-cache
+export TMPDIR=/opt/pip-tmp
+export PIP_CACHE_DIR=/opt/pip-cache
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_DEFAULT_TIMEOUT=300
 
-    # Your repo path
-    APP=/opt/app
-    REQ="$APP/requirements.txt"
-    WHL="$APP/wheelhouse"
+APP=/opt/app
+REQ="$APP/requirements.txt"
+WHL="$APP/wheelhouse"
 
-    echo "[post] Installing Python deps..."
-    set +e
-    if [ -d "$WHL" ] && [ -f "$REQ" ]; then
-        echo "[post] Found wheelhouse+requirements: installing offline..."
-        python -m pip install --no-index --find-links "$WHL" -r "$REQ"
-        OFFLINE_OK=$?
-    else
-        OFFLINE_OK=1
-    fi
-    set -e
+echo "[post] Installing Python deps (offline first if wheelhouse present)..."
+set +e
+if [ -d "$WHL" ] && [ -f "$REQ" ]; then
+  python -m pip install --no-index --find-links "$WHL" -r "$REQ"
+  OFFLINE_OK=$?
+else
+  OFFLINE_OK=1
+fi
+set -e
 
-    if [ "$OFFLINE_OK" -ne 0 ]; then
-        echo "[post] Falling back to online install (no wheelhouse or offline install failed)..."
-        # Core runtime pins for dm_control + mujoco (EGL)
-        python -m pip install --no-cache-dir \
-            "dm_control==1.0.31" "mujoco==3.3.4" dm_env==1.6 \
-            hydra-core omegaconf hydra-submitit-launcher==1.2.0 submitit==1.5.3 \
-            einops gymnasium stable_baselines3[extra] \
-            numpy scipy pillow matplotlib tqdm opencv-python lpips timm tokenizers \
-            imageio imageio-ffmpeg glfw \
-            --extra-index-url https://download.pytorch.org/whl/cu121 \
-            torch torchvision
-        # If you actually need TensorFlow, add a pin that has cp312 wheels:
-        #    tensorflow==2.17.0
-        # If you also keep a requirements.txt, let it refine/extend:
-        if [ -f "$REQ" ]; then
-            python -m pip install --no-cache-dir -r "$REQ"
-        fi
-    fi
+if [ "$OFFLINE_OK" -ne 0 ]; then
+  echo "[post] Falling back to online install..."
+  python -m pip install --no-cache-dir \
+    dm_control==1.0.31 mujoco==3.3.4 dm_env==1.6 \
+    hydra-core omegaconf hydra-submitit-launcher==1.2.0 submitit==1.5.3 \
+    einops gymnasium stable_baselines3[extra] \
+    numpy scipy pillow matplotlib tqdm opencv-python lpips timm tokenizers \
+    imageio imageio-ffmpeg glfw \
+    --extra-index-url https://download.pytorch.org/whl/cu121 \
+    torch==2.4.1 torchvision==0.19.1
+  if [ -f "$REQ" ]; then
+    python -m pip install --no-cache-dir -r "$REQ"
+  fi
+fi
 
-    # Auto-activate venv + set Python path for both repo root and DrQv2 package
-    echo "[post] Writing auto-env..."
-    mkdir -p /.singularity.d/env
-    cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
+mkdir -p /.singularity.d/env
+cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
-# Import paths: repo root + DrQv2_Architecture
 export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
-# Headless EGL defaults for MuJoCo/PyOpenGL
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
-# Prefer GPU GL if available; do not force software
+export MESA_EGL_NO_X11=1
 export LIBGL_ALWAYS_SOFTWARE=0
-# Keep thread count sane by default on shared nodes
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
-# CUDA libraries
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 EOS
-    chmod 644 /.singularity.d/env/99-autovenv.sh
+chmod 644 /.singularity.d/env/99-autovenv.sh
 
 %environment
-    # Redundant in case run without full env sourcing
-    export VIRTUAL_ENV=/opt/mvmae_venv
-    export PATH="$VIRTUAL_ENV/bin:$PATH"
-    export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
-    export MUJOCO_GL=egl
-    export PYOPENGL_PLATFORM=egl
-    export LIBGL_ALWAYS_SOFTWARE=0
-    export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
-    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+export VIRTUAL_ENV=/opt/mvmae_venv
+export PATH="$VIRTUAL_ENV/bin:$PATH"
+export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export MESA_EGL_NO_X11=1
+export LIBGL_ALWAYS_SOFTWARE=0
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-%runscript
-    # Default entry: run your *no-arg* script if present, else fall back.
-    set -e
-    . /opt/mvmae_venv/bin/activate
-    cd /opt/app
+%runscript -c /bin/bash
+set -euo pipefail
+. /opt/mvmae_venv/bin/activate
+cd /opt/app
 
-    # Pick preferred entrypoint: DrQv2_Architecture/drqv2_architecture.py
-    MAIN_A="/opt/app/DrQv2_Architecture/drqv2_architecture.py"
-    # Fallback: trainer at repo root
-    MAIN_B="/opt/app/trainer_pipeline_drqv2.py"
+MAIN_A="/opt/app/DrQv2_Architecture/drqv2_architecture.py"
+MAIN_B="/opt/app/trainer_pipeline_drqv2.py"
 
-    echo "[MVMAE] Python: $(python --version)"
-    echo "[MVMAE] CUDA:   $(python - <<'PY'
+echo "[MVMAE] Python: $(python --version)"
+echo "[MVMAE] CUDA:   $(python - <<'PY'
 import torch
 print("available=" + str(torch.cuda.is_available()), "version=" + str(torch.version.cuda))
 PY
 )"
-    echo "[MVMAE] PYTHONPATH=$PYTHONPATH"
+echo "[MVMAE] PYTHONPATH=$PYTHONPATH"
 
-    if [ -f "$MAIN_A" ]; then
-        echo "[MVMAE] Running $MAIN_A ..."
-        exec python -u "$MAIN_A" "$@"
-    elif [ -f "$MAIN_B" ]; then
-        echo "[MVMAE] Running $MAIN_B ..."
-        exec python -u "$MAIN_B" "$@"
-    else
-        echo "[ERROR] Could not find entry script."
-        echo "        Expected $MAIN_A or $MAIN_B"
-        echo "        Falling back to passed command..."
-        exec "$@"
-    fi
+if [ -f "$MAIN_A" ]; then
+  echo "[MVMAE] Running $MAIN_A ..."
+  exec python -u "$MAIN_A" "$@"
+elif [ -f "$MAIN_B" ]; then
+  echo "[MVMAE] Running $MAIN_B ..."
+  exec python -u "$MAIN_B" "$@"
+else
+  echo "[ERROR] Could not find entry script ($MAIN_A or $MAIN_B)."
+  exec "$@"
+fi
 
 %help
-    Build from the MV-MAE_Stereo_Vision repo root (contains DrQv2_Architecture/):
+Build from MV-MAE_Stereo_Vision repo root (contains DrQv2_Architecture/).
 
-      apptainer build --force training.sif training.def
+  apptainer build --force training.sif training.def
 
-    GPU run (EGL headless):
-      apptainer run --nv training.sif
+Run (defaults to drqv2_architecture.py, no args; fallback to trainer_pipeline_drqv2.py):
 
-    Override entry, pass Hydra args, etc.:
-      apptainer run --nv training.sif save_video=false agent.device=cuda
-      apptainer exec --nv training.sif python -m pip list
+  apptainer run --nv training.sif
+
+Pass Hydra overrides:
+
+  apptainer run --nv training.sif "save_video=false agent.device=cuda"
+
+Exec inside:
+
+  apptainer exec --nv training.sif python -m pip list
