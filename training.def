@@ -13,17 +13,12 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 %post -c /bin/bash
     set -euo pipefail
 
-    echo "[post] Installing base OS deps..."
-    export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential pkg-config \
-        # Headless EGL/OpenGL stack
-        libegl1 libgles2 libgl1-mesa-glx libglfw3 libxext6 libx11-6 \
-        # video (optional but handy)
-        ffmpeg \
-        # Python
-        python3 python3-venv python3-pip
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates curl git build-essential pkg-config \
+    python3 python3-venv python3-pip \
+    ffmpeg \
+    libegl1 libgles2 libgl1-mesa-glx libglfw3 libxext6 libx11-6
     rm -rf /var/lib/apt/lists/*
 
     echo "[post] Creating virtualenv..."
