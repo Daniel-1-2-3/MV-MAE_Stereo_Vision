@@ -58,13 +58,16 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
         echo "[post] Falling back to online install (no wheelhouse or offline install failed)..."
         # Core runtime pins for dm_control + mujoco (EGL)
         python -m pip install --no-cache-dir \
-            "dm_control==1.0.34" "mujoco==3.3.6" \
+            "dm_control==1.0.34" "mujoco==3.3.4" dm_env==1.6 \
+            hydra-core omegaconf hydra-submitit-launcher==1.2.0 submitit==1.5.3 \
+            einops gymnasium stable_baselines3[extra] \
+            numpy scipy pillow matplotlib tqdm opencv-python lpips timm tokenizers \
             imageio imageio-ffmpeg glfw \
-            # common stack for your project (harmless if already in requirements)
-            numpy scipy pillow matplotlib tqdm \
-            einops omegaconf hydra-core hydra-submitit-launcher submitit \
-            torch torchvision --index-url https://download.pytorch.org/whl/cu121
-        # If you have a requirements.txt, do it now (lets it override/add)
+            --extra-index-url https://download.pytorch.org/whl/cu121 \
+            torch==2.4.0+cu121 torchvision==0.19.0+cu121
+        # If you actually need TensorFlow, add a pin that has cp312 wheels:
+        #    tensorflow==2.17.0
+        # If you also keep a requirements.txt, let it refine/extend:
         if [ -f "$REQ" ]; then
             python -m pip install --no-cache-dir -r "$REQ"
         fi
