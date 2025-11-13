@@ -4,12 +4,9 @@
 # LICENSE file in the root directory of this source tree.
 from collections import deque
 from typing import Any, NamedTuple
-
-import dm_env
 import numpy as np
-from dm_control import manipulation, suite
-from dm_control.suite.wrappers import action_scale, pixels
-from dm_env import StepType, specs
+from SawyerSim.sawyer_base_env import SawyerXYZEnv
+from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
 
 class ExtendedTimeStep(NamedTuple):
     step_type: Any

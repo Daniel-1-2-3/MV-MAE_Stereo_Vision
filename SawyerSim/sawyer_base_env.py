@@ -149,6 +149,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self._rgb_right = np.empty((self.height, self.width, 3), dtype=np.uint8)
         
         self.debugger = debugger
+        self.step_type = "FIRST"
 
     def seed(self, seed: int) -> list[int]:
         """Seeds the environment.
@@ -379,6 +380,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             self._set_pos_site(*site)
 
         if self._did_see_sim_exception:
+            self.step_type = "LAST"
             assert self._last_stable_obs is not None
             return (
                 self._last_stable_obs,  # observation just before going unstable
@@ -408,6 +410,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         if self.curr_path_length == self.max_path_length:
             truncate = True
         
+        self.step_type = "LAST" if truncate == True else "MID"
         return self._last_stable_obs, reward, False, truncate, info
 
     def evaluate_state(self) -> tuple[float, dict[str, Any]]:
@@ -446,6 +449,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.curr_path_length = 0
         self.reset_camera_placement()
         obs = self.reset_model()
+        self._did_see_sim_exception = False
+        self.step_type = "FIRST"
         info = {}
         return obs, info
 
