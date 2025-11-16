@@ -93,8 +93,7 @@ set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 cd /opt/app
 
-MAIN_A="/opt/app/DrQv2_Architecture/drqv2_architecture.py"
-MAIN_B="/opt/app/trainer_pipeline_drqv2.py"
+MAIN_A="/opt/app/trainer_pipeline_drqv2.py"
 
 echo "[MVMAE] Python: $(python --version)"
 echo "[MVMAE] CUDA:   $(python - <<'PY'

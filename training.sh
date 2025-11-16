@@ -87,12 +87,6 @@ apptainer exec --nv \
     set -e
     export PYTHONUNBUFFERED=1
     # (MuJoCo/PyOpenGL EGL env is already set via APPTAINERENV_*)
-    stdbuf -oL -eL python -u /opt/app/trainer_pipeline.py \
-      --learning_starts 10_000 \
-      --batch_size 64 \
-      --buffer_size 100_000 \
-      --total_timesteps 500_000 \
-      --coef_mvmae 0.005 \
-      --render_mode rgb_array \
+    stdbuf -oL -eL python -u /opt/app/trainer_pipeline_drqv2.py \
     2>&1
   '
