@@ -9,7 +9,6 @@ class PosEmbed():
             embed_dim (int): Embedding dimension for each patch
             grid_h_size (int), grid_w-size(int): Number of patches vertically and horizontally
         """
-        print('DEBUG IN SINCOS', grid_h_size, grid_w_size)
         grid_h = np.arange(grid_h_size, dtype=np.float32)
         grid_w = np.arange(grid_w_size, dtype=np.float32)
         grid = np.meshgrid(grid_w, grid_h)

@@ -8,28 +8,6 @@ from MAE_Model.model import MAEModel
 from MAE_Model.encoder import ViTMaskedEncoder
 from gymnasium.spaces import Box
 
-class RandomShiftsAug(nn.Module):
-    def __init__(self, pad):
-        super().__init__()
-        self.pad = pad
-
-    def forward(self, x):
-        n, c, h, w = x.size()
-        assert h == w
-        padding = tuple([self.pad] * 4)
-        x = F.pad(x, padding, 'replicate')
-        eps = 1.0 / (h + 2 * self.pad)
-        arange = torch.linspace(-1.0 + eps, 1.0 - eps, h + 2 * self.pad, device=x.device, dtype=x.dtype)[:h]
-        arange = arange.unsqueeze(0).repeat(h, 1).unsqueeze(2)
-        base_grid = torch.cat([arange, arange.transpose(1, 0)], dim=2)
-        base_grid = base_grid.unsqueeze(0).repeat(n, 1, 1, 1)
-
-        shift = torch.randint(0, 2 * self.pad + 1, size=(n, 1, 1, 2), device=x.device, dtype=x.dtype)
-        shift *= 2.0 / (h + 2 * self.pad)
-
-        grid = base_grid + shift
-        return F.grid_sample(x, grid, padding_mode='zeros', align_corners=False)
-
 class Actor(nn.Module):
     def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
         super().__init__()
@@ -168,9 +146,6 @@ class DrQV2Agent:
         self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
-        # Data augmentation
-        self.aug = RandomShiftsAug(pad=4)
-
         self.train()
         self.critic_target.train()
 
@@ -183,37 +158,36 @@ class DrQV2Agent:
 
     # Samples an action
     def act(self, obs, step, eval_mode):
-        obs = torch.as_tensor(obs, device=self.device)
-        z: torch.Tensor
-        z, _ = self.mvmae.encoder(obs.unsqueeze(0), mask_x=False)
-        obs = z.flatten(start_dim=-2)
-        stddev = utils.schedule(self.stddev_schedule, step)
-        dist = self.actor(obs, stddev)
-        if eval_mode:
-            action = dist.mean
-        else:
-            action = dist.sample(clip=None)
-            if step < self.num_expl_steps:
-                action.uniform_(-1.0, 1.0)
+        obs = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+        with torch.no_grad():
+            z, _ = self.mvmae.encoder(obs.unsqueeze(0), mask_x=False)
+            obs_latent = z.flatten(start_dim=-2)
+            stddev = utils.schedule(self.stddev_schedule, step)
+            dist = self.actor(obs_latent, stddev)
+            if eval_mode:
+                action = dist.mean
+            else:
+                action = dist.sample(clip=None)
+                if step < self.num_expl_steps:
+                    action.uniform_(-1.0, 1.0)
         return action.cpu().numpy()[0]
 
-    def update_critic(self, obs, action, reward, discount, next_obs, step):
+    def update_critic(self, z, action, reward, discount, z_next, step, obs):
         metrics = dict()
 
         # Calculates target, computes MSE critic loss
         with torch.no_grad():
             stddev = utils.schedule(self.stddev_schedule, step)
-            dist = self.actor(next_obs, stddev)
+            dist = self.actor(z_next, stddev)
             next_action = dist.sample(clip=self.stddev_clip)
-            target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
+            target_Q1, target_Q2 = self.critic_target(z_next, next_action)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
 
-        Q1, Q2 = self.critic(obs, action)
+        Q1, Q2 = self.critic(z, action)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
         
-        obs = torch.from_numpy(obs)
-        out, mask, z = self.mvmae.forward(obs, mask_x=True)
+        out, mask, _ = self.mvmae.forward(obs, mask_x=True)
         recon_loss = self.mvmae.compute_loss(out, obs, mask)
         
         total_loss = critic_loss + self.coef_mvmae * recon_loss
@@ -272,24 +246,24 @@ class DrQV2Agent:
             metrics['batch_reward'] = reward.mean().item()
 
         # Augment
-        obs = self.aug(obs.float())
-        next_obs = self.aug(next_obs.float())
+        obs = obs.float()
+        next_obs = next_obs.float()
         
         # Encoder used to process obs with gradients on, and next_obs with gradients off. 
         z: torch.Tensor
         z_next: torch.Tensor
         z, _ = self.mvmae.encoder(obs, mask_x=False)
-        obs = z.flatten(start_dim=-2)
+        z = z.flatten(start_dim=-2)
         with torch.no_grad():
             z_next = self.mvmae.encoder(next_obs, mask_x=False)
-            next_obs = z_next.flatten(start_dim=-2)
+            z_next = z_next.flatten(start_dim=-2)
 
         # Actor, critic, and encoder updates
         # Encoder reconstruction loss is calculated and backpropagated inside .update_critic()
-        metrics.update(self.update_critic(obs, action, reward, discount, next_obs, step))
-        metrics.update(self.update_actor(obs.detach(), step))
+        metrics.update(self.update_critic(z, action, reward, discount, z_next, step, obs))
+        metrics.update(self.update_actor(z.detach(), step))
 
-        # Ppdate critic target
+        # Update critic target
         utils.soft_update_params(self.critic, self.critic_target, self.critic_target_tau)
 
         return metrics

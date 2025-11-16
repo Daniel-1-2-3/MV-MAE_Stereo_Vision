@@ -28,8 +28,6 @@ class ViTMaskedEncoder(nn.Module):
         self.depth = depth
         self.masking_ratio = masking_ratio
         
-        print('DEBUG SHAPES AGAIN', self.patch_size, self.img_h_size, self.img_w_fused_size)
-        
         # Positional embeddings
         with torch.no_grad():
             each_view_w = img_w_fused_size // nviews

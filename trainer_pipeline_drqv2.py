@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from dm_env import specs
+import time
 
 import DrQv2_Architecture.utils as utils
 from DrQv2_Architecture.logger import Logger
@@ -160,7 +161,7 @@ class Workshop:
     
     def setup(self):
         self.logger = Logger(self.work_dir, use_tb=True)
-        self.train_env = self.make_env("human")
+        self.train_env = self.make_env("rgb_array")
         self.eval_env = self.make_env("rgb_array")
         
         data_specs = (
@@ -258,6 +259,7 @@ class Workshop:
                 self.logger.log('eval_total_time', self.timer.total_time(), self.global_frame)
                 self.eval()
 
+            t0 = time.perf_counter()
             # Sample action
             with torch.no_grad(), utils.eval_mode(self.agent):
                 action = self.agent.act(time_step.observation, self.global_step, eval_mode=False)
@@ -266,6 +268,8 @@ class Workshop:
             if not seed_until_step(self.global_step):
                 metrics = self.agent.update(self.replay_iter, self.global_step)
                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
+            t1 = time.perf_counter()
+            print(f"Training step: {1/(t1 - t0):.2f} steps/sec")
 
             # Take env step
             time_step = self.train_env.step(action)
@@ -278,4 +282,4 @@ if __name__ == '__main__':
     root_dir = Path.cwd()
     workspace = Workshop()
     workspace.train()
-    print("Read Tensorboard logs at 'tensorboard --logdir tb'")
+    print("Read Tensorboard logs at 'python -m tensorboard --logdir tb'")

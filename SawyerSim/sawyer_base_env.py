@@ -620,3 +620,6 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             caging_and_gripping = (caging_and_gripping + float(reach)) / 2
 
         return caging_and_gripping
+
+    def sawyer_observation_space(self):
+        pass

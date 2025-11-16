@@ -36,8 +36,26 @@ class VideoRecorder:
     def save(self, file_name):
         if self.enabled:
             path = self.save_dir / file_name
-            imageio.mimsave(str(path), self.frames, fps=self.fps)
 
+            frames_uint8 = []
+            for frame in self.frames:
+                # If the env returned normalized float32 frames (your Sawyer env),
+                # de-normalize using the same stats as Prepare.fuse_normalize
+                if frame.dtype != np.uint8:
+                    # frame shape: (H, 2W, 3), float32, ~[-4, 4]
+                    mean = np.array([0.51905, 0.47986, 0.48809], dtype=np.float32).reshape(1, 1, 3)
+                    std  = np.array([0.17454, 0.20183, 0.19598], dtype=np.float32).reshape(1, 1, 3)
+
+                    img = frame * std + mean        # back to roughly [0, 1]
+                    img = np.clip(img, 0.0, 1.0)
+                    img = (img * 255.0).astype(np.uint8)
+                else:
+                    # Already uint8 [0, 255] (other envs)
+                    img = frame
+
+                frames_uint8.append(img)
+
+            imageio.mimsave(str(path), frames_uint8, fps=self.fps)
 
 class TrainVideoRecorder:
     def __init__(self, root_dir, render_size=256, fps=20):

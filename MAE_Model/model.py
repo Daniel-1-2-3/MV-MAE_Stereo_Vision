@@ -38,7 +38,6 @@ class MAEModel(nn.Module):
         self.img_w_fused = self.nviews * self.img_w_size
         self.num_patches = int((self.img_h_size * self.img_w_size) // (patch_size ** 2) * nviews)
         
-        print('DEBUG SIZES', self.patch_size, self.img_h_size, self.img_w_fused)
         self.encoder = ViTMaskedEncoder(
             nviews=self.nviews,
             patch_size=self.patch_size,
