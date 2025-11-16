@@ -8,8 +8,9 @@ os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 from pathlib import Path
 import numpy as np
 import torch
-from dm_env import specs
 import time
+import argparse
+from dm_env import specs
 
 import DrQv2_Architecture.utils as utils
 from DrQv2_Architecture.logger import Logger
@@ -278,8 +279,48 @@ class Workshop:
             episode_step += 1
             self._global_step += 1
 
+def get_args():
+    parser = argparse.ArgumentParser()
+
+    # General variables
+    parser.add_argument("--device", type=str, default=None, help="Torch device string, e.g. 'cuda' or 'cpu'")
+    # RL training
+    parser.add_argument("--buffer_size", type=int, default=100_000)
+    parser.add_argument("--total_timesteps", type=int, default=500_000)
+    parser.add_argument("--learning_starts", type=int, default=10_000, help="Start training (and using grads) at this step")
+    parser.add_argument("--num_expl_steps", type=int, default=5000, help="Number of random action steps before policy actions")
+    parser.add_argument("--episode_horizon", type=int, default=300)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--critic_target_tau", type=float, default=0.001)
+    parser.add_argument("--update_every_steps", type=int, default=2)
+    parser.add_argument("--stddev_schedule", type=str, default="linear(1.0,0.1,500000)")
+    parser.add_argument("--stddev_clip", type=float, default=0.3)
+    parser.add_argument("--use_tb", action="store_true")
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--discount", type=float, default=0.99)
+    parser.add_argument("--action_repeat", type=int, default=2)
+    # MV-MAE variables
+    parser.add_argument("--nviews", type=int, default=2)
+    parser.add_argument("--mvmae_patch_size", type=int, default=8)
+    parser.add_argument("--mvmae_encoder_embed_dim", type=int, default=256)
+    parser.add_argument("--mvmae_decoder_embed_dim", type=int, default=128)
+    parser.add_argument("--mvmae_encoder_heads", type=int, default=16)
+    parser.add_argument("--mvmae_decoder_heads", type=int, default=16)
+    parser.add_argument("--masking_ratio", type=float, default=0.75)
+    parser.add_argument("--coef_mvmae", type=float, default=0.005)
+    # Actor + Critic
+    parser.add_argument("--feature_dim", type=int, default=100)
+    parser.add_argument("--hidden_dim", type=int, default=1024)
+    # Image specs
+    parser.add_argument("--render_mode", type=str, default="human")
+    parser.add_argument("--in_channels", type=int, default=3 * 3)
+    parser.add_argument("--img_h_size", type=int, default=64)
+    parser.add_argument("--img_w_size", type=int, default=64)
+
+    return parser.parse_args()
+
 if __name__ == '__main__':
     root_dir = Path.cwd()
-    workspace = Workshop()
+    args = get_args()
+    workspace = Workshop(**vars(args))
     workspace.train()
-    print("Read Tensorboard logs at 'python -m tensorboard --logdir tb'")
