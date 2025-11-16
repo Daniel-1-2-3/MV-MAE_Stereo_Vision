@@ -50,6 +50,9 @@ class Workshop:
         mvmae_decoder_heads: int = 16,
         masking_ratio: float = 0.75,
         coef_mvmae: float = 0.005,
+        # Actor + critic 
+        feature_dim: int = 100,
+        hidden_dim: int = 1024,
         # Image specs
         render_mode: str = "human",
         in_channels: int = 3 * 3, # Number of frames stacked * 3 (RGB)
@@ -85,6 +88,9 @@ class Workshop:
         self.masking_ratio = masking_ratio
         self.coef_mvmae = coef_mvmae
         
+        self.feature_dim = feature_dim
+        self.hidden_dim = hidden_dim
+        
         self.render_mode = render_mode
         self.in_channels = in_channels
         self.img_h_size = img_h_size
@@ -119,8 +125,14 @@ class Workshop:
             mvmae_decoder_embed_dim = self.mvmae_decoder_embed_dim,
             mvmae_encoder_heads = self.mvmae_encoder_heads,
             mvmae_decoder_heads = self.mvmae_decoder_heads,
+            in_channels = self.in_channels,
+            img_h_size = self.img_h_size,
+            img_w_size = self.img_w_size,
             masking_ratio = self.masking_ratio,
             coef_mvmae = self.coef_mvmae,
+            
+            feature_dim=self.feature_dim,
+            hidden_dim=self.hidden_dim,
 
             critic_target_tau = self.critic_target_tau,
             num_expl_steps = self.num_expl_steps,
@@ -266,3 +278,4 @@ if __name__ == '__main__':
     root_dir = Path.cwd()
     workspace = Workshop()
     workspace.train()
+    print("Read Tensorboard logs at 'tensorboard --logdir tb'")

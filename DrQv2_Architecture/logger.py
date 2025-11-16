@@ -21,8 +21,6 @@ COMMON_EVAL_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
                       ('episode', 'E', 'int'), ('episode_length', 'L', 'int'),
                       ('episode_reward', 'R', 'float'),
                       ('total_time', 'T', 'time')]
-
-
 class AverageMeter(object):
     def __init__(self):
         self._sum = 0
@@ -34,7 +32,6 @@ class AverageMeter(object):
 
     def value(self):
         return self._sum / max(1, self._count)
-
 
 class MetersGroup(object):
     def __init__(self, csv_file_name, formating):
@@ -156,8 +153,7 @@ class Logger(object):
 
     def log_and_dump_ctx(self, step, ty):
         return LogAndDumpCtx(self, step, ty)
-
-
+    
 class LogAndDumpCtx:
     def __init__(self, logger, step, ty):
         self._logger = logger

@@ -3,7 +3,6 @@ from typing import Any, NamedTuple
 import numpy as np
 from dm_env import StepType
 from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
-
 class FrameStackWrapper():
     def __init__(self, env: SawyerReachEnvV3, num_frames):
         self._env = env

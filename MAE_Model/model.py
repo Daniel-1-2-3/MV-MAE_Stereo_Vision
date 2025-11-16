@@ -63,7 +63,7 @@ class MAEModel(nn.Module):
         )
         self.out_proj = nn.Linear(decoder_embed_dim, self.patch_size ** 2 * in_channels)
     
-    def forward(self, x: Tensor, mask_x: True):
+    def forward(self, x: Tensor, mask_x: bool = True):
         """
         Whole pipeline of the MV-MAE model: patchified, 
         then passed through encoder, mask tokens added, and 
