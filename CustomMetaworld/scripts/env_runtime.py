@@ -7,7 +7,7 @@ import gymnasium
 import numpy as np
 
 from CustomMetaworld import metaworld
-from CustomMetaworld import metaworld.envs
+from CustomMetaworld import metaworld
 
 SEED = 42
 BENCH_SECONDS = 20
