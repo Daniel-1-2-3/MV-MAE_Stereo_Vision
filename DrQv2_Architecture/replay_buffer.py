@@ -7,11 +7,15 @@ import io
 import random
 import traceback
 from collections import defaultdict
+from typing import Tuple
+from dm_env import specs
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import IterableDataset
+from DrQv2_Architecture.env_wrappers import ExtendedTimeStep
 
 def episode_len(episode):
     # subtract -1 because the dummy first transition
@@ -31,7 +35,7 @@ def load_episode(fn):
         return episode
 
 class ReplayBufferStorage:
-    def __init__(self, data_specs, replay_dir):
+    def __init__(self, data_specs: Tuple[specs.Array, ...], replay_dir: Path):
         self._data_specs = data_specs
         self._replay_dir = replay_dir
         replay_dir.mkdir(exist_ok=True)
@@ -41,7 +45,7 @@ class ReplayBufferStorage:
     def __len__(self):
         return self._num_transitions
 
-    def add(self, time_step):
+    def add(self, time_step: ExtendedTimeStep):
         for spec in self._data_specs:
             value = time_step[spec.name]
             if np.isscalar(value):

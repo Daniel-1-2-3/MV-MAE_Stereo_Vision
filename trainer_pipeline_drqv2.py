@@ -13,7 +13,7 @@ from dm_env import specs
 import DrQv2_Architecture.utils as utils
 from DrQv2_Architecture.logger import Logger
 from DrQv2_Architecture.replay_buffer import ReplayBufferStorage, make_replay_loader
-from DrQv2_Architecture.video import TrainVideoRecorder, VideoRecorder
+from DrQv2_Architecture.video import VideoRecorder
 from DrQv2_Architecture.drqv2 import DrQV2Agent
 from DrQv2_Architecture.env_wrappers import ExtendedTimeStepWrapper, ActionRepeatWrapper, FrameStackWrapper
 from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
@@ -25,8 +25,6 @@ class Workshop:
     def __init__(
         self,
         # General variables
-        obs_space: Box | None = None,
-        action_space: Box | None = None,
         device: torch.device | None = None,
         # RL training
         buffer_size: int = 100_000,
@@ -54,13 +52,15 @@ class Workshop:
         coef_mvmae: float = 0.005,
         # Image specs
         render_mode: str = "human",
-        in_channels: int = 3,
+        in_channels: int = 3 * 3, # Number of frames stacked * 3 (RGB)
         img_h_size: int = 64,
         img_w_size: int = 64,
     ):  
-        self.obs_space = obs_space if (obs_space is not None) else Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels), dtype=np.float32)
-        self.action_space = action_space if (action_space is not None) else Box(np.array([-1, -1, -1, -1]), np.array([+1, +1, +1, +1]), dtype=np.float32)
-        self.device = device if (device is not None) else ("cuda" if torch.cuda.is_available() else "cpu")
+        # Overall obs space expects frame stacked obs, sawyer env expects single image
+        self.overall_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels), dtype=np.float32)
+        self.sawyer_env_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels // 3), dtype=np.float32)
+        self.action_space = Box(np.array([-1, -1, -1, -1]), np.array([+1, +1, +1, +1]), dtype=np.float32)
+        self.device = device if (device is not None) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.buffer_size = buffer_size
         self.total_timesteps = total_timesteps
         self.learning_starts = learning_starts
@@ -137,11 +137,11 @@ class Workshop:
             img_height=self.img_h_size,
             img_width=self.img_w_size,
             max_path_length=self.episode_horizon,
-            obs_space=self.obs_space,
+            obs_space=self.sawyer_env_obs_space,
             action_space=self.action_space,
             discount=self.discount
         )
-        env = FrameStackWrapper(env, num_frames=3)
+        env = FrameStackWrapper(env, num_frames=self.in_channels // 3)
         env = ActionRepeatWrapper(env, num_repeats=self.action_repeat)
         env = ExtendedTimeStepWrapper(env)
         return env
@@ -152,7 +152,7 @@ class Workshop:
         self.eval_env = self.make_env("rgb_array")
         
         data_specs = (
-            specs.Array(self.obs_space.shape, self.obs_space.dtype, name="observation"),
+            specs.Array(self.overall_obs_space.shape, self.overall_obs_space.dtype, name="observation"),
             specs.Array(self.action_space.shape, self.action_space.dtype, name="action"),
             specs.Array((1,), np.float32, name="reward"),
             specs.Array((1,), np.float32, name="discount")
@@ -178,7 +178,7 @@ class Workshop:
         return self.global_step * self.action_repeat
 
     @property
-    def replay_iter(self):
+    def replay_iter(self): # An iterator of replay buffer dataloader
         if self._replay_iter is None:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
@@ -192,12 +192,10 @@ class Workshop:
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
-                    action = self.agent.act(time_step.observation,
-                                            self.global_step,
-                                            eval_mode=True)
+                    action = self.agent.act(time_step.observation, self.global_step, eval_mode=True)
                 time_step = self.eval_env.step(action)
                 self.video_recorder.record(self.eval_env)
-                total_reward += time_step.reward
+                total_reward += float(time_step.reward[0])
                 step += 1
 
             episode += 1
@@ -205,35 +203,29 @@ class Workshop:
 
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
             log('episode_reward', total_reward / episode)
-            log('episode_length', step * self.cfg.action_repeat / episode)
+            log('episode_length', step * self.action_repeat / episode)
             log('episode', self.global_episode)
             log('step', self.global_step)
 
     def train(self):
-        # predicates
-        train_until_step = utils.Until(self.cfg.num_train_frames,
-                                       self.cfg.action_repeat)
-        seed_until_step = utils.Until(self.cfg.num_seed_frames,
-                                      self.cfg.action_repeat)
-        eval_every_step = utils.Every(self.cfg.eval_every_frames,
-                                      self.cfg.action_repeat)
+        train_until_step = utils.Until(self.total_timesteps, self.action_repeat) # True until self.action_repeat * self._global_step > self.total_timesteps
+        seed_until_step = utils.Until(self.learning_starts, self.action_repeat) # True until self.action_repeat * self._global_step > self.learning_starts
+        eval_every_step = utils.Every(self.eval_every_frames, self.action_repeat) # True for every self.eval_every_frames / self.action_repeat frames
 
         episode_step, episode_reward = 0, 0
-        time_step = self.train_env.reset()
+        time_step = self.train_env.reset() # time_step here is a ExtendedTimeStep object due to wrappers
         self.replay_storage.add(time_step)
-        self.train_video_recorder.init(time_step.observation)
+
         metrics = None
         while train_until_step(self.global_step):
             if time_step.last():
                 self._global_episode += 1
-                self.train_video_recorder.save(f'{self.global_frame}.mp4')
-                # wait until all the metrics schema is populated
+                # Wait until all the metrics schema is populated
                 if metrics is not None:
                     # log stats
                     elapsed_time, total_time = self.timer.reset()
-                    episode_frame = episode_step * self.cfg.action_repeat
-                    with self.logger.log_and_dump_ctx(self.global_frame,
-                                                      ty='train') as log:
+                    episode_frame = episode_step * self.action_repeat
+                    with self.logger.log_and_dump_ctx(self.global_frame, ty='train') as log:
                         log('fps', episode_frame / elapsed_time)
                         log('total_time', total_time)
                         log('episode_reward', episode_reward)
@@ -242,65 +234,35 @@ class Workshop:
                         log('buffer_size', len(self.replay_storage))
                         log('step', self.global_step)
 
-                # reset env
+                # Reset env
                 time_step = self.train_env.reset()
                 self.replay_storage.add(time_step)
-                self.train_video_recorder.init(time_step.observation)
-                # try to save snapshot
-                if self.cfg.save_snapshot:
-                    self.save_snapshot()
+
                 episode_step = 0
                 episode_reward = 0
 
-            # try to evaluate
+            # Try to evaluate, evals at intervals
             if eval_every_step(self.global_step):
-                self.logger.log('eval_total_time', self.timer.total_time(),
-                                self.global_frame)
+                self.logger.log('eval_total_time', self.timer.total_time(), self.global_frame)
                 self.eval()
 
-            # sample action
+            # Sample action
             with torch.no_grad(), utils.eval_mode(self.agent):
-                action = self.agent.act(time_step.observation,
-                                        self.global_step,
-                                        eval_mode=False)
+                action = self.agent.act(time_step.observation, self.global_step, eval_mode=False)
 
-            # try to update the agent
+            # Try to update the agent, will only update past self.learning_starts
             if not seed_until_step(self.global_step):
                 metrics = self.agent.update(self.replay_iter, self.global_step)
                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
 
-            # take env step
+            # Take env step
             time_step = self.train_env.step(action)
-            episode_reward += time_step.reward
+            episode_reward += float(time_step.reward[0])
             self.replay_storage.add(time_step)
-            self.train_video_recorder.record(time_step.observation)
             episode_step += 1
             self._global_step += 1
 
-    def save_snapshot(self):
-        snapshot = self.work_dir / 'snapshot.pt'
-        keys_to_save = ['agent', 'timer', '_global_step', '_global_episode']
-        payload = {k: self.__dict__[k] for k in keys_to_save}
-        with snapshot.open('wb') as f:
-            torch.save(payload, f)
-
-    def load_snapshot(self):
-        snapshot = self.work_dir / 'snapshot.pt'
-        with snapshot.open('rb') as f:
-            payload = torch.load(f)
-        for k, v in payload.items():
-            self.__dict__[k] = v
-
-def main(cfg):
-    from trainer_pipeline_drqv2 import Workspace as W
-    root_dir = Path.cwd()
-    workspace = W(cfg)
-    snapshot = root_dir / 'snapshot.pt'
-    if snapshot.exists():
-        print(f'resuming: {snapshot}')
-        workspace.load_snapshot()
-    workspace.train()
-
-
 if __name__ == '__main__':
-    main()
+    root_dir = Path.cwd()
+    workspace = Workshop()
+    workspace.train()
