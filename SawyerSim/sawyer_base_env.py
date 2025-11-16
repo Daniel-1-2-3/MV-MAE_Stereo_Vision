@@ -13,16 +13,15 @@ import mujoco
 import random
 import numpy as np
 import numpy.typing as npt
-from gymnasium.spaces import Box, Dict
+from gymnasium.spaces import Box
 from gymnasium.utils import seeding
 from gymnasium.utils.ezpickle import EzPickle
 from typing_extensions import TypeAlias
+from dm_env import StepType
 
 from CustomMetaworld.metaworld.types import XYZ, ObservationDict
 from CustomMetaworld.metaworld.sawyer_xyz_env import SawyerMocapBase
 from CustomMetaworld.metaworld.utils import reward_utils
-from SB3_Architecture.debugger import Debugger
-
 from MAE_Model.prepare_input import Prepare
 
 RenderMode: TypeAlias = Literal['human', 'rgb_array', 'depth_array']
@@ -52,7 +51,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         camera_pairs: list | None = None,
         img_width: int = 84,
         img_height: int = 84,
-        debugger: Debugger | None = None,
+        discount: float = 0.99,
     ):
         self.action_scale = action_scale
         self.action_rot_scale = action_rot_scale
@@ -75,6 +74,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
 
         self.width = img_width
         self.height = img_height
+        self.discount = discount
         
         self._obs_obj_max_len = 14
         
@@ -94,7 +94,12 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.init_left_pad: npt.NDArray[Any] = self.get_body_com("leftpad") # Initial center of mass
         self.init_right_pad: npt.NDArray[Any] = self.get_body_com("rightpad")
 
-        self.observation_space = self.sawyer_observation_space
+        self.observation_space = Box(
+            low=np.float32(-4.0), 
+            high=np.float32(4.0), 
+            shape=(self.height, 2 * self.width, 3), 
+            dtype=np.float32
+        )
         self.action_space = Box(
             np.array([-1, -1, -1, -1]),
             np.array([+1, +1, +1, +1]),
@@ -147,9 +152,6 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         # Preallocate CPU buffers used by mjr_readPixels (uint8, HxWx3)
         self._rgb_left  = np.empty((self.height, self.width, 3), dtype=np.uint8)
         self._rgb_right = np.empty((self.height, self.width, 3), dtype=np.uint8)
-        
-        self.debugger = debugger
-        self.step_type = "FIRST"
 
     def seed(self, seed: int) -> list[int]:
         """Seeds the environment.
@@ -331,13 +333,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             identical to the previous implementation that used mujoco.Renderer.
         """
         # Render both views with the fast pathway
-        t0 = time.perf_counter()
         left_u8  = self._render_one_camera(self.left_cam_name,  self._rgb_left)
-        dt1 = (time.perf_counter() - t0) * 1000
         right_u8 = self._render_one_camera(self.right_cam_name, self._rgb_right)
-        dt2 = (time.perf_counter() - t0) * 1000
-        self.debugger.put(dt1, "speed_one_renderer")
-        self.debugger.put(dt2, "speed_both_renderer")
         
         # Convert to tensors exactly like before, fuse + normalize with your helper
         left_t  = torch.from_numpy(left_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0
@@ -354,11 +351,6 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
 
         return stereo_np
 
-    @cached_property
-    def sawyer_observation_space(self) -> Box:
-        observation_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(self.height, 2 * self.width, 3), dtype=np.float32)
-        return observation_space
- 
     def step(self, action: npt.NDArray[np.float32]):
         """
         Args:
@@ -380,7 +372,7 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             self._set_pos_site(*site)
 
         if self._did_see_sim_exception:
-            self.step_type = "LAST"
+            self.step_type = StepType.LAST
             assert self._last_stable_obs is not None
             return (
                 self._last_stable_obs,  # observation just before going unstable
@@ -410,8 +402,14 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         if self.curr_path_length == self.max_path_length:
             truncate = True
         
-        self.step_type = "LAST" if truncate == True else "MID"
-        return self._last_stable_obs, reward, False, truncate, info
+        self.step_type = StepType.LAST if truncate == True else StepType.MID
+        # The var info is a dict containing observation, step_type, action, reward, and discount
+        return {
+            "observation": self._last_stable_obs,
+            "step_type": self.step_type,
+            "reward": reward,
+            "discount": 0.0 if self.step_type == StepType.LAST else self.discount
+        }
 
     def evaluate_state(self) -> tuple[float, dict[str, Any]]:
         """Does the heavy-lifting for `step()` -- namely, calculating reward and populating the `info` dict with training metrics.
@@ -450,9 +448,14 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self.reset_camera_placement()
         obs = self.reset_model()
         self._did_see_sim_exception = False
-        self.step_type = "FIRST"
-        info = {}
-        return obs, info
+        self.step_type = StepType.FIRST
+        return {
+            "observation": obs,
+            "step_type": self.step_type,
+            "action": None,
+            "reward": None,
+            "discount": 0.0 if self.step_type == StepType.LAST else self.discount
+        }
 
     def _reset_hand(self, steps: int = 50) -> None:
         """Resets the hand position.

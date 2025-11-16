@@ -23,10 +23,13 @@ class SawyerReachEnvV3(SawyerXYZEnv):
             ("stereo_left3", "stereo_right3")], 
         camera_id: int | None = None,
         reward_function_version: str = "v2",
-        img_height: int = 84,
-        img_width: int = 84,
-        max_path_length: int = 300,
-        debugger: Debugger | None = None,
+        
+        img_height: int = 64,
+        img_width: int = 64,
+        discount: float = 0.99,
+        max_path_length: int = 300, # Horizon
+        obs_space: Box | None = None,
+        action_space: Box | None = None
     ) -> None:
         goal_low = (-0.1, 0.8, 0.05)
         goal_high = (0.1, 0.9, 0.3)
@@ -45,7 +48,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
             camera_id=camera_id,
             img_height=img_height,
             img_width=img_width,
-            debugger=debugger
+            discount=discount
         )
         self.reward_function_version = reward_function_version
 
@@ -66,6 +69,10 @@ class SawyerReachEnvV3(SawyerXYZEnv):
             np.hstack((obj_high, goal_high)),
             dtype=np.float32,
         )
+        
+        # OVERRIDE the base env
+        self.observation_space = obs_space
+        self.action_space = action_space
 
     @property
     def model_name(self) -> str:

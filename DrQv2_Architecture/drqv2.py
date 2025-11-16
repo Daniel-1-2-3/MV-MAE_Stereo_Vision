@@ -1,17 +1,12 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
-# python trainer_pipeline_drqv2.py agent.device=cpu
-
-import hydra
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import DrQv2_Architecture.utils as utils
+from MAE_Model.model import MAEModel
+from MAE_Model.encoder import ViTMaskedEncoder
+from gymnasium.spaces import Box
 
 class RandomShiftsAug(nn.Module):
     def __init__(self, pad):
@@ -45,29 +40,6 @@ class RandomShiftsAug(nn.Module):
                              grid,
                              padding_mode='zeros',
                              align_corners=False)
-
-
-class Encoder(nn.Module):
-    def __init__(self, obs_shape):
-        super().__init__()
-
-        assert len(obs_shape) == 3
-        self.repr_dim = 32 * 35 * 35
-
-        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU())
-
-        self.apply(utils.weight_init)
-
-    def forward(self, obs):
-        obs = obs / 255.0 - 0.5
-        h = self.convnet(obs)
-        h = h.view(h.shape[0], -1)
-        return h
-
 
 class Actor(nn.Module):
     def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
@@ -121,23 +93,52 @@ class Critic(nn.Module):
         q2 = self.Q2(h_action)
 
         return q1, q2
-
-
 class DrQV2Agent:
-    def __init__(self, obs_shape, action_shape, device, lr, feature_dim,
-                 hidden_dim, critic_target_tau, num_expl_steps,
-                 update_every_steps, stddev_schedule, stddev_clip, use_tb):
+    def __init__(self,
+        # General variables
+        action_shape: tuple | None = None,
+        device: torch.device | None = None,
+        lr: float = 1e-4,
+        # MVMAE variables
+        nviews: int = 2,
+        mvmae_patch_size: int = 8, 
+        mvmae_encoder_embed_dim: int = 256, 
+        mvmae_decoder_embed_dim: int = 128,
+        mvmae_encoder_heads: int = 16, 
+        mvmae_decoder_heads: int = 16,
+        masking_ratio: float = 0.75,
+        coef_mvmae: float = 0.005,
+        # RL variables
+        critic_target_tau: float = 0.001, # Soft-update for target critic
+        num_expl_steps: int = 2000, 
+        update_every_steps: int = 2,
+        stddev_schedule: str = 'linear(1.0,0.1,500000)', # Type of scheduler, value taken from cfgs/task/medium.yaml, stddev for exploration noise
+        stddev_clip: int = 0.3, # How much to clip sampled action noise
+        use_tb: bool = True,
+    ):
+        self.action_shape = action_shape
         self.device = device
+        self.lr = lr
+
+        self.nviews = nviews
+        self.mvmae_patch_size = mvmae_patch_size
+        self.mvmae_encoder_embed_dim = mvmae_encoder_embed_dim
+        self.mvmae_decoder_embed_dim = mvmae_decoder_embed_dim
+        self.mvmae_encoder_heads = mvmae_encoder_heads
+        self.mvmae_decoder_heads = mvmae_decoder_heads
+        self.masking_ratio = masking_ratio
+        self.coef_mvmae = coef_mvmae
+
         self.critic_target_tau = critic_target_tau
-        self.update_every_steps = update_every_steps
-        self.use_tb = use_tb
         self.num_expl_steps = num_expl_steps
+        self.update_every_steps = update_every_steps
         self.stddev_schedule = stddev_schedule
         self.stddev_clip = stddev_clip
-
+        self.use_tb = use_tb
+        
         # models
-        self.encoder = Encoder(obs_shape).to(device)
-        self.actor = Actor(self.encoder.repr_dim, action_shape, feature_dim,
+        self.encoder = ViTMaskedEncoder().to(self.device)
+        self.actor = Actor(self.encoder_embed_dim, action_shape, feature_dim,
                            hidden_dim).to(device)
 
         self.critic = Critic(self.encoder.repr_dim, action_shape, feature_dim,

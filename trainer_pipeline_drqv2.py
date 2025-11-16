@@ -1,7 +1,3 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
 import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
@@ -9,75 +5,166 @@ import os
 os.environ["MUJOCO_GL"] = "glfw"  # Force desktop OpenGL on Windows
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 
-
 from pathlib import Path
-
-import hydra
 import numpy as np
 import torch
 from dm_env import specs
 
-import DrQv2_Architecture.dmc as dmc
 import DrQv2_Architecture.utils as utils
 from DrQv2_Architecture.logger import Logger
 from DrQv2_Architecture.replay_buffer import ReplayBufferStorage, make_replay_loader
 from DrQv2_Architecture.video import TrainVideoRecorder, VideoRecorder
+from DrQv2_Architecture.drqv2 import DrQV2Agent
+from DrQv2_Architecture.env_wrappers import ExtendedTimeStepWrapper, ActionRepeatWrapper, FrameStackWrapper
+from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
+from gymnasium.spaces import Box
 
 torch.backends.cudnn.benchmark = True
 
-
-def make_agent(obs_spec, action_spec, cfg):
-    cfg.obs_shape = obs_spec.shape
-    cfg.action_shape = action_spec.shape
-    return hydra.utils.instantiate(cfg)
-
-
-class Workspace:
-    def __init__(self, cfg):
+class Workshop:
+    def __init__(
+        self,
+        # General variables
+        obs_space: Box | None = None,
+        action_space: Box | None = None,
+        device: torch.device | None = None,
+        # RL training
+        buffer_size: int = 100_000,
+        total_timesteps: int = 500_000,
+        learning_starts: int = 10_000, # Turn on grads at step and start training at step n
+        num_expl_steps: int = 5000, # Random actions (not policy determined) until step n
+        episode_horizon: int = 300, # Truncates episode after 300 steps
+        batch_size: int = 64,
+        critic_target_tau: float = 0.001, # Soft-update for target critic
+        update_every_steps: int = 2,
+        stddev_schedule: str = 'linear(1.0,0.1,500000)', # Type of scheduler, value taken from cfgs/task/medium.yaml, stddev for exploration noise
+        stddev_clip: int = 0.3, # How much to clip sampled action noise
+        use_tb: bool = True,
+        lr: float = 1e-4,
+        discount: float = 0.99,
+        action_repeat: int = 2,
+        # MVMAE variables
+        nviews: int = 2,
+        mvmae_patch_size: int = 8, 
+        mvmae_encoder_embed_dim: int = 256, 
+        mvmae_decoder_embed_dim: int = 128,
+        mvmae_encoder_heads: int = 16, 
+        mvmae_decoder_heads: int = 16,
+        masking_ratio: float = 0.75,
+        coef_mvmae: float = 0.005,
+        # Image specs
+        render_mode: str = "human",
+        in_channels: int = 3,
+        img_h_size: int = 64,
+        img_w_size: int = 64,
+    ):  
+        self.obs_space = obs_space if (obs_space is not None) else Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels), dtype=np.float32)
+        self.action_space = action_space if (action_space is not None) else Box(np.array([-1, -1, -1, -1]), np.array([+1, +1, +1, +1]), dtype=np.float32)
+        self.device = device if (device is not None) else ("cuda" if torch.cuda.is_available() else "cpu")
+        self.buffer_size = buffer_size
+        self.total_timesteps = total_timesteps
+        self.learning_starts = learning_starts
+        self.num_expl_steps = num_expl_steps
+        self.episode_horizon = episode_horizon
+        self.batch_size = batch_size
+        self.critic_target_tau = critic_target_tau
+        self.update_every_steps = update_every_steps
+        self.stddev_schedule = stddev_schedule
+        self.stddev_clip = stddev_clip
+        self.use_tb = use_tb
+        self.lr = lr
+        self.discount = discount
+        self.action_repeat = action_repeat
+        
+        self.nviews = nviews
+        self.mvmae_patch_size = mvmae_patch_size
+        self.mvmae_encoder_embed_dim = mvmae_encoder_embed_dim
+        self.mvmae_decoder_embed_dim = mvmae_decoder_embed_dim
+        self.mvmae_encoder_heads = mvmae_encoder_heads
+        self.mvmae_decoder_heads = mvmae_decoder_heads
+        self.masking_ratio = masking_ratio
+        self.coef_mvmae = coef_mvmae
+        
+        self.render_mode = render_mode
+        self.in_channels = in_channels
+        self.img_h_size = img_h_size
+        self.img_w_size = img_w_size
+        
         self.work_dir = Path.cwd()
-        print(f'workspace: {self.work_dir}')
-
-        self.cfg = cfg
-        utils.set_seed_everywhere(cfg.seed)
-        self.device = torch.device(cfg.device)
-        self.setup()
-
-        self.agent = make_agent(self.train_env.observation_spec(),
-                                self.train_env.action_spec(),
-                                self.cfg.agent)
-        self.timer = utils.Timer()
+        print(f'Workspace: {self.work_dir}')
         self._global_step = 0
         self._global_episode = 0
+        
+        self.seed = 1
+        utils.set_seed_everywhere(self.seed)
+        
+        self.agent = self.make_agent() # Make agent
+        self.setup() # Make envs and setup replay buffer
+        self.timer = utils.Timer()
+        
+        # Evaluation
+        self.eval_every_frames = 10000
+        self.num_eval_episodes = 10
+        
+    def make_agent(self):
+        # DrQv2 agent takes action_shape as (A, ) tuple
+        return DrQV2Agent(
+            action_shape = (self.action_space.shape[0], ),
+            device = self.device,
+            lr = self.lr,
 
+            nviews = self.nviews,
+            mvmae_patch_size = self.mvmae_patch_size,
+            mvmae_encoder_embed_dim = self.mvmae_encoder_embed_dim,
+            mvmae_decoder_embed_dim = self.mvmae_decoder_embed_dim,
+            mvmae_encoder_heads = self.mvmae_encoder_heads,
+            mvmae_decoder_heads = self.mvmae_decoder_heads,
+            masking_ratio = self.masking_ratio,
+            coef_mvmae = self.coef_mvmae,
+
+            critic_target_tau = self.critic_target_tau,
+            num_expl_steps = self.num_expl_steps,
+            update_every_steps = self.update_every_steps,
+            stddev_schedule = self.stddev_schedule,
+            stddev_clip = self.stddev_clip,
+            use_tb = self.use_tb
+        )
+    
+    # SawyerReachEnvV3 with wrappers for frame stacking, action repeat, time_step formatting
+    def make_env(self, render_mode):
+        env = SawyerReachEnvV3(
+            render_mode=render_mode, 
+            img_height=self.img_h_size,
+            img_width=self.img_w_size,
+            max_path_length=self.episode_horizon,
+            obs_space=self.obs_space,
+            action_space=self.action_space,
+            discount=self.discount
+        )
+        env = FrameStackWrapper(env, num_frames=3)
+        env = ActionRepeatWrapper(env, num_repeats=self.action_repeat)
+        env = ExtendedTimeStepWrapper(env)
+        return env
+    
     def setup(self):
-        # create logger
-        self.logger = Logger(self.work_dir, use_tb=self.cfg.use_tb)
-        # create envs
-        self.train_env = dmc.make(self.cfg.task_name, self.cfg.frame_stack,
-                                  self.cfg.action_repeat, self.cfg.seed)
-        self.eval_env = dmc.make(self.cfg.task_name, self.cfg.frame_stack,
-                                 self.cfg.action_repeat, self.cfg.seed)
-        # create replay buffer
-        data_specs = (self.train_env.observation_spec(),
-                      self.train_env.action_spec(),
-                      specs.Array((1,), np.float32, 'reward'),
-                      specs.Array((1,), np.float32, 'discount'))
-
-        self.replay_storage = ReplayBufferStorage(data_specs,
-                                                  self.work_dir / 'buffer')
-
+        self.logger = Logger(self.work_dir, use_tb=True)
+        self.train_env = self.make_env("human")
+        self.eval_env = self.make_env("rgb_array")
+        
+        data_specs = (
+            specs.Array(self.obs_space.shape, self.obs_space.dtype, name="observation"),
+            specs.Array(self.action_space.shape, self.action_space.dtype, name="action"),
+            specs.Array((1,), np.float32, name="reward"),
+            specs.Array((1,), np.float32, name="discount")
+        )
+        self.replay_storage = ReplayBufferStorage(data_specs, self.work_dir / 'buffer')
         self.replay_loader = make_replay_loader(
-            self.work_dir / 'buffer', self.cfg.replay_buffer_size,
-            self.cfg.batch_size, self.cfg.replay_buffer_num_workers,
-            self.cfg.save_snapshot, self.cfg.nstep, self.cfg.discount)
+            self.work_dir / 'buffer', self.buffer_size,
+            self.batch_size, 4, False, 3, self.discount) # Samples 3 consecutive steps, frame stacking
         self._replay_iter = None
-
-        self.video_recorder = VideoRecorder(
-            self.work_dir if self.cfg.save_video else None)
-        self.train_video_recorder = TrainVideoRecorder(
-            self.work_dir if self.cfg.save_train_video else None)
-
-
+        
+        self.video_recorder = VideoRecorder(self.work_dir) # Video recorder for eval frames
+    
     @property
     def global_step(self):
         return self._global_step
@@ -88,7 +175,7 @@ class Workspace:
 
     @property
     def global_frame(self):
-        return self.global_step * self.cfg.action_repeat
+        return self.global_step * self.action_repeat
 
     @property
     def replay_iter(self):
@@ -98,7 +185,7 @@ class Workspace:
 
     def eval(self):
         step, episode, total_reward = 0, 0, 0
-        eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
+        eval_until_episode = utils.Until(self.num_eval_episodes)
 
         while eval_until_episode(episode):
             time_step = self.eval_env.reset()
@@ -204,8 +291,6 @@ class Workspace:
         for k, v in payload.items():
             self.__dict__[k] = v
 
-
-@hydra.main(config_path=os.path.join('DrQv2_Architecture', 'cfgs'), config_name='config')
 def main(cfg):
     from trainer_pipeline_drqv2 import Workspace as W
     root_dir = Path.cwd()

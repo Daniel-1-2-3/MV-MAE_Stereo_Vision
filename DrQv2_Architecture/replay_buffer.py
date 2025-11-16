@@ -17,7 +17,6 @@ def episode_len(episode):
     # subtract -1 because the dummy first transition
     return next(iter(episode.values())).shape[0] - 1
 
-
 def save_episode(episode, fn):
     with io.BytesIO() as bs:
         np.savez_compressed(bs, **episode)
@@ -25,13 +24,11 @@ def save_episode(episode, fn):
         with fn.open('wb') as f:
             f.write(bs.read())
 
-
 def load_episode(fn):
     with fn.open('rb') as f:
         episode = np.load(f)
         episode = {k: episode[k] for k in episode.keys()}
         return episode
-
 
 class ReplayBufferStorage:
     def __init__(self, data_specs, replay_dir):
@@ -75,7 +72,6 @@ class ReplayBufferStorage:
         ts = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
         eps_fn = f'{ts}_{eps_idx}_{eps_len}.npz'
         save_episode(episode, self._replay_dir / eps_fn)
-
 
 class ReplayBuffer(IterableDataset):
     def __init__(self, replay_dir, max_size, num_workers, nstep, discount,
@@ -163,25 +159,12 @@ class ReplayBuffer(IterableDataset):
             yield self._sample()
 
 def _worker_init_fn(worker_id):
-    seed = int(np.random.get_state()[1][0] + worker_id)
+    seed = np.random.get_state()[1][0] + worker_id
     np.random.seed(seed)
     random.seed(seed)
 
-def make_replay_loader(replay_dir, max_size, batch_size, num_workers,
-                       save_snapshot, nstep, discount):
+def make_replay_loader(replay_dir, max_size, batch_size, num_workers, save_snapshot, nstep, discount):
     max_size_per_worker = max_size // max(1, num_workers)
-
-    iterable = ReplayBuffer(replay_dir,
-                            max_size_per_worker,
-                            num_workers,
-                            nstep,
-                            discount,
-                            fetch_every=1000,
-                            save_snapshot=save_snapshot)
-
-    loader = torch.utils.data.DataLoader(iterable,
-                                         batch_size=batch_size,
-                                         num_workers=num_workers,
-                                         pin_memory=True,
-                                         worker_init_fn=_worker_init_fn)
+    iterable = ReplayBuffer(replay_dir, max_size_per_worker, num_workers, nstep, discount, fetch_every=1000, save_snapshot=save_snapshot)
+    loader = torch.utils.data.DataLoader(iterable, batch_size=batch_size, num_workers=num_workers, pin_memory=True, worker_init_fn=_worker_init_fn)
     return loader
