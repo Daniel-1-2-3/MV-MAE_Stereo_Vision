@@ -178,7 +178,7 @@ class Workshop:
         self.replay_storage = ReplayBufferStorage(data_specs, self.work_dir / 'buffer')
         self.replay_loader = make_replay_loader(
             self.work_dir / 'buffer', self.buffer_size,
-            self.batch_size, 4, False, 3, self.discount) # Samples 3 consecutive steps, frame stacking
+            self.batch_size, 1, False, 3, self.discount) # Samples 3 consecutive steps, frame stacking
         self._replay_iter = None
         
         self.video_recorder = VideoRecorder(self.work_dir) # Video recorder for eval frames
