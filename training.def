@@ -1,106 +1,52 @@
 Bootstrap: docker
-From: nvidia/cuda:12.8.0-devel-ubuntu24.04
-
-%labels
-    Author        Daniel Zhu
-    Description   MV-MAE + DrQv2 • CUDA 12.8 • Headless EGL • MuJoCo 3.3.4 (NO GLFW)
-
-%files
-    . /opt/app
-
-%post -c /bin/bash
-set -euo pipefail
-
-###########################
-# SYSTEM DEPENDENCIES
-###########################
-apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl git build-essential pkg-config \
-    python3 python3-venv python3-pip \
-    ffmpeg \
-    libgl1 libgles2 libegl1 libglvnd0 libglvnd-dev libglx0 \
-    libopengl0 libxkbcommon0 libxext6 libx11-6 \
-    && rm -rf /var/lib/apt/lists/*
-
-###########################
-# PYTHON ENV
-###########################
-python3 -m venv /opt/mvmae_venv
-. /opt/mvmae_venv/bin/activate
-
-pip install -U pip setuptools wheel
-
-APP=/opt/app
-REQ="$APP/requirements.txt"
-WHL="$APP/wheelhouse"
-
-mkdir -p /opt/pip-tmp /opt/pip-cache
-export TMPDIR=/opt/pip-tmp
-export PIP_CACHE_DIR=/opt/pip-cache
-export PIP_DISABLE_PIP_VERSION_CHECK=1
-
-echo "[post] Installing Python deps..."
-
-###########################
-# INSTALL MUJOCO WITHOUT GLFW
-###########################
-pip install --no-deps mujoco==3.3.4
-
-###########################
-# INSTALL ALL OTHER PACKAGES
-###########################
-ONLINE=0
-if [ -d "$WHL" ] && [ -f "$REQ" ]; then
-    pip install --no-index --find-links "$WHL" -r "$REQ" || ONLINE=1
-else
-    ONLINE=1
-fi
-
-if [ "$ONLINE" = 1 ]; then
-    pip install --no-cache-dir \
-      dm_control==1.0.31 dm_env==1.6 \
-      einops gymnasium \
-      numpy scipy pillow matplotlib tqdm opencv-python-headless lpips timm tokenizers \
-      imageio imageio-ffmpeg omegaconf hydra-core \
-      --extra-index-url https://download.pytorch.org/whl/cu121 \
-      torch==2.6.0 torchvision==0.21.0
-fi
-
-##############################
-# BLOCK ANY FUTURE GLFW LOADS
-##############################
-pip uninstall -y glfw || true
-
-##############################
-# AUTO-LOAD ENVIRONMENT
-##############################
-cat > /.singularity.d/env/99-venv.sh << 'EOF'
-export VIRTUAL_ENV=/opt/mvmae_venv
-export PATH="$VIRTUAL_ENV/bin:$PATH"
-export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
-
-export MUJOCO_GL=egl
-export PYOPENGL_PLATFORM=egl
-export MESA_EGL_NO_X11=1
-export LIBGL_ALWAYS_SOFTWARE=0
-EOF
-
-chmod 644 /.singularity.d/env/99-venv.sh
+From: nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
 %environment
-export VIRTUAL_ENV=/opt/mvmae_venv
-export PATH="$VIRTUAL_ENV/bin:$PATH"
-export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
+    # Use EGL (headless GPU rendering)
+    export MUJOCO_GL=egl
+    export MUJOCO_PLATFORM=egl
+    export PYOPENGL_PLATFORM=egl
+    export MESA_EGL_NO_X11=1
+    export LIBGL_ALWAYS_INDIRECT=1
+    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 
-export MUJOCO_GL=egl
-export PYOPENGL_PLATFORM=egl
-export MESA_EGL_NO_X11=1
-export LIBGL_ALWAYS_SOFTWARE=0
+    # Python virtualenv
+    export PATH=/opt/mvmae_venv/bin:$PATH
+
+%setup
+    mkdir -p /opt/app
+    cp -r $PWD/SawyerSim /opt/app/
+    cp -r $PWD/*.py /opt/app/
+    cp $PWD/requirements.txt /opt/app/
+    cp $PWD/wheelhouse /opt/wheelhouse -r
+
+%post
+    apt-get update && apt-get install -y \
+        python3.12 python3.12-venv python3.12-dev \
+        libegl1 libgl1-mesa-dev libgles2-mesa libglvnd0 \
+        libosmesa6 libosmesa6-dev \
+        mesa-utils libgl1-mesa-glx \
+        libxrandr2 libxss1 libxcursor1 libxcomposite1 libxi6 \
+        && apt-get clean
+
+    # Create venv
+    python3.12 -m venv /opt/mvmae_venv
+    source /opt/mvmae_venv/bin/activate
+
+    ########## INSTALL PYTHON PACKAGES ##########
+
+    # Install Mujoco WITHOUT glfw
+    pip install --no-deps mujoco==3.3.4
+
+    # Install all wheels from wheelhouse
+    pip install --no-index --find-links /opt/wheelhouse -r /opt/app/requirements.txt --no-cache-dir
+
+    # FORCE-REMOVE glfw fully if any dependency pulled it back in
+    pip uninstall -y glfw || true
+    rm -rf /opt/mvmae_venv/lib/python3.12/site-packages/glfw || true
+
+    deactivate
 
 %runscript
-set -eu
-. /opt/mvmae_venv/bin/activate
-cd /opt/app
+    exec python3 /opt/app/trainer_pipeline_drqv2.py "$@"
 
-echo "[MVMAE] Running training…"
-exec python -u trainer_pipeline_drqv2.py "$@"
