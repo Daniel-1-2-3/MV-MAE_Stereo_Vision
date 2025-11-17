@@ -51,12 +51,12 @@ fi
 
 if [ "$ONLINE" = 1 ]; then
     pip install --no-cache-dir \
-        dm_control==1.0.31 mujoco==3.3.4 dm_env==1.6 \
-        einops gymnasium \
-        numpy scipy pillow matplotlib tqdm opencv-python lpips timm tokenizers \
-        imageio imageio-ffmpeg omegaconf hydra-core \
-        --extra-index-url https://download.pytorch.org/whl/cu121 \
-        torch==2.6.0 torchvision==0.21.0
+      dm_control==1.0.31 mujoco==3.3.4 dm_env==1.6 \
+      einops gymnasium \
+      numpy scipy pillow matplotlib tqdm opencv-python lpips timm tokenizers \
+      imageio imageio-ffmpeg omegaconf hydra-core \
+      --extra-index-url https://download.pytorch.org/whl/cu121 \
+      torch==2.6.0 torchvision==0.21.0
 fi
 
 ###########################
