@@ -12,7 +12,7 @@ class ViTMaskedDecoder(nn.Module):
             decoder_embed_dim: int = 512,
             in_channels: int = 3,
             heads: int = 8,
-            depth: int = 3
+            depth: int = 4
         ):
         
         super().__init__()

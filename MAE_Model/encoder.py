@@ -13,7 +13,7 @@ class ViTMaskedEncoder(nn.Module):
             img_h_size: int = 84,
             img_w_fused_size: int = 168, # Width of the fused image, with both views
             heads: int = 8,
-            depth: int = 4,
+            depth: int = 8,
             masking_ratio: float = 0.75,
         ):
         

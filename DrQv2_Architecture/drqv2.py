@@ -255,7 +255,7 @@ class DrQV2Agent:
         z, _ = self.mvmae.encoder(obs, mask_x=False)
         z = z.flatten(start_dim=-2)
         with torch.no_grad():
-            z_next = self.mvmae.encoder(next_obs, mask_x=False)
+            z_next, _ = self.mvmae.encoder(next_obs, mask_x=False)
             z_next = z_next.flatten(start_dim=-2)
 
         # Actor, critic, and encoder updates
