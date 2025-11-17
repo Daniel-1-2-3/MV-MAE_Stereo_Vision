@@ -3,68 +3,68 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 %labels
     Author        Daniel Zhu
-    Description   CUDA 12.8 • MV-MAE (DrQv2) • headless EGL • dm_control 1.0.31 • mujoco 3.3.4
+    Description   MV-MAE + DrQv2 • CUDA 12.8 • Headless EGL • MuJoCo 3.3.4
 
-# Build from MV-MAE_Stereo_Vision repo root (contains DrQv2_Architecture/ and trainer_pipeline_drqv2.py)
+# Copy project
 %files
     . /opt/app
 
-%post -c /bin/bash
+%post
 set -euo pipefail
 
-apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-  ca-certificates \
-  curl \
-  git \
-  build-essential \
-  pkg-config \
-  python3 python3-venv python3-pip \
-  ffmpeg \
-  libegl1 libgles2 libgl1 libglfw3 libxext6 libx11-6
-rm -rf /var/lib/apt/lists/*
+###############
+# SYSTEM DEPS #
+###############
+apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates curl git build-essential pkg-config \
+    python3 python3-venv python3-pip \
+    ffmpeg \
+    libgl1 libgles2 libegl1 libglvnd0 libglvnd-dev libglx0 \
+    libopengl0 libxkbcommon0 \
+    libxext6 libx11-6 \
+    && rm -rf /var/lib/apt/lists/*
 
+###############
+# PYTHON VENV #
+###############
 python3 -m venv /opt/mvmae_venv
 . /opt/mvmae_venv/bin/activate
-python -m pip install -U pip setuptools wheel
 
-mkdir -p /opt/pip-tmp /opt/pip-cache
-export TMPDIR=/opt/pip-tmp
-export PIP_CACHE_DIR=/opt/pip-cache
-export PIP_DISABLE_PIP_VERSION_CHECK=1
-export PIP_DEFAULT_TIMEOUT=300
+pip install -U pip setuptools wheel
 
 APP=/opt/app
 REQ="$APP/requirements.txt"
 WHL="$APP/wheelhouse"
 
-echo "[post] Installing Python deps (offline first if wheelhouse present)..."
-set +e
+mkdir -p /opt/pip-tmp /opt/pip-cache
+export TMPDIR=/opt/pip-tmp
+export PIP_CACHE_DIR=/opt/pip-cache
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+
+echo "[post] Installing Python deps..."
+
+# Offline wheel install first
 if [ -d "$WHL" ] && [ -f "$REQ" ]; then
-  python -m pip install --no-index --find-links "$WHL" -r "$REQ"
-  OFFLINE_OK=$?
+    pip install --no-index --find-links "$WHL" -r "$REQ" || ONLINE=1
 else
-  OFFLINE_OK=1
-fi
-set -e
-
-if [ "$OFFLINE_OK" -ne 0 ]; then
-  echo "[post] Falling back to online install..."
-  python -m pip install --no-cache-dir \
-    dm_control==1.0.31 mujoco==3.3.4 dm_env==1.6 \
-    hydra-core omegaconf hydra-submitit-launcher==1.2.0 submitit==1.5.3 \
-    einops gymnasium stable_baselines3[extra] \
-    numpy scipy pillow matplotlib tqdm opencv-python lpips timm tokenizers \
-    imageio imageio-ffmpeg glfw \
-    --extra-index-url https://download.pytorch.org/whl/cu121 \
-    torch==2.4.1 torchvision==0.19.1
-  if [ -f "$REQ" ]; then
-    python -m pip install --no-cache-dir -r "$REQ"
-  fi
+    ONLINE=1
 fi
 
-mkdir -p /.singularity.d/env
-cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
+# Online fallback
+if [ "${ONLINE:-0}" = 1 ]; then
+    pip install --no-cache-dir \
+        dm_control==1.0.31 mujoco==3.3.4 dm_env==1.6 \
+        einops gymnasium \
+        numpy scipy pillow matplotlib tqdm opencv-python lpips timm tokenizers \
+        imageio imageio-ffmpeg omegaconf hydra-core \
+        --extra-index-url https://download.pytorch.org/whl/cu121 \
+        torch==2.6.0 torchvision==0.21.0
+fi
+
+#######################
+# AUTO-ACTIVATE VENV  #
+#######################
+cat > /.singularity.d/env/99-venv.sh << 'EOF'
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
@@ -73,9 +73,8 @@ export PYOPENGL_PLATFORM=egl
 export MESA_EGL_NO_X11=1
 export LIBGL_ALWAYS_SOFTWARE=0
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
-EOS
-chmod 644 /.singularity.d/env/99-autovenv.sh
+EOF
+chmod 644 /.singularity.d/env/99-venv.sh
 
 %environment
 export VIRTUAL_ENV=/opt/mvmae_venv
@@ -86,47 +85,13 @@ export PYOPENGL_PLATFORM=egl
 export MESA_EGL_NO_X11=1
 export LIBGL_ALWAYS_SOFTWARE=0
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-%runscript -c /bin/bash
+%runscript
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 cd /opt/app
 
-MAIN_A="/opt/app/trainer_pipeline_drqv2.py"
+MAIN="/opt/app/trainer_pipeline_drqv2.py"
 
-echo "[MVMAE] Python: $(python --version)"
-echo "[MVMAE] CUDA:   $(python - <<'PY'
-import torch
-print("available=" + str(torch.cuda.is_available()), "version=" + str(torch.version.cuda))
-PY
-)"
-echo "[MVMAE] PYTHONPATH=$PYTHONPATH"
-
-if [ -f "$MAIN_A" ]; then
-  echo "[MVMAE] Running $MAIN_A ..."
-  exec python -u "$MAIN_A" "$@"
-elif [ -f "$MAIN_B" ]; then
-  echo "[MVMAE] Running $MAIN_B ..."
-  exec python -u "$MAIN_B" "$@"
-else
-  echo "[ERROR] Could not find entry script ($MAIN_A or $MAIN_B)."
-  exec "$@"
-fi
-
-%help
-Build from MV-MAE_Stereo_Vision repo root (contains DrQv2_Architecture/).
-
-  apptainer build --force training.sif training.def
-
-Run (defaults to drqv2_architecture.py, no args; fallback to trainer_pipeline_drqv2.py):
-
-  apptainer run --nv training.sif
-
-Pass Hydra overrides:
-
-  apptainer run --nv training.sif "save_video=false agent.device=cuda"
-
-Exec inside:
-
-  apptainer exec --nv training.sif python -m pip list
+echo "[MVMAE] Running training…"
+exec python -u "$MAIN" "$@"
