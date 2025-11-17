@@ -30,7 +30,6 @@ export APPTAINERENV_DISPLAY=
 export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
 export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
 # Paths on HOST we want visible inside the container
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
