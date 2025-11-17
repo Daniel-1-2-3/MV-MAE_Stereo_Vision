@@ -3,7 +3,7 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 %labels
     Author        Daniel Zhu
-    Description   MV-MAE + DrQv2 • CUDA 12.8 • Headless EGL • MuJoCo 3.3.4
+    Description   MV-MAE + DrQv2 • CUDA 12.8 • Headless EGL • MuJoCo 3.3.4 (NO GLFW)
 
 %files
     . /opt/app
@@ -11,21 +11,20 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 %post -c /bin/bash
 set -euo pipefail
 
-###############
-# SYSTEM DEPS #
-###############
+###########################
+# SYSTEM DEPENDENCIES
+###########################
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates curl git build-essential pkg-config \
     python3 python3-venv python3-pip \
     ffmpeg \
     libgl1 libgles2 libegl1 libglvnd0 libglvnd-dev libglx0 \
-    libopengl0 libxkbcommon0 \
-    libxext6 libx11-6 \
+    libopengl0 libxkbcommon0 libxext6 libx11-6 \
     && rm -rf /var/lib/apt/lists/*
 
-###############
-# PYTHON VENV #
-###############
+###########################
+# PYTHON ENV
+###########################
 python3 -m venv /opt/mvmae_venv
 . /opt/mvmae_venv/bin/activate
 
@@ -42,6 +41,14 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 
 echo "[post] Installing Python deps..."
 
+###########################
+# INSTALL MUJOCO WITHOUT GLFW
+###########################
+pip install --no-deps mujoco==3.3.4
+
+###########################
+# INSTALL ALL OTHER PACKAGES
+###########################
 ONLINE=0
 if [ -d "$WHL" ] && [ -f "$REQ" ]; then
     pip install --no-index --find-links "$WHL" -r "$REQ" || ONLINE=1
@@ -51,26 +58,31 @@ fi
 
 if [ "$ONLINE" = 1 ]; then
     pip install --no-cache-dir \
-      dm_control==1.0.31 mujoco==3.3.4 dm_env==1.6 \
+      dm_control==1.0.31 dm_env==1.6 \
       einops gymnasium \
-      numpy scipy pillow matplotlib tqdm opencv-python lpips timm tokenizers \
+      numpy scipy pillow matplotlib tqdm opencv-python-headless lpips timm tokenizers \
       imageio imageio-ffmpeg omegaconf hydra-core \
       --extra-index-url https://download.pytorch.org/whl/cu121 \
       torch==2.6.0 torchvision==0.21.0
 fi
 
-###########################
-# AUTO-ACTIVATE VENV     #
-###########################
+##############################
+# BLOCK ANY FUTURE GLFW LOADS
+##############################
+pip uninstall -y glfw || true
+
+##############################
+# AUTO-LOAD ENVIRONMENT
+##############################
 cat > /.singularity.d/env/99-venv.sh << 'EOF'
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
+
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
 export MESA_EGL_NO_X11=1
 export LIBGL_ALWAYS_SOFTWARE=0
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 EOF
 
 chmod 644 /.singularity.d/env/99-venv.sh
@@ -79,18 +91,16 @@ chmod 644 /.singularity.d/env/99-venv.sh
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 export PYTHONPATH="/opt/app:/opt/app/DrQv2_Architecture:${PYTHONPATH}"
+
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
 export MESA_EGL_NO_X11=1
 export LIBGL_ALWAYS_SOFTWARE=0
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 
 %runscript
-set -eu  # no pipefail here
+set -eu
 . /opt/mvmae_venv/bin/activate
 cd /opt/app
 
-MAIN="/opt/app/trainer_pipeline_drqv2.py"
-
 echo "[MVMAE] Running training…"
-exec python -u "$MAIN" "$@"
+exec python -u trainer_pipeline_drqv2.py "$@"

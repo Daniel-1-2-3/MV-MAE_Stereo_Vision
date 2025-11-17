@@ -25,6 +25,10 @@ fi
 export APPTAINERENV_PYTHONPATH="/opt/app:${PYTHONPATH:-}"
 
 # EGL on GPU: env passed into container
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export MESA_EGL_NO_X11=1
+export LIBGL_ALWAYS_SOFTWARE=0
 export APPTAINERENV_MUJOCO_GL=egl
 export APPTAINERENV_PYOPENGL_PLATFORM=egl
 export APPTAINERENV_DISPLAY=
