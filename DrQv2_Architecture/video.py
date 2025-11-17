@@ -55,7 +55,7 @@ class VideoRecorder:
 
                 frames_uint8.append(img)
 
-            imageio.mimsave(str(path), frames_uint8, fps=self.fps)
+            imageio.mimsave(str(path), frames_uint8, fps=self.fps, codec='mpeg4')
 
 class TrainVideoRecorder:
     def __init__(self, root_dir, render_size=256, fps=20):
