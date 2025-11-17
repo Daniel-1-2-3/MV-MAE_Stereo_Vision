@@ -32,7 +32,15 @@ class VideoRecorder:
             else:
                 frame = env.render()
             self.frames.append(frame)
-
+    def save(self, path):
+        """
+        Disabled video saving on cluster to avoid ffmpeg issues.
+        Training will continue; no videos will be written.
+        """
+        # Clear frames so we don't keep them in memory
+        self.frames = []
+        return
+    """
     def save(self, file_name):
         if self.enabled:
             path = self.save_dir / file_name
@@ -56,7 +64,7 @@ class VideoRecorder:
                 frames_uint8.append(img)
 
             imageio.mimsave(str(path), frames_uint8, fps=self.fps, codec='mpeg4')
-
+    """
 class TrainVideoRecorder:
     def __init__(self, root_dir, render_size=256, fps=20):
         if root_dir is not None:
