@@ -5,11 +5,10 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     Author        Daniel Zhu
     Description   MV-MAE + DrQv2 • CUDA 12.8 • Headless EGL • MuJoCo 3.3.4
 
-# Copy project
 %files
     . /opt/app
 
-%post
+%post -c /bin/bash
 set -euo pipefail
 
 ###############
@@ -43,15 +42,14 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 
 echo "[post] Installing Python deps..."
 
-# Offline wheel install first
+ONLINE=0
 if [ -d "$WHL" ] && [ -f "$REQ" ]; then
     pip install --no-index --find-links "$WHL" -r "$REQ" || ONLINE=1
 else
     ONLINE=1
 fi
 
-# Online fallback
-if [ "${ONLINE:-0}" = 1 ]; then
+if [ "$ONLINE" = 1 ]; then
     pip install --no-cache-dir \
         dm_control==1.0.31 mujoco==3.3.4 dm_env==1.6 \
         einops gymnasium \
@@ -61,9 +59,9 @@ if [ "${ONLINE:-0}" = 1 ]; then
         torch==2.6.0 torchvision==0.21.0
 fi
 
-#######################
-# AUTO-ACTIVATE VENV  #
-#######################
+###########################
+# AUTO-ACTIVATE VENV     #
+###########################
 cat > /.singularity.d/env/99-venv.sh << 'EOF'
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
@@ -74,6 +72,7 @@ export MESA_EGL_NO_X11=1
 export LIBGL_ALWAYS_SOFTWARE=0
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 EOF
+
 chmod 644 /.singularity.d/env/99-venv.sh
 
 %environment
@@ -87,7 +86,7 @@ export LIBGL_ALWAYS_SOFTWARE=0
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 
 %runscript
-set -euo pipefail
+set -eu  # no pipefail here
 . /opt/mvmae_venv/bin/activate
 cd /opt/app
 
