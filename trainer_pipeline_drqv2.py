@@ -312,7 +312,7 @@ def get_args():
     parser.add_argument("--feature_dim", type=int, default=100)
     parser.add_argument("--hidden_dim", type=int, default=1024)
     # Image specs
-    parser.add_argument("--render_mode", type=str, default="human")
+    parser.add_argument("--render_mode", type=str, default="rgb_array")
     parser.add_argument("--in_channels", type=int, default=3 * 3)
     parser.add_argument("--img_h_size", type=int, default=64)
     parser.add_argument("--img_w_size", type=int, default=64)

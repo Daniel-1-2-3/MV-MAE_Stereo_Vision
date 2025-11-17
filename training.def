@@ -1,52 +1,102 @@
 Bootstrap: docker
-From: nvidia/cuda:12.1.1-runtime-ubuntu22.04
+From: nvidia/cuda:12.8.0-devel-ubuntu24.04   # CUDA 12.8 + nvcc
 
-%environment
-    # Use EGL (headless GPU rendering)
-    export MUJOCO_GL=egl
-    export MUJOCO_PLATFORM=egl
-    export PYOPENGL_PLATFORM=egl
-    export MESA_EGL_NO_X11=1
-    export LIBGL_ALWAYS_INDIRECT=1
-    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+%labels
+    Author        Daniel Zhu
+    Description   CUDA 12.8 • MV-MAE env • offline wheelhouse install • runs trainer_pipeline_drqv2.py
 
-    # Python virtualenv
-    export PATH=/opt/mvmae_venv/bin:$PATH
-
-%setup
-    mkdir -p /opt/app
-    cp -r $PWD/SawyerSim /opt/app/
-    cp -r $PWD/*.py /opt/app/
-    cp $PWD/requirements.txt /opt/app/
-    cp $PWD/wheelhouse /opt/wheelhouse -r
+# Copy THIS directory (MV_MAE_Implementation) into the image.
+# If you include a "wheelhouse/" folder here, it will be copied too.
+%files
+    . /opt/src/MV_MAE_Implementation
 
 %post
-    apt-get update && apt-get install -y \
-        python3.12 python3.12-venv python3.12-dev \
-        libegl1 libgl1-mesa-dev libgles2-mesa libglvnd0 \
-        libosmesa6 libosmesa6-dev \
-        mesa-utils libgl1-mesa-glx \
-        libxrandr2 libxss1 libxcursor1 libxcomposite1 libxi6 \
-        && apt-get clean
+    set -e
 
-    # Create venv
-    python3.12 -m venv /opt/mvmae_venv
-    source /opt/mvmae_venv/bin/activate
+    # --- base OS deps -------------------------------------------------------
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git build-essential pkg-config curl ca-certificates \
+        xvfb x11-utils ffmpeg libx11-dev libxrandr-dev libxinerama-dev \
+        libxcursor-dev libxi-dev mesa-common-dev gpg lsb-release libglfw3 libegl-dev \
+        python3 python3-venv python3-pip
+    rm -rf /var/lib/apt/lists/*
 
-    ########## INSTALL PYTHON PACKAGES ##########
+    # --- Python venv --------------------------------------------------------
+    python3 -m venv /opt/mvmae_venv
+    . /opt/mvmae_venv/bin/activate
+    python -m pip install -U pip wheel setuptools
 
-    # Install Mujoco WITHOUT glfw
-    pip install --no-deps mujoco==3.3.4
+    # --- Robust pip settings (avoid /tmp, quiet version check) --------------
+    mkdir -p /opt/pip-tmp /opt/pip-cache
+    export TMPDIR=/opt/pip-tmp
+    export PIP_CACHE_DIR=/opt/pip-cache
+    export PIP_DISABLE_PIP_VERSION_CHECK=1
+    export PIP_DEFAULT_TIMEOUT=300
 
-    # Install all wheels from wheelhouse
-    pip install --no-index --find-links /opt/wheelhouse -r /opt/app/requirements.txt --no-cache-dir
+    # --- OFFLINE install from local wheelhouse ------------------------------
+    REQ=/opt/src/MV_MAE_Implementation/requirements.txt
+    WHL=/opt/src/MV_MAE_Implementation/wheelhouse
 
-    # FORCE-REMOVE glfw fully if any dependency pulled it back in
-    pip uninstall -y glfw || true
-    rm -rf /opt/mvmae_venv/lib/python3.12/site-packages/glfw || true
+    if [ ! -f "$REQ" ]; then
+        echo "[ERROR] requirements.txt not found at $REQ"; exit 2
+    fi
 
-    deactivate
+    if [ -d "$WHL" ]; then
+        echo "[post] Installing dependencies from local wheelhouse (offline)..."
+        python -m pip install --no-index --find-links "$WHL" -r "$REQ"
+    else
+        echo "[ERROR] wheelhouse directory missing at $WHL"
+        echo "        Build is offline-only. Please create wheelhouse before building."
+        exit 3
+    fi
+
+    # --- auto-activate venv & set PYTHONPATH on run -------------------------
+    mkdir -p /.singularity.d/env
+    cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
+export VIRTUAL_ENV=/opt/mvmae_venv
+export PATH="$VIRTUAL_ENV/bin:$PATH"
+# Make 'import MV_MAE_Implementation' resolve inside the image
+export PYTHONPATH="/opt/src:${PYTHONPATH}"
+EOS
+    chmod 644 /.singularity.d/env/99-autovenv.sh
+
+%environment
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+    export DISPLAY=:1
+    export HF_TOKEN=${HF_TOKEN:-}
+    export WANDB_API_KEY=${WANDB_API_KEY:-}
 
 %runscript
-    exec python3 /opt/app/trainer_pipeline_drqv2.py "$@"
+    # Optional headless X for anything that wants a display
+    if command -v xdpyinfo >/dev/null 2>&1; then
+        if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+            Xvfb :1 -screen 0 1280x720x24 -nolisten tcp &  sleep 2
+        fi
+    fi
 
+    echo "[MVMAE] Python: $(python --version)"
+    echo "[MVMAE] PYTHONPATH=$PYTHONPATH"
+    echo "[MVMAE] Running trainer_pipeline_drqv2.py ..."
+
+    # Prefer module invocation so relative imports behave well
+    if [ -f /opt/src/MV_MAE_Implementation/trainer_pipeline_drqv2.py ]; then
+        cd /opt/src
+        exec python -m MV_MAE_Implementation.trainer_pipeline_drqv2 "$@"
+    else
+        echo "[ERROR] trainer_pipeline_drqv2.py not found at /opt/src/MV_MAE_Implementation/"
+        echo "        Falling back to passed command..."
+        exec "$@"
+    fi
+
+%help
+    OFFLINE build. Prepare "wheelhouse/" first (see below).
+
+    Build (run this INSIDE MV_MAE_Implementation/):
+      apptainer build training.sif training.def
+
+    Run (defaults to trainer_pipeline_drqv2.py):
+      apptainer run --nv training.sif --epochs 50 --batch-size 64
+
+    Exec arbitrary commands:
+      apptainer exec --nv training.sif python -c "import MV_MAE_Implementation, sys; print(sys.path)"
