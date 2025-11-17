@@ -2,8 +2,12 @@ import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
-os.environ["MUJOCO_GL"] = "glfw"  # Force desktop OpenGL on Windows
-os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
+# On the cluster we want EGL. training.sh already sets MUJOCO_GL/MUJOCO_PLATFORM/PYOPENGL_PLATFORM.
+# Only set sensible defaults if they are missing (e.g., when running locally).
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("MUJOCO_PLATFORM", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 
 from pathlib import Path
 import numpy as np
