@@ -87,7 +87,7 @@ apptainer exec --nv \
     # (MuJoCo/PyOpenGL EGL env is already set via APPTAINERENV_*)
     stdbuf -oL -eL python -u -m MV_MAE_Implementation.trainer_pipeline_drqv2 \
       --render_mode rgb_array \
-      --mvmae_patch_size 16 \ 
+      --mvmae_patch_size 16 \
       --mvmae_encoder_embed_dim 192 \
       --mvmae_decoder_embed_dim 96 \
       --mvmae_encoder_heads 8 \
