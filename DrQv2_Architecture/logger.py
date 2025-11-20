@@ -9,7 +9,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 import torchvision
-from torch.utils.tensorboard import SummaryWriter
+from tensorboardX import SummaryWriter
 
 COMMON_TRAIN_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
                        ('episode', 'E', 'int'), ('episode_length', 'L', 'int'),

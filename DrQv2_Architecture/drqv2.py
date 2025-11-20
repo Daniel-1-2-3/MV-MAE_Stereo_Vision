@@ -88,6 +88,7 @@ class DrQV2Agent:
         critic_target_tau: float = 0.001, # Soft-update for target critic
         num_expl_steps: int = 2000, 
         update_every_steps: int = 2,
+        update_mvmae_every_steps: int = 10,
         stddev_schedule: str = 'linear(1.0,0.1,500000)', # Type of scheduler, value taken from cfgs/task/medium.yaml, stddev for exploration noise
         stddev_clip: int = 0.3, # How much to clip sampled action noise
         use_tb: bool = True,
@@ -114,6 +115,7 @@ class DrQV2Agent:
         self.critic_target_tau = critic_target_tau
         self.num_expl_steps = num_expl_steps
         self.update_every_steps = update_every_steps
+        self.update_mvmae_every_steps = update_mvmae_every_steps
         self.stddev_schedule = stddev_schedule
         self.stddev_clip = stddev_clip
         self.use_tb = use_tb
@@ -172,7 +174,7 @@ class DrQV2Agent:
                     action.uniform_(-1.0, 1.0)
         return action.cpu().numpy()[0]
     
-    def update_critic(self, z, action, reward, discount, z_next, step, obs):
+    def update_critic(self, z, action, reward, discount, z_next, step, obs, update_mvmae: bool):
         metrics = dict()
 
         import time
@@ -186,38 +188,37 @@ class DrQV2Agent:
             target_Q1, target_Q2 = self.critic_target(z_next, next_action)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
-        t1 = time.perf_counter()
-        print(f"[CRITIC] target computation: {1000*(t1-t0):.2f} ms", flush=True)
-
+        
         # Critic forward
         Q1, Q2 = self.critic(z, action)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
-        t2 = time.perf_counter()
-        print(f"[CRITIC] critic forward + loss: {1000*(t2-t1):.2f} ms", flush=True)
 
         # MV-MAE reconstruction inside critic update
-        out, mask, _ = self.mvmae.forward(obs, mask_x=True)
-        recon_loss = self.mvmae.compute_loss(out, obs, mask)
-        t3 = time.perf_counter()
-        print(f"[CRITIC] mae recon loss: {1000*(t3-t2):.2f} ms", flush=True)
+        if update_mvmae:
+            out, mask, _ = self.mvmae.forward(obs, mask_x=True)
+            recon_loss = self.mvmae.compute_loss(out, obs, mask)
 
-        total_loss = critic_loss + self.coef_mvmae * recon_loss
+        total_loss = critic_loss
+        if update_mvmae:
+            total_loss += self.coef_mvmae * recon_loss
 
         # Backpropagate critic + mvmae losses together
         self.critic_optim.zero_grad(set_to_none=True)
-        self.mvmae_optim.zero_grad(set_to_none=True)
+        if update_mvmae:
+            self.mvmae_optim.zero_grad(set_to_none=True)
+        
         total_loss.backward()
+        
         self.critic_optim.step()
-        self.mvmae_optim.step()
-        t4 = time.perf_counter()
-        print(f"[CRITIC] backward + optimizer: {1000*(t4-t3):.2f} ms", flush=True)
+        if update_mvmae:
+            self.mvmae_optim.step()
 
         if self.use_tb:
             metrics['critic_target_q'] = target_Q.mean().item()
             metrics['critic_q1'] = Q1.mean().item()
             metrics['critic_q2'] = Q2.mean().item()
             metrics['critic_loss'] = critic_loss.item()
-            metrics['recon_loss'] = recon_loss.item()
+            metrics['recon_loss'] = recon_loss.item() if update_mvmae else -1.0
             metrics['total_loss'] = total_loss.item()
 
         return metrics
@@ -251,56 +252,32 @@ class DrQV2Agent:
 
         if step % self.update_every_steps != 0:
             return metrics
-
-        import time
-        t0 = time.perf_counter()
+        update_mvmae = True if step % self.update_mvmae_every_steps == 0 else False
 
         # Sample a batch from the replay buffer
         batch = next(replay_iter)
-        t1 = time.perf_counter()
-        print(f"[UPDATE] next(replay_iter): {1000*(t1-t0):.2f} ms", flush=True)
-
-        # Convert to torch
         obs, action, reward, discount, next_obs = utils.to_torch(batch, self.device)
-        t2 = time.perf_counter()
-        print(f"[UPDATE] to_torch(): {1000*(t2-t1):.2f} ms", flush=True)
 
         if self.use_tb:
             metrics['batch_reward'] = reward.mean().item()
 
-        # Augment
         obs = obs.float()
         next_obs = next_obs.float()
 
         # Encode obs with gradients on
         z, _ = self.mvmae.encoder(obs, mask_x=False)
         z = z.flatten(start_dim=-2)
-        t3 = time.perf_counter()
-        print(f"[UPDATE] encoder(obs): {1000*(t3-t2):.2f} ms", flush=True)
 
         # Encode next_obs with gradients off
         with torch.no_grad():
             z_next, _ = self.mvmae.encoder(next_obs, mask_x=False)
             z_next = z_next.flatten(start_dim=-2)
-        t4 = time.perf_counter()
-        print(f"[UPDATE] encoder(next_obs): {1000*(t4-t3):.2f} ms", flush=True)
 
-        # Critic + MV-MAE recon
-        critic_start = time.perf_counter()
-        metrics_c = self.update_critic(z, action, reward, discount, z_next, step, obs)
-        critic_end = time.perf_counter()
-        print(f"[UPDATE] update_critic(): {1000*(critic_end-critic_start):.2f} ms", flush=True)
-
-        # Actor update
-        actor_start = time.perf_counter()
+        # Critic + MV-MAE recon, Actor
+        metrics_c = self.update_critic(z, action, reward, discount, z_next, step, obs, update_mvmae)
         metrics_a = self.update_actor(z.detach(), step)
-        actor_end = time.perf_counter()
-        print(f"[UPDATE] update_actor(): {1000*(actor_end-actor_start):.2f} ms", flush=True)
-
-        # Final summary
-        total = time.perf_counter() - t0
-        print(f"[UPDATE] TOTAL update time: {1000*total:.2f} ms\n", flush=True)
 
         metrics.update(metrics_c)
         metrics.update(metrics_a)
         return metrics
+

@@ -4,9 +4,9 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 import os
 # On the cluster we want EGL. training.sh already sets MUJOCO_GL/MUJOCO_PLATFORM/PYOPENGL_PLATFORM.
 # Only set sensible defaults if they are missing (e.g., when running locally).
-os.environ.setdefault("MUJOCO_GL", "egl")
-os.environ.setdefault("MUJOCO_PLATFORM", "egl")
-os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+os.environ.setdefault("MUJOCO_GL", "glfw")
+os.environ.setdefault("MUJOCO_PLATFORM", "glfw")
+os.environ.setdefault("PYOPENGL_PLATFORM", "glfw")
 os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 
 from pathlib import Path
@@ -41,6 +41,7 @@ class Workshop:
         batch_size: int = 64,
         critic_target_tau: float = 0.001, # Soft-update for target critic
         update_every_steps: int = 2,
+        update_mvmae_every_steps: int = 10,
         stddev_schedule: str = 'linear(1.0,0.1,500000)', # Type of scheduler, value taken from cfgs/task/medium.yaml, stddev for exploration noise
         stddev_clip: int = 0.3, # How much to clip sampled action noise
         use_tb: bool = True,
@@ -78,6 +79,7 @@ class Workshop:
         self.batch_size = batch_size
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
+        self.update_mvmae_every_steps = update_mvmae_every_steps
         self.stddev_schedule = stddev_schedule
         self.stddev_clip = stddev_clip
         self.use_tb = use_tb
@@ -137,12 +139,13 @@ class Workshop:
             masking_ratio = self.masking_ratio,
             coef_mvmae = self.coef_mvmae,
             
-            feature_dim=self.feature_dim,
-            hidden_dim=self.hidden_dim,
+            feature_dim = self.feature_dim,
+            hidden_dim = self.hidden_dim,
 
             critic_target_tau = self.critic_target_tau,
             num_expl_steps = self.num_expl_steps,
             update_every_steps = self.update_every_steps,
+            update_mvmae_every_steps = self.update_mvmae_every_steps,
             stddev_schedule = self.stddev_schedule,
             stddev_clip = self.stddev_clip,
             use_tb = self.use_tb
@@ -282,6 +285,21 @@ class Workshop:
             self.replay_storage.add(time_step)
             episode_step += 1
             self._global_step += 1
+    
+def save_agent(agent: DrQV2Agent, path="agent_weights.pt"):
+    torch.save({
+        "mvmae": agent.mvmae.state_dict(),
+        "actor": agent.actor.state_dict(),
+        "critic": agent.critic.state_dict(),
+        "critic_target": agent.critic_target.state_dict(),
+    }, path)
+
+def load_agent(agent: DrQV2Agent, path="agent_weights.pt"):
+    checkpoint = torch.load(path, map_location=agent.device)
+    agent.mvmae.load_state_dict(checkpoint["mvmae"])
+    agent.actor.load_state_dict(checkpoint["actor"])
+    agent.critic.load_state_dict(checkpoint["critic"])
+    agent.critic_target.load_state_dict(checkpoint["critic_target"])
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -297,6 +315,7 @@ def get_args():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--critic_target_tau", type=float, default=0.001)
     parser.add_argument("--update_every_steps", type=int, default=2)
+    parser.add_argument("--update_mvmae_every_steps", type=int, default=10)
     parser.add_argument("--stddev_schedule", type=str, default="linear(1.0,0.1,500000)")
     parser.add_argument("--stddev_clip", type=float, default=0.3)
     parser.add_argument("--use_tb", action="store_true")
@@ -328,3 +347,4 @@ if __name__ == '__main__':
     args = get_args()
     workspace = Workshop(**vars(args))
     workspace.train()
+    save_agent(workspace.agent)
