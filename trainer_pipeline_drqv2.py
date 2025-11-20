@@ -168,7 +168,7 @@ class Workshop:
         return env
     
     def setup(self):
-        self.logger = Logger(self.work_dir, use_tb=True)
+        self.logger = Logger(self.work_dir / "Training_Results", use_tb=True)
         self.train_env = self.make_env("rgb_array")
         self.eval_env = self.make_env("rgb_array")
         
@@ -184,7 +184,7 @@ class Workshop:
             self.batch_size, 4, False, 3, self.discount) # Samples 3 consecutive steps, frame stacking
         self._replay_iter = None
         
-        self.video_recorder = VideoRecorder(self.work_dir) # Video recorder for eval frames
+        self.video_recorder = VideoRecorder(self.work_dir / "Training_Results") # Video recorder for eval frames
     
     @property
     def global_step(self):
