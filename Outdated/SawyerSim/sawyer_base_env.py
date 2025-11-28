@@ -401,7 +401,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         if getattr(self, "render_mode", None) == "human":
             stereo_image = np.concatenate([left_u8, right_u8], axis=1)
             enlarged = cv2.resize(stereo_image, None, fx=5.0, fy=5.0, interpolation=cv2.INTER_NEAREST)
-            cv2.imshow("Stereo view", enlarged)
+            bgr = cv2.cvtColor(enlarged, cv2.COLOR_RGB2BGR)
+            cv2.imshow("Stereo view", bgr)
             cv2.waitKey(1)
 
         return stereo_np
@@ -450,7 +451,8 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         low, high = self.observation_space.low, self.observation_space.high
         self._last_stable_obs = np.clip(x, a_min=low, a_max=high)
 
-        reward, info = self.evaluate_state(None, action)
+        state_obs = self._get_state_obs()
+        reward, info = self.evaluate_state(state_obs, action)
         # step will never return a terminate==True if there is a success
         # but we can return truncate=True if the current path length == max path length
         truncate = False

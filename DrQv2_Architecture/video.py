@@ -30,26 +30,27 @@ class VideoRecorder:
         if not self.enabled:
             return
         
-        frame = env.render()
+        frame = env._get_img_obs()
         # frame: float32, (H, 2W, 3) normalized approx [-4, 4]
 
-        if frame.dtype != np.uint8:
-            img = frame * self.std + self.mean  # back to [0,1]
-            img = np.clip(img, 0.0, 1.0)
-            img = (img * 255).astype(np.uint8)
-        else:
-            img = frame
+        if frame is not None:
+            if frame.dtype != np.uint8:
+                img = frame * self.std + self.mean  # back to [0,1]
+                img = np.clip(img, 0.0, 1.0)
+                img = (img * 255).astype(np.uint8)
+            else:
+                img = frame
 
-        img = cv2.resize(img, (self.render_size*2, self.render_size))
-        self.frames.append(img)
+            img = cv2.resize(img, (self.render_size*2, self.render_size))
+            self.frames.append(img)
 
     def save(self, file_name):
         if not self.enabled:
             self.frames = []
             return
-        
+            
         path = self.save_dir / file_name
-        
+            
         # More reliable on HPC: save GIF (no ffmpeg needed)
         imageio.mimsave(str(path.with_suffix(".gif")), self.frames, fps=self.fps)
 

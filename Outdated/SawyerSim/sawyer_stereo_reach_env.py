@@ -77,7 +77,7 @@ class SawyerReachEnvV3(SawyerXYZEnv):
     def model_name(self) -> str:
         return full_V3_path_for("sawyer_xyz/sawyer_reach_v3.xml")
     
-    def _get_state_obs():
+    def _get_state_obs(self):
         return None
 
     def evaluate_state(self, obs: npt.NDArray[np.float64] | None, action: npt.NDArray[np.float32] | None) -> tuple[float, dict[str, Any]]:

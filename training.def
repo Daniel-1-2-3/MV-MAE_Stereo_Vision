@@ -3,7 +3,7 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04   # CUDA 12.8 + nvcc
 
 %labels
     Author        Daniel Zhu
-    Description   CUDA 12.8 • MV-MAE env • offline wheelhouse install • runs trainer_pipeline_drqv2.py
+    Description   CUDA 12.8 • MV-MAE env • offline wheelhouse install • runs train_drqv2_mujoco.py
 
 # Copy THIS directory (MV_MAE_Implementation) into the image.
 # If you include a "wheelhouse/" folder here, it will be copied too.
@@ -77,14 +77,14 @@ EOS
 
     echo "[MVMAE] Python: $(python --version)"
     echo "[MVMAE] PYTHONPATH=$PYTHONPATH"
-    echo "[MVMAE] Running trainer_pipeline_drqv2.py ..."
+    echo "[MVMAE] Running train_drqv2_mujoco.py ..."
 
     # Prefer module invocation so relative imports behave well
-    if [ -f /opt/src/MV_MAE_Implementation/trainer_pipeline_drqv2.py ]; then
+    if [ -f /opt/src/MV_MAE_Implementation/train_drqv2_mujoco.py ]; then
         cd /opt/src
-        exec python -m MV_MAE_Implementation.trainer_pipeline_drqv2 "$@"
+        exec python -m MV_MAE_Implementation.train_drqv2_mujoco "$@"
     else
-        echo "[ERROR] trainer_pipeline_drqv2.py not found at /opt/src/MV_MAE_Implementation/"
+        echo "[ERROR] train_drqv2_mujoco.py not found at /opt/src/MV_MAE_Implementation/"
         echo "        Falling back to passed command..."
         exec "$@"
     fi
@@ -95,7 +95,7 @@ EOS
     Build (run this INSIDE MV_MAE_Implementation/):
       apptainer build training.sif training.def
 
-    Run (defaults to trainer_pipeline_drqv2.py):
+    Run (defaults to train_drqv2_mujoco.py):
       apptainer run --nv training.sif --epochs 50 --batch-size 64
 
     Exec arbitrary commands:
