@@ -1,7 +1,7 @@
 import cv2
 import imageio
 import numpy as np
-from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
+from Outdated.SawyerSim.sawyer_stereo_reach_env import SawyerReachEnvV3
 
 class VideoRecorder:
     def __init__(self, root_dir, render_size=256, fps=20):

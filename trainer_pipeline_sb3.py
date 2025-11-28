@@ -3,10 +3,9 @@
 #os.environ.setdefault("MUJOCO_GL", "osmesa")
 #os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
-from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
-from SB3_Architecture.custom_sac import Custom_SAC
-from SB3_Architecture.custom_sac_policy import SACPolicy
-from SB3_Architecture.debugger import Debugger
+from Outdated.SawyerSim.sawyer_stereo_reach_env import SawyerReachEnvV3
+from Outdated.SB3_Architecture.custom_sac import Custom_SAC
+from Outdated.SB3_Architecture.custom_sac_policy import SACPolicy
 import numpy as np
 import argparse
 import torch
@@ -39,10 +38,7 @@ class PipelineTrainer():
         episode_horizon: int = 300,
         log_file: str = 'log.csv',
     ):  
-        self.debugger = Debugger()
-        
         self.env = SawyerReachEnvV3(
-            debugger = self.debugger,
             render_mode = render_mode,
             img_width = img_w_size,
             img_height = img_h_size,
@@ -64,7 +60,6 @@ class PipelineTrainer():
             verbose = verbose,
             coef_mvmae = coef_mvmae,
             log_file=log_file,
-            debugger = self.debugger,
             policy_kwargs= {
                 "nviews" : nviews,
                 "mvmae_patch_size" : mvmae_patch_size, 
