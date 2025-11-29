@@ -14,17 +14,16 @@ import numpy as np
 import torch
 import time
 import argparse
+import jax
 from dm_env import specs
-
 import DrQv2_Architecture.utils as utils
 from DrQv2_Architecture.logger import Logger
 from DrQv2_Architecture.replay_buffer import ReplayBufferStorage, make_replay_loader
 from DrQv2_Architecture.video import VideoRecorder
 from DrQv2_Architecture.drqv2 import DrQV2Agent
 from DrQv2_Architecture.env_wrappers import ExtendedTimeStepWrapper, ActionRepeatWrapper, FrameStackWrapper
-from Outdated.SawyerSim.sawyer_stereo_reach_env import SawyerReachEnvV3
+from Mujoco_Sim.mujoco_pick_env import StereoPickCube
 from gymnasium.spaces import Box
-import mujoco_playground
 
 torch.backends.cudnn.benchmark = True
 
@@ -69,8 +68,8 @@ class Workshop:
     ):  
         # Overall obs space expects frame stacked obs, sawyer env expects single image
         self.overall_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels), dtype=np.float32)
-        self.sawyer_env_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels // 3), dtype=np.float32)
-        self.action_space = Box(np.array([-1, -1, -1, -1]), np.array([+1, +1, +1, +1]), dtype=np.float32)
+        self.mujoco_env_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels // 3), dtype=np.float32)
+        self.action_space = Box(low = -1.0, high = 1.0, shape = (8,), dtype = np.float32)
         self.device = device if (device is not None) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.buffer_size = buffer_size
         self.total_timesteps = total_timesteps
@@ -152,16 +151,14 @@ class Workshop:
             use_tb = self.use_tb
         )
     
-    # SawyerReachEnvV3 with wrappers for frame stacking, action repeat, time_step formatting
+    # StereoPickCube with wrappers for frame stacking, action repeat, time_step formatting
     def make_env(self, render_mode):
-        env = SawyerReachEnvV3(
+        env = StereoPickCube(
             render_mode=render_mode, 
-            img_height=self.img_h_size,
-            img_width=self.img_w_size,
-            max_path_length=self.episode_horizon,
-            obs_space=self.sawyer_env_obs_space,
-            action_space=self.action_space,
-            discount=self.discount
+            img_h_size=self.img_h_size,
+            img_w_size=self.img_w_size,
+            discount=self.discount,
+            max_path_length=self.episode_horizon
         )
         env = FrameStackWrapper(env, num_frames=self.in_channels // 3)
         env = ActionRepeatWrapper(env, num_repeats=self.action_repeat)
@@ -175,7 +172,7 @@ class Workshop:
         
         data_specs = (
             specs.Array(self.overall_obs_space.shape, self.overall_obs_space.dtype, name="observation"),
-            specs.Array(self.action_space.shape, self.action_space.dtype, name="action"),
+            specs.Array(self.train_env.action_space.shape, self.train_env.action_space.dtype, name="action"),
             specs.Array((1,), np.float32, name="reward"),
             specs.Array((1,), np.float32, name="discount")
         )
@@ -209,13 +206,15 @@ class Workshop:
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.num_eval_episodes)
 
+        master_key = jax.random.PRNGKey(0)
         while eval_until_episode(episode):
-            time_step = self.eval_env.reset()
+            master_key, episode_key = jax.random.split(master_key)
+            time_step = self.eval_env.reset(episode_key)
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation, self.global_step, eval_mode=True)
-                time_step = self.eval_env.step(action)
+                time_step = self.eval_env.step(time_step, action)
                 self.video_recorder.record(self.eval_env)
                 total_reward += float(time_step.reward[0])
                 step += 1
@@ -235,7 +234,10 @@ class Workshop:
         eval_every_step = utils.Every(self.eval_every_frames, self.action_repeat) # True for every self.eval_every_frames / self.action_repeat frames
 
         episode_step, episode_reward = 0, 0
-        time_step = self.train_env.reset() # time_step here is a ExtendedTimeStep object due to wrappers
+        
+        master_key = jax.random.PRNGKey(0)
+        master_key, episode_key = jax.random.split(master_key)
+        time_step = self.train_env.reset(episode_key) # time_step here is a ExtendedTimeStep object due to wrappers
         self.replay_storage.add(time_step)
 
         metrics = None
@@ -257,7 +259,8 @@ class Workshop:
                         log('step', self.global_step)
 
                 # Reset env
-                time_step = self.train_env.reset()
+                master_key, episode_key = jax.random.split(master_key)
+                time_step = self.train_env.reset(episode_key)
                 self.replay_storage.add(time_step)
 
                 episode_step = 0
@@ -281,7 +284,7 @@ class Workshop:
             print(f"Training step: {1/(t1 - t0):.2f} steps/sec, step {self.global_step}")
 
             # Take env step
-            time_step = self.train_env.step(action)
+            time_step = self.train_env.step(time_step, action)
             episode_reward += float(time_step.reward[0])
             self.replay_storage.add(time_step)
             episode_step += 1

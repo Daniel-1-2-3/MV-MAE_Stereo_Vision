@@ -59,6 +59,23 @@ class ReplayBufferStorage:
                 episode[spec.name] = np.array(value, spec.dtype)
             self._current_episode = defaultdict(list)
             self._store_episode(episode)
+    
+    def add(self, time_step: ExtendedTimeStep):
+        for spec in self._data_specs:
+            value = time_step[spec.name]
+            if np.isscalar(value):
+                value = np.full(spec.shape, value, spec.dtype)
+
+            # DEBUG PRINT
+            if (spec.shape != value.shape) or (spec.dtype != value.dtype):
+                print(f"[ReplayBufferStorage.add] mismatch for '{spec.name}':")
+                print(f"  spec.shape={spec.shape}, value.shape={value.shape}")
+                print(f"  spec.dtype={spec.dtype}, value.dtype={value.dtype}")
+                raise AssertionError("Spec/value mismatch")
+
+            assert spec.shape == value.shape and spec.dtype == value.dtype
+            self._current_episode[spec.name].append(value)
+
 
     def _preload(self):
         self._num_episodes = 0
