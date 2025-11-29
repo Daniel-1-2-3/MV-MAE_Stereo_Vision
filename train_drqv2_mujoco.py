@@ -24,6 +24,7 @@ from DrQv2_Architecture.drqv2 import DrQV2Agent
 from DrQv2_Architecture.env_wrappers import ExtendedTimeStepWrapper, ActionRepeatWrapper, FrameStackWrapper
 from Outdated.SawyerSim.sawyer_stereo_reach_env import SawyerReachEnvV3
 from gymnasium.spaces import Box
+import mujoco_playground
 
 torch.backends.cudnn.benchmark = True
 
