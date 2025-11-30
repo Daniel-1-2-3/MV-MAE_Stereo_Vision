@@ -80,7 +80,10 @@ class StereoPickCube(PandaPickCube):
         self.left_cam_name, self.right_cam_name = "left1", "right1"
         
         self._mjx_step = jax.jit(lambda data, ctrl: mjx_env.step(self._mjx_model, data, ctrl, self.n_substeps))
-    
+
+        self.step_count = 0
+        self.max_episode_length = max_path_length
+        
     def reset(self, rng: jax.Array) -> dict:
         rng, rng_box, rng_target = jax.random.split(rng, 3)
 
@@ -148,6 +151,8 @@ class StereoPickCube(PandaPickCube):
         reward, done = jp.zeros(2)
         self.step_type = StepType.FIRST
         
+        self.step_count = 0
+        
         return {
             "data": data,
             "metrics": metrics,
@@ -161,6 +166,7 @@ class StereoPickCube(PandaPickCube):
         }
         
     def step(self, time_step, action: jax.Array) -> dict:
+        self.step_count += 1
         # time_step can be an ExtendedTimeStep OR a dict.
         # Both support string indexing (ExtendedTimeStep via __getitem__).
         delta = action * self._action_scale
@@ -178,9 +184,10 @@ class StereoPickCube(PandaPickCube):
         box_pos = data.xpos[self._obj_body]
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
         out_of_bounds |= box_pos[2] < 0.0
-        done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
-        done = done.astype(float)
-        self.step_type = StepType.LAST if bool(done) else StepType.MID
+        truncated = (self.step_count >= self.max_episode_length)
+        terminated = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
+        done = float(terminated or truncated)
+        self.step_type = StepType.LAST if (bool(done)) else StepType.MID
 
         time_step["metrics"].update(
             **raw_rewards, out_of_bounds=out_of_bounds.astype(float)

@@ -118,7 +118,7 @@ class Workshop:
         
         # Evaluation
         self.eval_every_frames = 10_000
-        self.num_eval_episodes = 3 # 10
+        self.num_eval_episodes = 10
         
     def make_agent(self):
         # DrQv2 agent takes action_shape as (A, ) tuple
