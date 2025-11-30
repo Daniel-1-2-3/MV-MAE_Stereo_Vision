@@ -78,6 +78,8 @@ class StereoPickCube(PandaPickCube):
         self._rgb_left  = np.empty((self.img_h_size, self.img_w_size, 3), dtype=np.uint8)
         self._rgb_right = np.empty((self.img_h_size, self.img_w_size, 3), dtype=np.uint8)
         self.left_cam_name, self.right_cam_name = "left1", "right1"
+        
+        self._mjx_step = jax.jit(lambda data, ctrl: mjx_env.step(self._mjx_model, data, ctrl, self.n_substeps))
     
     def reset(self, rng: jax.Array) -> dict:
         rng, rng_box, rng_target = jax.random.split(rng, 3)
@@ -165,8 +167,8 @@ class StereoPickCube(PandaPickCube):
         ctrl = time_step["data"].ctrl + delta
         ctrl = jp.clip(ctrl, self._lowers, self._uppers)
 
-        data = mjx_env.step(self._mjx_model, time_step["data"], ctrl, self.n_substeps)
-
+        data = self._mjx_step(time_step["data"], ctrl)
+        
         raw_rewards = self._get_reward(data, time_step["info"])
         rewards = {
             k: v * self._config.reward_config.scales[k]

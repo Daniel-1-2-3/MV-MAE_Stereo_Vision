@@ -26,7 +26,7 @@ class VideoRecorder:
         if self.enabled:
             self.record(env)
 
-    def record(self, env: SawyerReachEnvV3):
+    def record(self, env):
         if not self.enabled:
             return
         

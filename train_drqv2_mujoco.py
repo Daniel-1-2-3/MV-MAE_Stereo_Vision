@@ -61,7 +61,7 @@ class Workshop:
         feature_dim: int = 100,
         hidden_dim: int = 1024,
         # Image specs
-        render_mode: str = "human",
+        render_mode: str = "rgb_array",
         in_channels: int = 3 * 3, # Number of frames stacked * 3 (RGB)
         img_h_size: int = 64,
         img_w_size: int = 64,
@@ -117,8 +117,8 @@ class Workshop:
         self.timer = utils.Timer()
         
         # Evaluation
-        self.eval_every_frames = 10000
-        self.num_eval_episodes = 10
+        self.eval_every_frames = 10_000
+        self.num_eval_episodes = 3 # 10
         
     def make_agent(self):
         # DrQv2 agent takes action_shape as (A, ) tuple
@@ -214,6 +214,8 @@ class Workshop:
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation, self.global_step, eval_mode=True)
+                action = np.asarray(action, dtype=np.float32)
+                action = jax.device_put(action)
                 time_step = self.eval_env.step(time_step, action)
                 self.video_recorder.record(self.eval_env)
                 total_reward += float(time_step.reward[0])
@@ -242,6 +244,7 @@ class Workshop:
 
         metrics = None
         while train_until_step(self.global_step):
+            print(self.global_step)
             if time_step.last():
                 self._global_episode += 1
                 # Wait until all the metrics schema is populated
@@ -275,7 +278,7 @@ class Workshop:
             # Sample action
             with torch.no_grad(), utils.eval_mode(self.agent):
                 action = self.agent.act(time_step.observation, self.global_step, eval_mode=False)
-
+            
             # Try to update the agent, will only update past self.learning_starts
             if not seed_until_step(self.global_step):
                 metrics = self.agent.update(self.replay_iter, self.global_step)
@@ -284,6 +287,8 @@ class Workshop:
             print(f"Training step: {1/(t1 - t0):.2f} steps/sec, step {self.global_step}")
 
             # Take env step
+            action = np.asarray(action, dtype=np.float32)
+            action = jax.device_put(action)
             time_step = self.train_env.step(time_step, action)
             episode_reward += float(time_step.reward[0])
             self.replay_storage.add(time_step)
