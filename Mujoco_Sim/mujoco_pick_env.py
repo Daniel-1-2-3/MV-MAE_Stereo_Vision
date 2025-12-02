@@ -1,5 +1,5 @@
-from mujoco_playground._src.manipulation.franka_emika_panda.pick import PandaPickCube, PandaPickCubeOrientation
-from mujoco_playground._src.manipulation.franka_emika_panda.pick import default_config
+from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda.pick import PandaPickCube, PandaPickCubeOrientation
+from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda.pick import default_config
 from ml_collections import config_dict
 from typing import  Any, Dict, Optional, Union
 import numpy as np
@@ -15,9 +15,9 @@ from gymnasium.spaces import Box
 import jax
 import jax.numpy as jp
 from mujoco import mjx
-from mujoco_playground._src.mjx_env import State
+from Custom_Mujoco_Playground._src.mjx_env import State
 from mujoco.mjx._src import math
-from mujoco_playground._src import mjx_env
+from Custom_Mujoco_Playground._src import mjx_env
 
 """
 mjx_panda.xml has the content of panda_updated_robotiq_2f85.xml
