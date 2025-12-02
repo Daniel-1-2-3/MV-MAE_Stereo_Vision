@@ -244,7 +244,6 @@ class Workshop:
 
         metrics = None
         while train_until_step(self.global_step):
-            print(self.global_step)
             if time_step.last():
                 self._global_episode += 1
                 # Wait until all the metrics schema is populated
@@ -284,7 +283,8 @@ class Workshop:
                 metrics = self.agent.update(self.replay_iter, self.global_step)
                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
             t1 = time.perf_counter()
-            print(f"Training step: {1/(t1 - t0):.2f} steps/sec, step {self.global_step}")
+            if self._global_step % 100 == 0:
+                print(f"Training step: {1/(t1 - t0):.2f} steps/sec, step {self.global_step}")
 
             # Take env step
             action = np.asarray(action, dtype=np.float32)

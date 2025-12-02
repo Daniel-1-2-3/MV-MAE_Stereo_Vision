@@ -80,11 +80,37 @@ class PandaPickCube(panda.PandaBase):
     self._post_init(obj_name="box", keyframe="home")
     self._sample_orientation = sample_orientation
 
+    # OVERRIDE
+    # Geom ids for parts of the robot that must not hit the floor.
+    self._floor_hand_geom_ids = [
+        self._mj_model.geom(geom).id
+        for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
+    ]
+    self._floor_geom_id = self._mj_model.geom("floor").id
+    """
     # Contact sensor IDs.
     self._floor_hand_found_sensor = [
         self._mj_model.sensor(f"{geom}_floor_found").id
         for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
     ]
+    """
+
+  def _has_contact_with_floor(self, data: mjx.Data, geom_id: int) -> jax.Array: # ADD helper method
+    """Return True if `geom_id` is in contact with the floor geom."""
+    # Contact arrays have fixed length nconmax; only first `data.ncon` are valid.
+    g1 = data.contact.geom1  # shape (nconmax,)
+    g2 = data.contact.geom2  # shape (nconmax,)
+
+    valid = jp.arange(g1.shape[0]) < data.ncon  # bool mask for active contacts
+
+    # Contact either (geom, floor) or (floor, geom)
+    contact_pair = jp.logical_or(
+        jp.logical_and(g1 == geom_id, g2 == self._floor_geom_id),
+        jp.logical_and(g2 == geom_id, g1 == self._floor_geom_id),
+    )
+
+    contact_pair = jp.logical_and(contact_pair, valid)
+    return jp.any(contact_pair)
 
   def reset(self, rng: jax.Array) -> State:
     rng, rng_box, rng_target = jax.random.split(rng, 3)
@@ -199,6 +225,7 @@ class PandaPickCube(panda.PandaBase):
         )
     )
 
+    """
     # Check for collisions with the floor
     hand_floor_collision = [
         data.sensordata[self._mj_model.sensor_adr[sensor_id]] > 0
@@ -206,6 +233,16 @@ class PandaPickCube(panda.PandaBase):
     ]
     floor_collision = sum(hand_floor_collision) > 0
     no_floor_collision = (1 - floor_collision).astype(float)
+    """
+    
+    # OVERRIDE
+        # Check for collisions between hand/fingers and the floor via contacts.
+    hand_floor_collision = [
+        self._has_contact_with_floor(data, geom_id)
+        for geom_id in self._floor_hand_geom_ids
+    ]
+    floor_collision = jp.any(jp.stack(hand_floor_collision))
+    no_floor_collision = (1.0 - floor_collision.astype(float))
 
     info["reached_box"] = 1.0 * jp.maximum(
         info["reached_box"],
