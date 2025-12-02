@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=training_mvmae_rl
+#SBATCH --job-name=training
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

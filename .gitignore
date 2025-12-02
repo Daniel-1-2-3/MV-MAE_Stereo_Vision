@@ -1,6 +1,6 @@
-/Dataset
-/Results
+/buffer
+/Training_Results
+
 *.zip
 *.exe
-*.csv
 *.sif
