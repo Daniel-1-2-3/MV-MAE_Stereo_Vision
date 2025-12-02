@@ -63,7 +63,7 @@ class ExtendedTimeStep(NamedTuple):
     discount: Any
 
     def first(self):
-        return self.step_type == StepType.FIRST
+        return self.step_type == StepType.FIRSTsss
 
     def mid(self):
         return self.step_type == StepType.MID
