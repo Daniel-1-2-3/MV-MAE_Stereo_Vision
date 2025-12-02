@@ -130,8 +130,6 @@ class StereoPickCube(PandaPickCube):
             qvel=jp.zeros(self._mjx_model.nv, dtype=float),
             ctrl=self._init_ctrl,
             impl=self._mjx_model.impl.value,
-            nconmax=self._config.nconmax,
-            njmax=self._config.njmax,
         )
 
         # set target mocap position
