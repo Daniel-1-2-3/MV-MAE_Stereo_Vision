@@ -140,7 +140,7 @@ def make_data(
 ) -> mjx.Data:
   """Initialize MJX Data."""
   data = mjx.make_data(
-      model, impl=impl, nconmax=nconmax, njmax=njmax, device=device
+      model, impl=impl, device=device
   )
   if qpos is not None:
     data = data.replace(qpos=qpos)
