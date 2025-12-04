@@ -204,7 +204,7 @@ class StereoPickCube(PandaPickCube):
         self._sync_model_data(data)
         t1 = time.perf_counter()
         with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Take action and update physics: {t1 - t0} s")
+            f.write(f"Take action and update physics: {t1 - t0} s \n")
         
         obs = self._get_img_obs()
 
@@ -271,8 +271,8 @@ class StereoPickCube(PandaPickCube):
         t1 = time.perf_counter()
         
         with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Entire rendering: {t1 - t0} s")
-            f.write(f"Single camera rendering: {t3 - t2} s")
+            f.write(f"Entire rendering: {t1 - t0} s \n")
+            f.write(f"Single camera rendering: {t3 - t2} s \n")
         
         return stereo_np
 

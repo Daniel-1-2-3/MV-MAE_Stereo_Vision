@@ -176,7 +176,7 @@ class DrQV2Agent:
                     action.uniform_(-1.0, 1.0)
         t1 = time.perf_counter()
         with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Act step: {t1 - t0} s")
+            f.write(f"Act step: {t1 - t0} s \n")
         
         return action.cpu().numpy()[0]
     
@@ -231,10 +231,10 @@ class DrQV2Agent:
             metrics['total_loss'] = total_loss.item()
         
         with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Compute critic loss: {t1 - t0} s")
-            f.write(f"Compute recon loss: {t3 - t2} s")
-            message = "(with mvmae)" if update_mvmae else "(no mvmae)"
-            f.write(f"Compute critic gradients {message} and step: {t5 - t4} s")
+            f.write(f"Compute critic loss: {t1 - t0} s \n")
+            f.write(f"Compute recon loss: {t3 - t2} s \n")
+            message = "(with mvmae)" if update_mvmae else "(no mvmae) \n"
+            f.write(f"Compute critic gradients {message} and step: {t5 - t4} s \n")
 
         return metrics
 
@@ -265,8 +265,8 @@ class DrQV2Agent:
             metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
         
         with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Compute actor loss: {t1 - t0} s")
-            f.write(f"Computer actor gradients and step: {t3 - t2} s")
+            f.write(f"Compute actor loss: {t1 - t0} s \n")
+            f.write(f"Computer actor gradients and step: {t3 - t2} s \n")
 
         return metrics
     
