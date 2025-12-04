@@ -199,6 +199,7 @@ class DrQV2Agent:
         t1 = time.perf_counter()
 
         # MV-MAE reconstruction inside critic update
+        t2, t3 = 0.0, 0.0
         if update_mvmae:
             t2 = time.perf_counter()
             out, mask, _ = self.mvmae.forward(obs, mask_x=True)
