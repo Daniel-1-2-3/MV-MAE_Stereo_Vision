@@ -8,10 +8,8 @@ mkdir -p wheelhouse
 
 python -m pip download \
   --only-binary=:all: --prefer-binary \
-  --platform manylinux2014_x86_64 \
-  --implementation cp --abi cp312 \
-  --python-version 312 \
-  --index-url https://pypi.org/simple \
+  -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+  --extra-index-url https://pypi.org/simple \
   --extra-index-url https://download.pytorch.org/whl/cu121 \
   -r requirements.txt \
   -d wheelhouse
