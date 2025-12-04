@@ -9,6 +9,7 @@ import mujoco
 from pathlib import Path
 import os
 import cv2
+import time
 import torch
 from MAE_Model.prepare_input import Prepare
 from gymnasium.spaces import Box
@@ -164,6 +165,7 @@ class StereoPickCube(PandaPickCube):
         }
         
     def step(self, time_step, action: jax.Array) -> dict:
+        t0 = time.perf_counter()
         self.step_count += 1
         # time_step can be an ExtendedTimeStep OR a dict.
         # Both support string indexing (ExtendedTimeStep via __getitem__).
@@ -192,6 +194,10 @@ class StereoPickCube(PandaPickCube):
         )
 
         self._sync_model_data(data)
+        t1 = time.perf_counter()
+        with open("debugs.txt", "a", encoding="utf-8") as f:
+            f.write(f"Take action and update physics: {t1 - t0} s")
+        
         obs = self._get_img_obs()
 
         return {
@@ -233,8 +239,12 @@ class StereoPickCube(PandaPickCube):
             np.ndarray, shape (H, 2*W, 3), dtype float32 roughly [-4, 4]
         """
         
+        t0 = time.perf_counter()
         # Render both views with the fast pathway
+        t2 = time.perf_counter()
         left_u8  = self._render_one_camera(self.left_cam_name,  self._rgb_left, self.model_data)
+        t3 = time.perf_counter()
+        
         right_u8 = self._render_one_camera(self.right_cam_name, self._rgb_right, self.model_data)
         
         # Convert to tensors exactly like before, fuse + normalize with your helper
@@ -250,7 +260,12 @@ class StereoPickCube(PandaPickCube):
             bgr = cv2.cvtColor(enlarged, cv2.COLOR_RGB2BGR)
             cv2.imshow("Stereo view", bgr)
             cv2.waitKey(1)
-
+        t1 = time.perf_counter()
+        
+        with open("debugs.txt", "a", encoding="utf-8") as f:
+            f.write(f"Entire rendering: {t1 - t0} s")
+            f.write(f"Single camera rendering: {t3 - t2} s")
+        
         return stereo_np
 
     def custom_config(self, max_path_length):

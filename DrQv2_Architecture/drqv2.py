@@ -1,4 +1,5 @@
 import numpy as np
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -160,6 +161,7 @@ class DrQV2Agent:
 
     # Samples an action
     def act(self, obs, step, eval_mode):
+        t0 = time.perf_counter()
         obs = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
         with torch.no_grad():
             z, _ = self.mvmae.encoder(obs.unsqueeze(0), mask_x=False)
@@ -172,15 +174,17 @@ class DrQV2Agent:
                 action = dist.sample(clip=None)
                 if step < self.num_expl_steps:
                     action.uniform_(-1.0, 1.0)
+        t1 = time.perf_counter()
+        with open("debugs.txt", "a", encoding="utf-8") as f:
+            f.write(f"Act step: {t1 - t0} s")
+        
         return action.cpu().numpy()[0]
     
     def update_critic(self, z, action, reward, discount, z_next, step, obs, update_mvmae: bool):
         metrics = dict()
 
-        import time
-        t0 = time.perf_counter()
-
         # Calculates target, computes MSE critic loss
+        t0 = time.perf_counter()
         with torch.no_grad():
             stddev = utils.schedule(self.stddev_schedule, step)
             dist = self.actor(z_next, stddev)
@@ -192,11 +196,14 @@ class DrQV2Agent:
         # Critic forward
         Q1, Q2 = self.critic(z, action)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
+        t1 = time.perf_counter()
 
         # MV-MAE reconstruction inside critic update
         if update_mvmae:
+            t2 = time.perf_counter()
             out, mask, _ = self.mvmae.forward(obs, mask_x=True)
             recon_loss = self.mvmae.compute_loss(out, obs, mask)
+            t3 = time.perf_counter()
 
         total_loss = critic_loss
         if update_mvmae:
@@ -207,11 +214,13 @@ class DrQV2Agent:
         if update_mvmae:
             self.mvmae_optim.zero_grad(set_to_none=True)
         
+        t4 = time.perf_counter()
         total_loss.backward()
         
         self.critic_optim.step()
         if update_mvmae:
             self.mvmae_optim.step()
+        t5 = time.perf_counter()
 
         if self.use_tb:
             metrics['critic_target_q'] = target_Q.mean().item()
@@ -220,12 +229,19 @@ class DrQV2Agent:
             metrics['critic_loss'] = critic_loss.item()
             metrics['recon_loss'] = recon_loss.item() if update_mvmae else -1.0
             metrics['total_loss'] = total_loss.item()
+        
+        with open("debugs.txt", "a", encoding="utf-8") as f:
+            f.write(f"Compute critic loss: {t1 - t0} s")
+            f.write(f"Compute recon loss: {t3 - t2} s")
+            message = "(with mvmae)" if update_mvmae else "(no mvmae)"
+            f.write(f"Compute critic gradients {message} and step: {t5 - t4} s")
 
         return metrics
 
     def update_actor(self, obs, step):
         metrics = dict()
 
+        t0 = time.perf_counter()
         stddev = utils.schedule(self.stddev_schedule, step)
         dist = self.actor(obs, stddev)
         action = dist.sample(clip=self.stddev_clip)
@@ -234,16 +250,23 @@ class DrQV2Agent:
         Q = torch.min(Q1, Q2)
 
         actor_loss = -Q.mean()
+        t1 = time.perf_counter()
 
         # Optimize actor
+        t2 = time.perf_counter()
         self.actor_optim.zero_grad(set_to_none=True)
         actor_loss.backward()
         self.actor_optim.step()
+        t3 = time.perf_counter()
 
         if self.use_tb:
             metrics['actor_loss'] = actor_loss.item()
             metrics['actor_logprob'] = log_prob.mean().item()
             metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
+        
+        with open("debugs.txt", "a", encoding="utf-8") as f:
+            f.write(f"Compute actor loss: {t1 - t0} s")
+            f.write(f"Computer actor gradients and step: {t3 - t2} s")
 
         return metrics
     
