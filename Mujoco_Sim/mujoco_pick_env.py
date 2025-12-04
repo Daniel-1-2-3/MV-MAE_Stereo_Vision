@@ -176,11 +176,19 @@ class StereoPickCube(PandaPickCube):
         data = self._mjx_step(time_step["data"], ctrl)
         
         raw_rewards = self._get_reward(data, time_step["info"])
+        sanitized_raw = {} # Sanitize rewards to take out NaN
+        for k, v in raw_rewards.items():
+            v = jp.where(jp.isnan(v) | jp.isinf(v), 0.0, v)
+            sanitized_raw[k] = v
+        
         rewards = {
-            k: v * self._config.reward_config.scales[k]
-            for k, v in raw_rewards.items()
+            k: sanitized_raw[k] * self._config.reward_config.scales[k]
+            for k in sanitized_raw
         }
-        reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
+        reward_sum = sum(rewards.values())
+        reward_sum = jp.where(jp.isnan(reward_sum) | jp.isinf(reward_sum), 0.0, reward_sum)
+        reward = jp.clip(reward_sum, -1e4, 1e4)
+
         box_pos = data.xpos[self._obj_body]
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
         out_of_bounds |= box_pos[2] < 0.0

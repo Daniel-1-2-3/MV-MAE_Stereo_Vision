@@ -137,26 +137,39 @@ class ReplayBuffer(IterableDataset):
             fetched_size += eps_len
             if not self._store_episode(eps_fn):
                 break
-
+            
     def _sample(self):
-        try:
-            self._try_fetch()
-        except:
-            traceback.print_exc()
-        self._samples_since_last_fetch += 1
-        episode = self._sample_episode()
-        # add +1 for the first dummy transition
-        idx = np.random.randint(0, episode_len(episode) - self._nstep + 1) + 1
-        obs = episode['observation'][idx - 1]
-        action = episode['action'][idx]
-        next_obs = episode['observation'][idx + self._nstep - 1]
-        reward = np.zeros_like(episode['reward'][idx])
-        discount = np.ones_like(episode['discount'][idx])
-        for i in range(self._nstep):
-            step_reward = episode['reward'][idx + i]
-            reward += discount * step_reward
-            discount *= episode['discount'][idx + i] * self._discount
-        return (obs, action, reward, discount, next_obs)
+        # Resample if it is an very short episode (ie only 2 steps long). Prevents crash.
+        while True:
+            try:
+                self._try_fetch()
+            except:
+                traceback.print_exc()
+            self._samples_since_last_fetch += 1
+
+            episode = self._sample_episode()
+            T = episode_len(episode)
+            max_start = T - self._nstep + 1
+
+            # If the episode is too short for n-step, skip it and try another one
+            if max_start <= 0:
+                continue
+
+            # add +1 for the first dummy transition (keeps original indexing)
+            idx = np.random.randint(0, max_start) + 1
+
+            obs = episode['observation'][idx - 1]
+            action = episode['action'][idx]
+            next_obs = episode['observation'][idx + self._nstep - 1]
+            reward = np.zeros_like(episode['reward'][idx])
+            discount = np.ones_like(episode['discount'][idx])
+
+            for i in range(self._nstep):
+                step_reward = episode['reward'][idx + i]
+                reward += discount * step_reward
+                discount *= episode['discount'][idx + i] * self._discount
+
+            return (obs, action, reward, discount, next_obs)
 
     def __iter__(self):
         while True:
