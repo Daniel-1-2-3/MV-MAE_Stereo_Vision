@@ -31,7 +31,6 @@ export SINGULARITY_TMPDIR="$APPTAINER_TMPDIR"
 apptainer cache clean --type=all --force || true
 apptainer build training.sif training.def
 
-
 ##### Cluster training commands
 
 ### Start training
@@ -45,3 +44,8 @@ watch -n 0.5 'tail -n 30 training-[NUMBER].out'
 scp -r `
   ameypore@killarney.alliancecan.ca:/home/ameypore/scratch/daniel/MV-MAE_Stereo_Vision/Training_Results `
   "C:\Daniel\High School\Research\MV_MAE_Implementation"
+
+##### Force pull from Github
+git fetch origin
+git reset --hard origin/main
+git clean -fd
