@@ -3,7 +3,7 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 %labels
     Author        Daniel Zhu
-    Description   Fully OFFLINE MV-MAE + DrQv2 + MJX Training Environment (CUDA 12.8)
+    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.8, Offline)
 
 %files
     . /opt/src/MV_MAE_Implementation
@@ -11,54 +11,75 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 %post
     set -e
 
-    echo "[post] === Installing base OS packages ==="
+    echo "=== [1] Installing base OS packages ==="
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        git build-essential pkg-config curl ca-certificates \
-        ffmpeg libavcodec60 libavdevice60 libavformat60 libavfilter9 \
+        git build-essential cmake pkg-config curl ca-certificates \
+        ffmpeg libavcodec60 libavdevice60 libavfilter9 libavformat60 \
         libswscale7 libswresample4 \
         xvfb x11-utils libx11-dev libxrandr-dev libxinerama-dev \
         libxcursor-dev libxi-dev mesa-common-dev \
-        gpg lsb-release libegl1 libegl-dev \
-        python3 python3-venv python3-pip
+        libegl1 libegl-dev gpg lsb-release python3 python3-venv python3-pip
     rm -rf /var/lib/apt/lists/*
 
-    echo "[post] === Creating Python venv ==="
+    echo "=== [2] Creating Python venv ==="
     python3 -m venv /opt/mvmae_venv
     . /opt/mvmae_venv/bin/activate
+    python -m pip install -U pip setuptools wheel uv
 
-    python -m pip install -U pip wheel setuptools
-
-    echo "[post] === Setting pip offline environment ==="
-    mkdir -p /opt/pip-tmp /opt/pip-cache
+    echo "=== [3] Configure offline wheelhouse ==="
     export TMPDIR=/opt/pip-tmp
     export PIP_CACHE_DIR=/opt/pip-cache
     export PIP_DISABLE_PIP_VERSION_CHECK=1
     export PIP_NO_INDEX=1
 
+    mkdir -p /opt/pip-tmp /opt/pip-cache
+
     REQ=/opt/src/MV_MAE_Implementation/requirements.txt
     WHL=/opt/src/MV_MAE_Implementation/wheelhouse
 
-    echo "[post] === Verifying wheelhouse ==="
-    if [ ! -d "$WHL" ]; then
-        echo "[ERROR] Wheelhouse directory missing at $WHL"
-        echo "        OFFLINE build cannot continue."
-        exit 3
-    fi
+    if [ ! -d "$WHL" ]; then echo "Missing wheelhouse"; exit 3; fi
+    if [ ! -f "$REQ" ]; then echo "Missing requirements.txt"; exit 2; fi
 
-    if [ ! -f "$REQ" ]; then
-        echo "[ERROR] requirements.txt missing at $REQ"
-        exit 2
-    fi
-
-    echo "[post] === Installing Python dependencies (offline only) ==="
+    echo "=== [4] Installing Python deps (offline) ==="
     python -m pip install --find-links "$WHL" --no-index -r "$REQ"
 
-    echo "[post] === (Optional) Install madrona_mjx from wheelhouse ==="
-    # If madrona_mjx has its own wheels inside wheelhouse, install them
-    python -m pip install --find-links "$WHL" --no-index madrona-mjx || true
+    echo "=== [5] Build Madrona-MJX (geom_quat) ==="
+    git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git /opt/madrona_mjx
+    cd /opt/madrona_mjx
+    git submodule update --init --recursive
+    mkdir build && cd build
+    cmake .. -DLOAD_VULKAN=OFF
+    make -j"$(nproc)"
+    cd ..
+    uv pip install -e .
 
-    echo "[post] === Autoload venv at runtime ==="
+    echo "=== [6] Install CUDA 12.8 pinned NVIDIA libs ==="
+    cat >/tmp/nvidia_cuda12_12.8.txt <<'REQ'
+nvidia-cublas-cu12==12.8.3.14
+nvidia-cuda-cupti-cu12==12.8.57
+nvidia-cuda-nvcc-cu12==12.8.93
+nvidia-cuda-nvrtc-cu12==12.8.61
+nvidia-cuda-runtime-cu12==12.8.57
+nvidia-cudnn-cu12==9.7.1.26
+nvidia-cufft-cu12==11.3.3.41
+nvidia-cufile-cu12==1.13.0.11
+nvidia-curand-cu12==10.3.9.55
+nvidia-cusolver-cu12==11.7.2.55
+nvidia-cusparse-cu12==12.5.7.53
+nvidia-cusparselt-cu12==0.6.3
+nvidia-nccl-cu12==2.26.2
+nvidia-nvjitlink-cu12==12.8.61
+nvidia-nvtx-cu12==12.8.55
+REQ
+
+    uv pip uninstall -y $(grep ^nvidia /tmp/nvidia_cuda12_12.8.txt | cut -d= -f1) || true
+    uv pip install -r /tmp/nvidia_cuda12_12.8.txt
+
+    echo "=== [7] Installing JAX 0.4.36 (cuda12_local backend) ==="
+    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
+
+    echo "=== [8] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
     cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
 export VIRTUAL_ENV=/opt/mvmae_venv
@@ -67,7 +88,8 @@ export PYTHONPATH="/opt/src:${PYTHONPATH}"
 EOS
     chmod 644 /.singularity.d/env/99-autovenv.sh
 
-    echo "[post] === Offline build complete ==="
+    echo "=== Build Completed Successfully ==="
+
 
 %environment
     export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
@@ -75,34 +97,25 @@ EOS
     export HF_TOKEN=${HF_TOKEN:-}
     export WANDB_API_KEY=${WANDB_API_KEY:-}
 
+
 %runscript
-    if command -v xdpyinfo >/dev/null 2>&1; then
-        if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
-            Xvfb :1 -screen 0 1280x720x24 -nolisten tcp & sleep 2
-        fi
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "GPU:"
+        nvidia-smi
     fi
 
-    echo "[MVMAE] Python: $(python --version)"
-    echo "[MVMAE] PYTHONPATH=$PYTHONPATH"
-    echo "[MVMAE] Running train_drqv2_mujoco.py ..."
+    . /opt/mvmae_venv/bin/activate
+    cd /opt/src
 
-    if [ -f /opt/src/MV_MAE_Implementation/train_drqv2_mujoco.py ]; then
-        cd /opt/src
-        exec python -m MV_MAE_Implementation.train_drqv2_mujoco "$@"
-    else
-        echo "[ERROR] train_drqv2_mujoco.py not found. Running passed command."
-        exec "$@"
-    fi
+    echo "[MVMAE] Running training script..."
+    exec python -m MV_MAE_Implementation.train_drqv2_mujoco "$@"
+
 
 %help
-    This is a fully OFFLINE build.
-    You must prepare wheelhouse/ with all required wheels.
-
+    Offline JAX+CUDA12.8, Madrona-MJX, MV-MAE / DrQv2 training container.
     Build:
       apptainer build training.sif training.def
-
-    Run default training script:
+    Run:
       apptainer run --nv training.sif
-
-    Run custom commands:
-      apptainer exec --nv training.sif python3 -V
+    Exec:
+      apptainer exec --nv training.sif python3
