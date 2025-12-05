@@ -205,7 +205,6 @@ class StereoPickCube(PandaPickCube):
         }
 
     def step(self, time_step, action: jax.Array) -> dict:
-        t0 = time.perf_counter()
         self.step_count += 1
         # time_step can be an ExtendedTimeStep OR a dict.
         # Both support string indexing (ExtendedTimeStep via __getitem__).
@@ -213,8 +212,11 @@ class StereoPickCube(PandaPickCube):
         ctrl = time_step["data"].ctrl + delta
         ctrl = jp.clip(ctrl, self._lowers, self._uppers)
 
+        t0 = time.perf_counter()
         data = self._mjx_step(time_step["data"], ctrl)
+        t1 = time.perf_counter()
 
+        t2 = time.perf_counter()
         raw_rewards = self._get_reward(data, time_step["info"])
         sanitized_raw = {}  # Sanitize rewards to take out NaN
         for k, v in raw_rewards.items():
@@ -230,6 +232,7 @@ class StereoPickCube(PandaPickCube):
             jp.isnan(reward_sum) | jp.isinf(reward_sum), 0.0, reward_sum
         )
         reward = jp.clip(reward_sum, -1e4, 1e4)
+        t3 = time.perf_counter()
 
         box_pos = data.xpos[self._obj_body]
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
@@ -250,7 +253,8 @@ class StereoPickCube(PandaPickCube):
 
         t1 = time.perf_counter()
         with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Take action and update physics: {t1 - t0} s \n")
+            f.write(f"Update physics: {t1 - t0} s \n")
+            f.write(f"Reward: {t3 - t2} s \n")
 
         obs = self._get_img_obs()
 
@@ -312,7 +316,7 @@ class StereoPickCube(PandaPickCube):
             _, rgb, _ = self.renderer.render(
                 self._render_token, self._latest_data, self._mjx_model
             )
-        t_render = time.perf_counter()
+        t1 = time.perf_counter()
 
         # rgb is a JAX array on device; bring to host for PyTorch / OpenCV
         rgb_np = np.asarray(rgb)
@@ -363,10 +367,8 @@ class StereoPickCube(PandaPickCube):
             cv2.imshow("Stereo view", bgr)
             cv2.waitKey(1)
 
-        t1 = time.perf_counter()
         with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Entire rendering (Madrona + preprocessing): {t1 - t0} s \n")
-            f.write(f"Madrona render call: {t_render - t0} s \n")
+            f.write(f"Madrona render call: {t1 - t0} s \n")
 
         return stereo_np
 
