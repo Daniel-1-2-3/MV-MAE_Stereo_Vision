@@ -56,7 +56,7 @@ class StereoPickCube(PandaPickCube):
             render_batch_size=1,
             render_width=self.img_h_size,
             render_height=self.img_w_size,
-            use_rasterizer=True,      # Change this from False to True for faster
+            use_rasterizer=False,
             enabled_geom_groups=[0, 1, 2],
         )
 
