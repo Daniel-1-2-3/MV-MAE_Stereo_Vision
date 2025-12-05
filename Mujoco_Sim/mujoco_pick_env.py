@@ -302,13 +302,16 @@ class StereoPickCube(PandaPickCube):
 
         # Initialize or render with Madrona depending on whether we have a token
         if self._render_token is None:
+            # First time: initialize Madrona with data + model
             render_token, rgb, _ = self.renderer.init(
                 self._latest_data, self._mjx_model
             )
             self._render_token = render_token
         else:
-            _, rgb, _ = self.renderer.render(self._render_token, self._latest_data)
-
+            # Subsequent calls: render requires (token, data, model)
+            _, rgb, _ = self.renderer.render(
+                self._render_token, self._latest_data, self._mjx_model
+            )
         t_render = time.perf_counter()
 
         # rgb is a JAX array on device; bring to host for PyTorch / OpenCV
