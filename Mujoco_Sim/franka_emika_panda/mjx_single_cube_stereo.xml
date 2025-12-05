@@ -57,7 +57,9 @@
        friction="1 .03 .003" rgba="1 0 0 1" contype="2" conaffinity="1" solref="0.01 1"/>
     </body>
     <body mocap="true" name="mocap_target">
-      <geom type="box" size="0.02 0.02 0.03" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
+      <geom type="box" size="0.015 0.015 0.15" rgba="1 0 0 0.2" contype="0" conaffinity="0"/>
+      <geom name="target_flag" type="box" size="0.08 0.08 0.08"
+            pos="0 0 0.08" rgba="0.2 0.8 0.2 0.5" contype="0" conaffinity="0"/>
     </body>
   </worldbody>
 

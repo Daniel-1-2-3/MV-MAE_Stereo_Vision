@@ -30,6 +30,6 @@ def plot_column(file_path: str, column_name: str):
     plt.show(block=False)
     plt.pause(0.01)
 
-plot_column(os.path.join(os.getcwd(), 'Results_DrQv2_Mujoco_Pick_Incomplete', 'train.csv'), 'episode_reward')
-plot_column(os.path.join(os.getcwd(), 'Results_DrQv2_Metaworld_Reach', 'train.csv'), 'episode_reward')
+plot_column(os.path.join(os.getcwd(), 'Training_Results', 'train.csv'), 'episode_reward')
+plot_column(os.path.join(os.getcwd(), 'Training_Results', 'eval.csv'), 'episode_reward')
 plt.show()

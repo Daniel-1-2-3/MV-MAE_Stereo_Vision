@@ -22,7 +22,6 @@ from mujoco.mjx._src import math
 from Custom_Mujoco_Playground._src import mjx_env
 import mujoco  # for MuJoCo-based rendering
 
-# Madrona MJX batch renderer (optional backend)
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
 
 _GLOBAL_MADRONA_RENDERER = None   # shared BatchRenderer for all envs
@@ -184,7 +183,8 @@ class StereoPickCube(PandaPickCube):
             )
             + self._init_obj_pos
         )
-
+        #target_pos = box_pos + jp.array([0.0, 0.0, 0.25])
+        
         # initialize target position
         target_pos = (
             jax.random.uniform(
