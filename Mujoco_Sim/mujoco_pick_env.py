@@ -24,7 +24,7 @@ from Custom_Mujoco_Playground._src import mjx_env
 # Madrona MJX batch renderer
 from madrona_mjx.renderer import BatchRenderer # type: ignore
 _GLOBAL_MADRONA_RENDERER = None
-_GLOBAL_MADRONA_MODEL = None
+_GLOBAL_MJX_MODEL = None
 
 """
 mjx_panda.xml has the content of panda_updated_robotiq_2f85.xml
