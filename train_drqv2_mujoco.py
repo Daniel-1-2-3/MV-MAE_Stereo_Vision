@@ -50,9 +50,9 @@ class Workshop:
         action_repeat: int = 2,
         # MVMAE variables
         nviews: int = 2,
-        mvmae_patch_size: int = 8, 
-        mvmae_encoder_embed_dim: int = 256, 
-        mvmae_decoder_embed_dim: int = 128,
+        mvmae_patch_size: int = 8,
+        mvmae_encoder_embed_dim: int = 256,
+        mvmae_decoder_embed_dim: int = 128, 
         mvmae_encoder_heads: int = 16, 
         mvmae_decoder_heads: int = 16,
         masking_ratio: float = 0.75,

@@ -20,18 +20,15 @@ import jax.numpy as jp
 from mujoco import mjx
 from mujoco.mjx._src import math
 from Custom_Mujoco_Playground._src import mjx_env
-import mujoco  # for MuJoCo-based rendering
 
-# Madrona MJX batch renderer (optional backend)
-from madrona_mjx.renderer import BatchRenderer  # type: ignore
-
-_GLOBAL_MADRONA_RENDERER = None   # shared BatchRenderer for all envs
-_GLOBAL_MJX_MODEL = None          # shared mjx.Model for all envs
+# Madrona MJX batch renderer
+from madrona_mjx.renderer import BatchRenderer # type: ignore
+_GLOBAL_MADRONA_RENDERER = None
+_GLOBAL_MJX_MODEL = None
 
 """
 mjx_panda.xml has the content of panda_updated_robotiq_2f85.xml
 """
-
 
 class StereoPickCube(PandaPickCube):
     def __init__(
@@ -43,25 +40,23 @@ class StereoPickCube(PandaPickCube):
         img_w_size: int = 64,
         discount: float = 0.99,
         max_path_length: int = 300,  # Horizon
-        use_madrona_renderer: bool = False,  # TOGGLE: True = Madrona, False = MuJoCo EGL
     ):
         self.img_h_size = img_h_size
         self.img_w_size = img_w_size
         self.render_mode = render_mode
         self.discount = discount
         self.config = self.custom_config(max_path_length)
-        self.use_madrona_renderer = use_madrona_renderer
 
         # Let the base PandaPickCube build its mj_model / mjx_model etc.
         super().__init__(self.config, config_overrides, sample_orientation)
 
-        # Vision config for Madrona (per env, but renderer will be global)
+        # Vision config
         self._vision_config = config_dict.create(
             gpu_id=0,
-            render_batch_size=1,  # single env
-            render_width=self.img_w_size,
-            render_height=self.img_h_size,
-            use_rasterizer=False,           # raytracer; rasterizer not supported in this path
+            render_batch_size=1,
+            render_width=self.img_h_size,
+            render_height=self.img_w_size,
+            use_rasterizer=False,
             enabled_geom_groups=[0, 1, 2],
         )
 
@@ -80,7 +75,7 @@ class StereoPickCube(PandaPickCube):
             dtype=np.float32,
         )
 
-        # ---------- Global shared MJX model + optional Madrona renderer ----------
+        # ---------- Global shared MJX model + renderer ----------
         global _GLOBAL_MJX_MODEL, _GLOBAL_MADRONA_RENDERER
 
         if _GLOBAL_MJX_MODEL is None:
@@ -88,85 +83,36 @@ class StereoPickCube(PandaPickCube):
             _GLOBAL_MJX_MODEL = self._mjx_model
         else:
             # Subsequent envs: force them to use the shared model
+            # (optionally, you could check xml_path here)
             self._mjx_model = _GLOBAL_MJX_MODEL
 
         # JAX MJX step uses the (possibly overridden) shared model
         self._mjx_step = self.make_mjx_step(self._mjx_model, self.n_substeps)
 
-        # --- Rendering backends ---
-        self.renderer = None
+        # Create Madrona BatchRenderer only once, on the shared MJX model
+        if _GLOBAL_MADRONA_RENDERER is None:
+            _GLOBAL_MADRONA_RENDERER = BatchRenderer(
+                m=_GLOBAL_MJX_MODEL,
+                gpu_id=self._vision_config.gpu_id,
+                num_worlds=self._vision_config.render_batch_size,
+                batch_render_view_width=self._vision_config.render_width,
+                batch_render_view_height=self._vision_config.render_height,
+                enabled_geom_groups=np.asarray(
+                    self._vision_config.enabled_geom_groups, dtype=np.int32
+                ),
+                enabled_cameras=None,  # use all cameras
+                add_cam_debug_geo=False,
+                use_rasterizer=self._vision_config.use_rasterizer,
+                viz_gpu_hdls=None,
+            )
+
+        # Per-env handle + per-env token/data
+        self.renderer = _GLOBAL_MADRONA_RENDERER
         self._latest_data = None
         self._render_token = None
 
-        # Camera names (used by MuJoCo path; Madrona just returns whatever cameras it has)
+        # These are just used for naming / visualization
         self.left_cam_name, self.right_cam_name = "left1", "right1"
-
-        if self.use_madrona_renderer:
-            # Create Madrona BatchRenderer only once, on the shared MJX model
-            if _GLOBAL_MADRONA_RENDERER is None:
-                _GLOBAL_MADRONA_RENDERER = BatchRenderer(
-                    m=_GLOBAL_MJX_MODEL,
-                    gpu_id=self._vision_config.gpu_id,
-                    num_worlds=self._vision_config.render_batch_size,
-                    batch_render_view_width=self._vision_config.render_width,
-                    batch_render_view_height=self._vision_config.render_height,
-                    enabled_geom_groups=np.asarray(
-                        self._vision_config.enabled_geom_groups, dtype=np.int32
-                    ),
-                    enabled_cameras=None,  # use all cameras
-                    add_cam_debug_geo=False,
-                    use_rasterizer=self._vision_config.use_rasterizer,
-                    viz_gpu_hdls=None,  # standalone BatchRenderer + MJX
-                )
-            self.renderer = _GLOBAL_MADRONA_RENDERER
-            # MuJoCo offscreen state is not needed in this backend
-            self.model = None
-            self.model_data = None
-            self._mjv_cam = None
-            self._mjv_opt = None
-            self._mjv_scene = None
-            self._gl_ctx = None
-            self._mjr_ctx = None
-            self._mjr_rect = None
-            self._rgb_left = None
-            self._rgb_right = None
-        else:
-            # Original MuJoCo EGL offscreen renderer
-            self.model, self.model_data = self._initialize_simulation()
-
-            # Fast offscreen renderer
-            self._mjv_cam = mujoco.MjvCamera()
-            self._mjv_cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-            self._mjv_opt = mujoco.MjvOption()
-            self._mjv_scene = mujoco.MjvScene(self.model, maxgeom=1000)
-            self._gl_ctx = None
-            if hasattr(mujoco, "GLContext") and mujoco.GLContext is not None:
-                self._gl_ctx = mujoco.GLContext(
-                    int(self.img_w_size), int(self.img_h_size)
-                )
-                self._gl_ctx.make_current()
-            else:
-                raise RuntimeError(
-                    "MuJoCo GLContext unavailable. Ensure MUJOCO_GL is set "
-                    "(e.g., 'egl' or 'osmesa') BEFORE importing mujoco."
-                )
-
-            self._mjr_ctx = mujoco.MjrContext(
-                self.model, mujoco.mjtFontScale.mjFONTSCALE_100
-            )
-            mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, self._mjr_ctx)
-            self._mjr_ctx.readDepthMap = mujoco.mjtDepthMap.mjDEPTH_ZEROFAR
-            self._mjr_rect = mujoco.MjrRect(
-                0, 0, int(self.img_w_size), int(self.img_h_size)
-            )
-
-            # Preallocate CPU buffers used by mjr_readPixels
-            self._rgb_left = np.empty(
-                (self.img_h_size, self.img_w_size, 3), dtype=np.uint8
-            )
-            self._rgb_right = np.empty(
-                (self.img_h_size, self.img_w_size, 3), dtype=np.uint8
-            )
 
         self.step_count = 0
         self.max_episode_length = max_path_length
@@ -236,14 +182,11 @@ class StereoPickCube(PandaPickCube):
             "reached_box": 0.0,
         }
 
-        # Backend-specific sync
-        if self.use_madrona_renderer:
-            self._latest_data = data
-            self._render_token = None
-        else:
-            self._sync_model_data(data)
+        # Reset Madrona token & cache latest data for rendering
+        self._latest_data = data
+        self._render_token = None
 
-        obs = self._get_img_obs()
+        obs = self._get_img_obs()  # uses Madrona on GPU
 
         reward, done = jp.zeros(2)
         self.step_type = StepType.FIRST
@@ -262,19 +205,16 @@ class StereoPickCube(PandaPickCube):
         }
 
     def step(self, time_step, action: jax.Array) -> dict:
+        t0 = time.perf_counter()
         self.step_count += 1
         # time_step can be an ExtendedTimeStep OR a dict.
         # Both support string indexing (ExtendedTimeStep via __getitem__).
-        
         delta = action * self._action_scale
         ctrl = time_step["data"].ctrl + delta
         ctrl = jp.clip(ctrl, self._lowers, self._uppers)
-        
-        t0 = time.perf_counter()
+
         data = self._mjx_step(time_step["data"], ctrl)
-        t1 = time.perf_counter()
-        
-        t2 = time.perf_counter()
+
         raw_rewards = self._get_reward(data, time_step["info"])
         sanitized_raw = {}  # Sanitize rewards to take out NaN
         for k, v in raw_rewards.items():
@@ -290,7 +230,6 @@ class StereoPickCube(PandaPickCube):
             jp.isnan(reward_sum) | jp.isinf(reward_sum), 0.0, reward_sum
         )
         reward = jp.clip(reward_sum, -1e4, 1e4)
-        t3 = time.perf_counter()
 
         box_pos = data.xpos[self._obj_body]
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
@@ -306,20 +245,14 @@ class StereoPickCube(PandaPickCube):
             **raw_rewards, out_of_bounds=out_of_bounds.astype(float)
         )
 
-        t4 = time.perf_counter()
-        # Backend-specific sync
-        if self.use_madrona_renderer:
-            self._latest_data = data
-        else:
-            self._sync_model_data(data)
-        t5 = time.perf_counter()
+        # Cache latest MJX data for GPU rendering
+        self._latest_data = data
+
+        t1 = time.perf_counter()
+        with open("debugs.txt", "a", encoding="utf-8") as f:
+            f.write(f"Take action and update physics: {t1 - t0} s \n")
 
         obs = self._get_img_obs()
-        
-        with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Jax update physics: {t1 - t0} s \n")
-            f.write(f"Getting the reward: {t3 - t2} s \n")
-            f.write(f"Sync model date: {t5 - t4} s \n")
 
         return {
             "data": data,
@@ -351,110 +284,68 @@ class StereoPickCube(PandaPickCube):
 
         return _step
 
-    def _render_one_camera(self, cam_name: str, out_buf: np.ndarray, data) -> np.ndarray:
-        """
-        MuJoCo EGL-based offscreen rendering for a single fixed camera.
-        """
-        if getattr(self, "_gl_ctx", None) is not None:
-            self._gl_ctx.make_current()
-
-        cam_id = self.model.camera(cam_name).id
-        self._mjv_cam.fixedcamid = int(cam_id)
-
-        mujoco.mjv_updateScene(
-            self.model,
-            data,
-            self._mjv_opt,
-            None,
-            self._mjv_cam,
-            mujoco.mjtCatBit.mjCAT_ALL,
-            self._mjv_scene,
-        )
-        mujoco.mjr_render(self._mjr_rect, self._mjv_scene, self._mjr_ctx)
-        mujoco.mjr_readPixels(out_buf, None, self._mjr_rect, self._mjr_ctx)
-        return out_buf
-
     def _get_img_obs(self) -> np.ndarray:
         """
         Returns the image, both views fused, in numpy array format
             np.ndarray, shape (H, 2*W, 3), dtype float32 roughly [-4, 4]
 
-        Uses either:
-          - Madrona MJX BatchRenderer (GPU raytracer), or
-          - Original MuJoCo EGL offscreen renderer (faster),
-        depending on self.use_madrona_renderer.
+        Uses Madrona MJX BatchRenderer, keeping rendering on GPU and only
+        pulling the final RGB frames back to host.
         """
+        if self._latest_data is None:
+            raise RuntimeError(
+                "_get_img_obs called before _latest_data was set. "
+                "Make sure reset/step set self._latest_data."
+            )
+
         t0 = time.perf_counter()
 
-        if self.use_madrona_renderer:
-            if self._latest_data is None:
-                raise RuntimeError(
-                    "_get_img_obs called before _latest_data was set. "
-                    "Make sure reset/step set self._latest_data."
-                )
+        # Initialize or render with Madrona depending on whether we have a token
+        if self._render_token is None:
+            # First time: initialize Madrona with data + model
+            render_token, rgb, _ = self.renderer.init(
+                self._latest_data, self._mjx_model
+            )
+            self._render_token = render_token
+        else:
+            # Subsequent calls: render requires (token, data, model)
+            _, rgb, _ = self.renderer.render(
+                self._render_token, self._latest_data, self._mjx_model
+            )
+        t_render = time.perf_counter()
 
-            # Initialize or render with Madrona depending on whether we have a token
-            if self._render_token is None:
-                # First time: initialize Madrona with data + model
-                render_token, rgb, _ = self.renderer.init(
-                    self._latest_data, self._mjx_model
-                )
-                self._render_token = render_token
+        # rgb is a JAX array on device; bring to host for PyTorch / OpenCV
+        rgb_np = np.asarray(rgb)
+
+        # Heuristic handling of possible shapes:
+        #  - (num_worlds, H, W, 4)            -> single camera
+        #  - (num_worlds, num_cams, H, W, 4)  -> multi-camera, we use first two
+        if rgb_np.ndim == 4:
+            # Assume (num_worlds, H, W, 4)
+            world0 = rgb_np[0]  # (H, W, 4)
+            img0 = world0[..., :3]  # RGB
+            # No true stereo views from renderer -> duplicate
+            left_u8 = img0.astype(np.uint8)
+            right_u8 = img0.astype(np.uint8)
+        elif rgb_np.ndim == 5:
+            # Assume (num_worlds, num_cams, H, W, 4)
+            world0 = rgb_np[0]  # (num_cams, H, W, 4)
+            num_cams = world0.shape[0]
+            if num_cams >= 2:
+                left_u8 = world0[0, ..., :3].astype(np.uint8)
+                right_u8 = world0[1, ..., :3].astype(np.uint8)
             else:
-                # Subsequent calls: render requires (token, data, model)
-                _, rgb, _ = self.renderer.render(
-                    self._render_token, self._latest_data, self._mjx_model
-                )
-            t_render = time.perf_counter()
-
-            # rgb is a JAX array on device; bring to host for PyTorch / OpenCV
-            rgb_np = np.asarray(rgb)
-
-            # Heuristic handling of possible shapes:
-            #  - (num_worlds, H, W, 4)            -> single camera
-            #  - (num_worlds, num_cams, H, W, 4)  -> multi-camera, we use first two
-            if rgb_np.ndim == 4:
-                # Assume (num_worlds, H, W, 4)
-                world0 = rgb_np[0]  # (H, W, 4)
-                img0 = world0[..., :3]  # RGB
-                # No true stereo views from renderer -> duplicate
+                img0 = world0[0, ..., :3]
                 left_u8 = img0.astype(np.uint8)
                 right_u8 = img0.astype(np.uint8)
-            elif rgb_np.ndim == 5:
-                # Assume (num_worlds, num_cams, H, W, 4)
-                world0 = rgb_np[0]  # (num_cams, H, W, 4)
-                num_cams = world0.shape[0]
-                if num_cams >= 2:
-                    left_u8 = world0[0, ..., :3].astype(np.uint8)
-                    right_u8 = world0[1, ..., :3].astype(np.uint8)
-                else:
-                    img0 = world0[0, ..., :3]
-                    left_u8 = img0.astype(np.uint8)
-                    right_u8 = img0.astype(np.uint8)
-            else:
-                raise ValueError(
-                    f"Unexpected Madrona RGB shape {rgb_np.shape}; expected 4D or 5D."
-                )
-
         else:
-            # Original MuJoCo EGL-based renderer
-            t2 = time.perf_counter()
-            left_u8 = self._render_one_camera(
-                self.left_cam_name, self._rgb_left, self.model_data
+            raise ValueError(
+                f"Unexpected Madrona RGB shape {rgb_np.shape}; expected 4D or 5D."
             )
-            t3 = time.perf_counter()
-            right_u8 = self._render_one_camera(
-                self.right_cam_name, self._rgb_right, self.model_data
-            )
-            t_render = t3  # for logging consistency
 
         # Convert to tensors exactly like before, fuse + normalize with your helper
-        left_t = (
-            torch.from_numpy(left_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0
-        )
-        right_t = (
-            torch.from_numpy(right_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0
-        )
+        left_t = (torch.from_numpy(left_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0)
+        right_t = (torch.from_numpy(right_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0)
 
         stereo_t = Prepare.fuse_normalize([left_t, right_t])  # (1, H, 2W, C)
         stereo_np = stereo_t[0].detach().cpu().numpy().astype(np.float32, copy=False)
@@ -474,19 +365,8 @@ class StereoPickCube(PandaPickCube):
 
         t1 = time.perf_counter()
         with open("debugs.txt", "a", encoding="utf-8") as f:
-            if self.use_madrona_renderer:
-                f.write(
-                    f"Entire rendering (Madrona + preprocessing): {t1 - t0} s \n"
-                )
-                f.write(f"Madrona render call: {t_render - t0} s \n")
-            else:
-                f.write(
-                    f"Entire rendering (MuJoCo EGL + preprocessing): {t1 - t0} s \n"
-                )
-                if "t2" in locals() and "t3" in locals():
-                    f.write(
-                        f"Single camera rendering (MuJoCo): {t3 - t2} s \n"
-                    )
+            f.write(f"Entire rendering (Madrona + preprocessing): {t1 - t0} s \n")
+            f.write(f"Madrona render call: {t_render - t0} s \n")
 
         return stereo_np
 
@@ -511,23 +391,3 @@ class StereoPickCube(PandaPickCube):
             njmax=128,
         )
         return config
-
-    def _initialize_simulation(self):
-        """
-        Initialize MuJoCo simulation data structures `mjModel` and `mjData`
-        for the MuJoCo EGL rendering backend.
-        """
-        # Use the same XML as the MJX model
-        model = mujoco.MjModel.from_xml_path(self._xml_path)
-        model.vis.global_.offwidth = self.img_w_size
-        model.vis.global_.offheight = self.img_h_size
-        data = mujoco.MjData(model)
-        return model, data
-
-    def _sync_model_data(self, data: mjx.Data) -> None:
-        """
-        Sync MJX data into MuJoCo MjData for rendering with EGL backend.
-        """
-        self.model_data.qpos[:] = np.array(data.qpos)
-        self.model_data.qvel[:] = np.array(data.qvel)
-        mujoco.mj_forward(self.model, self.model_data)

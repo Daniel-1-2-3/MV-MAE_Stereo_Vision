@@ -288,9 +288,16 @@ class DrQV2Agent:
         obs = obs.float()
         next_obs = next_obs.float()
 
-        # Encode obs with gradients on
-        z, _ = self.mvmae.encoder(obs, mask_x=False)
-        z = z.flatten(start_dim=-2)
+        # Encode obs with gradients on only every 10 steps, no grads otherwise
+        z = None
+        if (update_mvmae):
+            z, _ = self.mvmae.encoder(obs, mask_x=False)
+            z = z.flatten(start_dim=-2)
+        else:
+            with torch.no_grad():
+                z, _ = self.mvmae.encoder(obs, mask_x=False)
+                z = z.flatten(start_dim=-2)
+                z = z.detach()
 
         # Encode next_obs with gradients off
         with torch.no_grad():
