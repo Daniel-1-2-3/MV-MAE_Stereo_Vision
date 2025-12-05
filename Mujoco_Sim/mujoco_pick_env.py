@@ -262,16 +262,17 @@ class StereoPickCube(PandaPickCube):
         }
 
     def step(self, time_step, action: jax.Array) -> dict:
-        t0 = time.perf_counter()
         self.step_count += 1
         # time_step can be an ExtendedTimeStep OR a dict.
         # Both support string indexing (ExtendedTimeStep via __getitem__).
         delta = action * self._action_scale
         ctrl = time_step["data"].ctrl + delta
         ctrl = jp.clip(ctrl, self._lowers, self._uppers)
-
+        
+        t0 = time.perf_counter()
         data = self._mjx_step(time_step["data"], ctrl)
-
+        t1 = time.perf_counter()
+        
         raw_rewards = self._get_reward(data, time_step["info"])
         sanitized_raw = {}  # Sanitize rewards to take out NaN
         for k, v in raw_rewards.items():
@@ -308,11 +309,10 @@ class StereoPickCube(PandaPickCube):
         else:
             self._sync_model_data(data)
 
-        t1 = time.perf_counter()
-        with open("debugs.txt", "a", encoding="utf-8") as f:
-            f.write(f"Take action and update physics: {t1 - t0} s \n")
-
         obs = self._get_img_obs()
+        
+        with open("debugs.txt", "a", encoding="utf-8") as f:
+            f.write(f"Jax update physics: {t1 - t0} s \n")
 
         return {
             "data": data,
