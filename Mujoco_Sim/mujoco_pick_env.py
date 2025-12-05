@@ -47,9 +47,10 @@ class StereoPickCube(PandaPickCube):
         self.discount = discount
         self.config = self.custom_config(max_path_length)
 
+        # Let the base PandaPickCube build its mj_model / mjx_model etc.
         super().__init__(self.config, config_overrides, sample_orientation)
 
-        # Vision config dedicated to Madrona (single-world for your use case)
+        # Vision config (per env, but renderer will be global)
         self._vision_config = config_dict.create(
             gpu_id=0,
             render_batch_size=1,  # single env
@@ -74,15 +75,24 @@ class StereoPickCube(PandaPickCube):
             dtype=np.float32,
         )
 
-        # JAX MJX step (physics stays on GPU)
+        # ---------- Global shared MJX model + renderer ----------
+        global _GLOBAL_MJX_MODEL, _GLOBAL_MADRONA_RENDERER
+
+        if _GLOBAL_MJX_MODEL is None:
+            # First env: register its mjx.Model as the global one
+            _GLOBAL_MJX_MODEL = self._mjx_model
+        else:
+            # Subsequent envs: force them to use the shared model
+            # (optionally, you could check xml_path here)
+            self._mjx_model = _GLOBAL_MJX_MODEL
+
+        # JAX MJX step uses the (possibly overridden) shared model
         self._mjx_step = self.make_mjx_step(self._mjx_model, self.n_substeps)
 
-        # --- NEW: global singleton Madrona renderer ---
-        global _GLOBAL_MADRONA_RENDERER, _GLOBAL_MADRONA_MODEL
+        # Create Madrona BatchRenderer only once, on the shared MJX model
         if _GLOBAL_MADRONA_RENDERER is None:
-            _GLOBAL_MADRONA_MODEL = self._mjx_model
             _GLOBAL_MADRONA_RENDERER = BatchRenderer(
-                m=self._mjx_model,
+                m=_GLOBAL_MJX_MODEL,
                 gpu_id=self._vision_config.gpu_id,
                 num_worlds=self._vision_config.render_batch_size,
                 batch_render_view_width=self._vision_config.render_width,
@@ -95,23 +105,13 @@ class StereoPickCube(PandaPickCube):
                 use_rasterizer=self._vision_config.use_rasterizer,
                 viz_gpu_hdls=None,
             )
-        else:
-            # Sanity check: we assume all StereoPickCube envs use the same MJX model
-            if _GLOBAL_MADRONA_MODEL is not self._mjx_model:
-                raise RuntimeError(
-                    "Multiple different MJX models with a single global Madrona renderer "
-                    "are not supported. Make sure all StereoPickCube instances share the "
-                    "same XML / MJX model."
-                )
 
-        # Per-env handle to the shared renderer
+        # Per-env handle + per-env token/data
         self.renderer = _GLOBAL_MADRONA_RENDERER
+        self._latest_data = None
+        self._render_token = None
 
-        # Per-env state
-        self._latest_data = None     # latest mjx.Data for this env
-        self._render_token = None    # per-env Madrona token
-
-        # These names are only cosmetic now (we index views in _get_img_obs)
+        # These are just used for naming / visualization
         self.left_cam_name, self.right_cam_name = "left1", "right1"
 
         self.step_count = 0
