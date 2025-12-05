@@ -129,15 +129,15 @@ apptainer exec --nv \
     echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
     echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
     if [ -f "$MADRONA_MWGPU_KERNEL_CACHE" ] && [ -f "$MADRONA_BVH_KERNEL_CACHE" ]; then
-        echo "  ✓ Cache files found (no recompile expected)."
+        echo "  Cache files found (no recompile expected)."
     else
-        echo "  ⚠ No cache files yet; first run will compile and populate them."
+        echo "  No cache files yet; first run will compile and populate them."
     fi
     echo
 
     echo "========================================="
     echo "Starting MV-MAE training with MJX + Madrona"
-    echo "Watch for 'Compiling /opt/madrona_mjx/...' only on first run."
+    echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
     echo "========================================="
 
     stdbuf -oL -eL python -u -m MV_MAE_Implementation.train_drqv2_mujoco \

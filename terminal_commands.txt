@@ -50,12 +50,3 @@ scp -r `
 git fetch origin
 git reset --hard origin/main
 git clean -fd
-
-##### Test if JAX has GPU
-apptainer exec --nv training.sif bash -lc '
-  python - << "PY"
-import jax
-print("JAX version:", jax.__version__)
-print("Devices:", jax.devices())
-PY
-'
