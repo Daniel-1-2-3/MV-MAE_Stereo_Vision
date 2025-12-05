@@ -3,7 +3,7 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 %labels
     Author        Daniel Zhu
-    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.8, Offline)
+    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.8, Offline bulk deps + online JAX GPU)
 
 %files
     . /opt/src/MV_MAE_Implementation
@@ -28,22 +28,27 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     . /opt/mvmae_venv/bin/activate
     python -m pip install -U pip setuptools wheel uv
 
-    echo "=== [3] Configure offline wheelhouse ==="
+    echo "=== [3] Configure offline wheelhouse for bulk deps ==="
     export TMPDIR=/opt/pip-tmp
     export PIP_CACHE_DIR=/opt/pip-cache
     export PIP_DISABLE_PIP_VERSION_CHECK=1
     export PIP_NO_INDEX=1
-
     mkdir -p /opt/pip-tmp /opt/pip-cache
 
     REQ=/opt/src/MV_MAE_Implementation/requirements.txt
     WHL=/opt/src/MV_MAE_Implementation/wheelhouse
 
-    if [ ! -d "$WHL" ]; then echo "Missing wheelhouse"; exit 3; fi
-    if [ ! -f "$REQ" ]; then echo "Missing requirements.txt"; exit 2; fi
+    if [ ! -d "$WHL" ]; then
+        echo "[ERROR] Missing wheelhouse at $WHL"
+        exit 3
+    fi
+    if [ ! -f "$REQ" ]; then
+        echo "[ERROR] Missing requirements.txt at $REQ"
+        exit 2
+    fi
 
-    echo "=== [4] Installing Python deps (offline) ==="
-    python -m pip install --find-links "$WHL" --no-index -r "$REQ"
+    echo "=== [4] Installing Python deps (offline from wheelhouse) ==="
+    python -m pip install --no-index --find-links "$WHL" -r "$REQ"
 
     echo "=== [5] Build Madrona-MJX (geom_quat) ==="
     # Clean any previous partial clone from earlier builds
@@ -53,11 +58,13 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     cd /opt/madrona_mjx
     echo "[post] Running: git submodule update --init --recursive"
     git submodule update --init --recursive
+
     mkdir -p build
     cd build
     cmake .. -DLOAD_VULKAN=OFF
     make -j"$(nproc)"
     cd ..
+    # Editable install so Python can import madrona_mjx
     uv pip install -e .
 
     echo "=== [6] Install CUDA 12.8 pinned NVIDIA libs ==="
@@ -79,11 +86,15 @@ nvidia-nvjitlink-cu12==12.8.61
 nvidia-nvtx-cu12==12.8.55
 REQ
 
-    uv pip uninstall -y $(grep ^nvidia /tmp/nvidia_cuda12_12.8.txt | cut -d= -f1) || true
+    # Let uv talk to the network for this step (don’t enforce PIP_NO_INDEX here)
+    unset PIP_NO_INDEX
+
+    # Install/override to these exact CUDA12.8 wheels
     uv pip install -r /tmp/nvidia_cuda12_12.8.txt
 
-    echo "=== [7] Installing JAX 0.4.36 (cuda12_local backend) ==="
-    uv pip install --no-index --find-links "$WHL" jax==0.4.36 jaxlib==0.4.36
+    echo "=== [7] Installing JAX 0.4.36 with CUDA12 local plugin (GPU JAX) ==="
+    # This pulls jax, jaxlib, and jax-cuda12-plugin, and wires them to the pinned CUDA libs.
+    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
 
     echo "=== [8] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
@@ -118,10 +129,16 @@ EOS
 
 
 %help
-    Offline JAX+CUDA12.8, Madrona-MJX, MV-MAE / DrQv2 training container.
+    Offline MV-MAE / DrQv2 / MJX + Madrona container.
+    - Bulk deps (torch, mujoco, etc.) from local wheelhouse.
+    - NVIDIA CUDA 12.8 wheels pinned.
+    - JAX 0.4.36 with cuda12_local plugin installed from PyPI (GPU backend).
+
     Build:
       apptainer build training.sif training.def
-    Run:
+
+    Run default training:
       apptainer run --nv training.sif
-    Exec:
+
+    Exec custom:
       apptainer exec --nv training.sif python3
