@@ -83,7 +83,7 @@ REQ
     uv pip install -r /tmp/nvidia_cuda12_12.8.txt
 
     echo "=== [7] Installing JAX 0.4.36 (cuda12_local backend) ==="
-    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
+    uv pip install --no-index --find-links "$WHL" jax==0.4.36 jaxlib==0.4.36
 
     echo "=== [8] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env

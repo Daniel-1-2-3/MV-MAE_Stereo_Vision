@@ -14,8 +14,14 @@ python -m pip download \
   --python-version 312 \
   --index-url https://pypi.org/simple \
   --extra-index-url https://download.pytorch.org/whl/cu121 \
-  --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
   -r requirements.txt \
+  -d wheelhouse
+
+# Add GPU JAX
+python -m pip download \
+  --no-deps \
+  -i https://storage.googleapis.com/jax-releases/jax_cuda12 \
+  jax==0.4.36 jaxlib==0.4.36 \
   -d wheelhouse
 
 deactivate
