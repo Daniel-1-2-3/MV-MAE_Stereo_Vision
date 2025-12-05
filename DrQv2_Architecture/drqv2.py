@@ -297,7 +297,6 @@ class DrQV2Agent:
             with torch.no_grad():
                 z, _ = self.mvmae.encoder(obs, mask_x=False)
                 z = z.flatten(start_dim=-2)
-                z = z.detach()
 
         # Encode next_obs with gradients off
         with torch.no_grad():
