@@ -265,6 +265,7 @@ class StereoPickCube(PandaPickCube):
         self.step_count += 1
         # time_step can be an ExtendedTimeStep OR a dict.
         # Both support string indexing (ExtendedTimeStep via __getitem__).
+        
         delta = action * self._action_scale
         ctrl = time_step["data"].ctrl + delta
         ctrl = jp.clip(ctrl, self._lowers, self._uppers)
@@ -273,6 +274,7 @@ class StereoPickCube(PandaPickCube):
         data = self._mjx_step(time_step["data"], ctrl)
         t1 = time.perf_counter()
         
+        t2 = time.perf_counter()
         raw_rewards = self._get_reward(data, time_step["info"])
         sanitized_raw = {}  # Sanitize rewards to take out NaN
         for k, v in raw_rewards.items():
@@ -288,6 +290,7 @@ class StereoPickCube(PandaPickCube):
             jp.isnan(reward_sum) | jp.isinf(reward_sum), 0.0, reward_sum
         )
         reward = jp.clip(reward_sum, -1e4, 1e4)
+        t3 = time.perf_counter()
 
         box_pos = data.xpos[self._obj_body]
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
@@ -303,16 +306,20 @@ class StereoPickCube(PandaPickCube):
             **raw_rewards, out_of_bounds=out_of_bounds.astype(float)
         )
 
+        t4 = time.perf_counter()
         # Backend-specific sync
         if self.use_madrona_renderer:
             self._latest_data = data
         else:
             self._sync_model_data(data)
+        t5 = time.perf_counter()
 
         obs = self._get_img_obs()
         
         with open("debugs.txt", "a", encoding="utf-8") as f:
             f.write(f"Jax update physics: {t1 - t0} s \n")
+            f.write(f"Getting the reward: {t3 - t2} s \n")
+            f.write(f"Sync model date: {t5 - t4} s \n")
 
         return {
             "data": data,
