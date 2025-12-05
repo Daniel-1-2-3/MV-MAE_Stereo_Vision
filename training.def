@@ -50,8 +50,7 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     cd /opt
     git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
     cd /opt/madrona_mjx
-    git submodule_update_cmd="git submodule update --init --recursive"
-    echo "[post] Running: $git_submodule_update_cmd"
+    echo "[post] Running: git submodule update --init --recursive"
     git submodule update --init --recursive
     mkdir -p build
     cd build
