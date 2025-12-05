@@ -50,13 +50,13 @@ class StereoPickCube(PandaPickCube):
         # Let the base PandaPickCube build its mj_model / mjx_model etc.
         super().__init__(self.config, config_overrides, sample_orientation)
 
-        # Vision config
+        # Vision config (per env, but renderer will be global)
         self._vision_config = config_dict.create(
             gpu_id=0,
-            render_batch_size=1,
-            render_width=self.img_h_size,
-            render_height=self.img_w_size,
-            use_rasterizer=True,      # Change this from False to True for faster
+            render_batch_size=1,  # single env
+            render_width=self.img_w_size,
+            render_height=self.img_h_size,
+            use_rasterizer=False,
             enabled_geom_groups=[0, 1, 2],
         )
 
