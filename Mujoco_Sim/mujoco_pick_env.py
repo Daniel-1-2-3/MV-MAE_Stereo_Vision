@@ -22,7 +22,7 @@ from mujoco.mjx._src import math
 from Custom_Mujoco_Playground._src import mjx_env
 
 # Madrona MJX batch renderer
-from madrona_mjx.renderer import BatchRenderer
+from madrona_mjx.renderer import BatchRenderer # type: ignore
 
 """
 mjx_panda.xml has the content of panda_updated_robotiq_2f85.xml
@@ -76,31 +76,41 @@ class StereoPickCube(PandaPickCube):
         # JAX MJX step (physics stays on GPU)
         self._mjx_step = self.make_mjx_step(self._mjx_model, self.n_substeps)
 
-        # Madrona batch renderer (rendering on GPU)
-        # Assumes MJX model is already prepared in a way compatible with madrona_mjx,
-        # as in MuJoCo Playground's PandaPickCubeCartesian.
-        self._num_worlds = self._vision_config.render_batch_size
-        self.renderer = BatchRenderer(
-            m=self._mjx_model,
-            gpu_id=self._vision_config.gpu_id,
-            num_worlds=self._vision_config.render_batch_size,
-            batch_render_view_width=self._vision_config.render_width,
-            batch_render_view_height=self._vision_config.render_height,
-            enabled_geom_groups=np.asarray(
-                self._vision_config.enabled_geom_groups, dtype=np.int32
-            ),
-            enabled_cameras=None,  # use all cameras; we pick views in _get_img_obs
-            add_cam_debug_geo=False,
-            use_rasterizer=self._vision_config.use_rasterizer,
-            viz_gpu_hdls=None,
-        )
+        # --- NEW: global singleton Madrona renderer ---
+        global _GLOBAL_MADRONA_RENDERER, _GLOBAL_MADRONA_MODEL
+        if _GLOBAL_MADRONA_RENDERER is None:
+            _GLOBAL_MADRONA_MODEL = self._mjx_model
+            _GLOBAL_MADRONA_RENDERER = BatchRenderer(
+                m=self._mjx_model,
+                gpu_id=self._vision_config.gpu_id,
+                num_worlds=self._vision_config.render_batch_size,
+                batch_render_view_width=self._vision_config.render_width,
+                batch_render_view_height=self._vision_config.render_height,
+                enabled_geom_groups=np.asarray(
+                    self._vision_config.enabled_geom_groups, dtype=np.int32
+                ),
+                enabled_cameras=None,  # use all cameras
+                add_cam_debug_geo=False,
+                use_rasterizer=self._vision_config.use_rasterizer,
+                viz_gpu_hdls=None,
+            )
+        else:
+            # Sanity check: we assume all StereoPickCube envs use the same MJX model
+            if _GLOBAL_MADRONA_MODEL is not self._mjx_model:
+                raise RuntimeError(
+                    "Multiple different MJX models with a single global Madrona renderer "
+                    "are not supported. Make sure all StereoPickCube instances share the "
+                    "same XML / MJX model."
+                )
 
-        # Store latest MJX data + Madrona render token on the Python side
-        # (physics + rendering still executed on GPU)
-        self._latest_data: Optional[mjx.Data] = None
-        self._render_token = None
+        # Per-env handle to the shared renderer
+        self.renderer = _GLOBAL_MADRONA_RENDERER
 
-        # Names kept for clarity (not used directly with Madrona; we index into views)
+        # Per-env state
+        self._latest_data = None     # latest mjx.Data for this env
+        self._render_token = None    # per-env Madrona token
+
+        # These names are only cosmetic now (we index views in _get_img_obs)
         self.left_cam_name, self.right_cam_name = "left1", "right1"
 
         self.step_count = 0
