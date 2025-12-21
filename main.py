@@ -1,2 +1,3 @@
+from newfile import newfunc
 def main():
-    print("testing sif build")
+    newfunc()
