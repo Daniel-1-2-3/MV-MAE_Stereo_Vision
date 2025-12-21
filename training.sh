@@ -21,26 +21,22 @@ if [[ ! -f "$IMG" ]]; then
 fi
 
 # ---------------- Project layout (your case) ----------------
-# You said: everything is under MV-MAE_Stereo_Vision (this submit dir).
+# Everything lives directly under MV-MAE_Stereo_Vision (SLURM_SUBMIT_DIR)
 HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+WORKDIR_IN_CONTAINER="/workspace"
 
-# Inside the project root, we expect the Python package directory MV_MAE_Implementation/
-PKG_DIR="$HOST_PROJECT_ROOT/MV_MAE_Implementation"
-if [[ ! -d "$PKG_DIR" ]]; then
-  echo "FATAL: Expected Python package directory not found:"
-  echo "  $PKG_DIR"
-  echo "Your training command is: python -m MV_MAE_Implementation.execute"
-  echo "So the folder MV_MAE_Implementation/ must exist under MV-MAE_Stereo_Vision."
+# execute.py must exist at the project root
+if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
+  echo "FATAL: execute.py not found at:"
+  echo "  $HOST_PROJECT_ROOT/execute.py"
+  echo "You said everything is directly under MV-MAE_Stereo_Vision, so execute.py must be here."
   exit 10
 fi
 
-# ---------------- Bind host project into container at a stable path ----------------
-# Requirement: edit/add files on host under .../MV_MAE_Implementation without rebuilding SIF.
-WORKDIR_IN_CONTAINER="/workspace"
-
 # ---------------- Python path inside container ----------------
-# Prefer host-mounted code under /workspace first, keep /opt/src fallbacks for portability.
-export APPTAINERENV_PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
+# Critical: prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
+# Keep /opt/src fallbacks for portability in case you ever run without binds.
+export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # ---------------- EGL / MuJoCo GL setup (Amey-style) ----------------
 export APPTAINERENV_MUJOCO_GL=egl
@@ -80,7 +76,7 @@ BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 
-# NEW (only needed part): bind the whole project to /workspace so host code is used
+# Critical bind: mount the entire project to /workspace
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
 # ---------------- Quick EGL + GPU probe (Amey-style) ----------------
@@ -122,7 +118,6 @@ apptainer exec --nv \
     if command -v nvidia-smi >/dev/null 2>&1; then
         ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
         echo "Actual GPU: $ACTUAL_GPU"
-        # Extract a simple model tag: H100, L40S, A100, etc.
         GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\\|L40S\\|A100\\|V100\\|RTX" | head -1)
         if [ -z "$GPU_MODEL" ]; then
             GPU_MODEL="unknown"
@@ -133,10 +128,9 @@ apptainer exec --nv \
     fi
     GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
 
-    # Single env-config key; you can expand this with flags like --domain_randomization if you want
     ENV_CONFIG="default"
 
-    # Cache build dir lives in your project directory, shared host<->container
+    # Cache build dir lives in your submit directory, shared host<->container (unchanged)
     CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
     mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
 
@@ -160,7 +154,8 @@ apptainer exec --nv \
     echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
     echo "========================================="
 
-    stdbuf -oL -eL python -u -m MV_MAE_Implementation.execute \
+    # Critical change: run execute.py directly from /workspace (host-mounted)
+    stdbuf -oL -eL python -u execute.py \
       --render_mode rgb_array \
       --mvmae_patch_size 16 \
       --mvmae_encoder_embed_dim 192 \
