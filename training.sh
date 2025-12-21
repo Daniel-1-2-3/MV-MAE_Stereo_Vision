@@ -46,7 +46,6 @@ export APPTAINERENV_MUJOCO_PLATFORM=egl
 export APPTAINERENV_DISPLAY=
 export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
 export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
-export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
 # NVIDIA EGL vendor JSON on the HOST
@@ -154,6 +153,16 @@ apptainer exec --nv \
     echo "Starting MV-MAE training with MJX + Madrona"
     echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
     echo "========================================="
+
+    # --- Fix Orbax/JAX incompatibility at runtime (NO SIF rebuild) ---
+    python - <<'"'"'PY'"'"'
+import subprocess, sys
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install",
+    "--quiet",
+    "orbax-checkpoint==0.5.9"
+])
+PY
 
     # Critical change: run execute.py directly from /workspace (host-mounted)
     stdbuf -oL -eL python -u execute.py \
