@@ -18,11 +18,11 @@ module load apptainer/1.3.5 || module load apptainer
 # ---------------- Apptainer image ----------------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
 if [[ ! -f "$IMG" ]]; then
-  echo "ERROR: $IMG not found"; exit 2
+  echo "ERROR: $IMG not found"
+  exit 2
 fi
 
-# ---------------- Project layout (your case) ----------------
-# Everything lives directly under MV-MAE_Stereo_Vision (SLURM_SUBMIT_DIR)
+# ---------------- Project layout ----------------
 HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
 
@@ -30,16 +30,14 @@ WORKDIR_IN_CONTAINER="/workspace"
 if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
   echo "FATAL: execute.py not found at:"
   echo "  $HOST_PROJECT_ROOT/execute.py"
-  echo "You said everything is directly under MV-MAE_Stereo_Vision, so execute.py must be here."
   exit 10
 fi
 
 # ---------------- Python path inside container ----------------
-# Critical: prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
-# Keep /opt/src fallbacks for portability in case you ever run without binds.
+# Prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
 export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
-# ---------------- EGL / MuJoCo GL setup (Amey-style) ----------------
+# ---------------- EGL / MuJoCo GL setup ----------------
 export APPTAINERENV_MUJOCO_GL=egl
 export APPTAINERENV_PYOPENGL_PLATFORM=egl
 export APPTAINERENV_MUJOCO_PLATFORM=egl
@@ -52,7 +50,7 @@ export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 # NVIDIA EGL vendor JSON on the HOST
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 if [[ ! -f "$VENDOR_JSON" ]]; then
-  echo "FATAL: $VENDOR_JSON not found on host (NVIDIA EGL ICD missing). Ask admins to install GLVND/EGL for NVIDIA."
+  echo "FATAL: $VENDOR_JSON not found on host (NVIDIA EGL ICD missing)."
   exit 3
 fi
 export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
@@ -63,7 +61,7 @@ for d in /usr/lib/x86_64-linux-gnu/nvidia /usr/lib/nvidia /usr/lib64/nvidia /usr
   [[ -z "$NV_EGL_DIR" && -e "$d/libEGL_nvidia.so.0" ]] && NV_EGL_DIR="$d"
 done
 if [[ -z "${NV_EGL_DIR:-}" || ! -d "$NV_EGL_DIR" ]]; then
-  echo "FATAL: Could not find libEGL_nvidia.so* on host. Ask admins to install NVIDIA EGL libs."
+  echo "FATAL: Could not find libEGL_nvidia.so* on host."
   exit 4
 fi
 
@@ -71,7 +69,7 @@ fi
 GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
-# Binds: project + EGL bits into container
+# ---------------- Binds ----------------
 BIND_FLAGS=( --bind "$HOST_PROJECT_ROOT:$HOST_PROJECT_ROOT" )
 BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d" )
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
@@ -80,7 +78,7 @@ BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 # Critical bind: mount the entire project to /workspace
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
-# ---------------- Quick EGL + GPU probe (Amey-style) ----------------
+# ---------------- Quick EGL + GPU probe ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
@@ -95,7 +93,7 @@ print("OpenGL vendor  :", to_s(gl.glGetString(gl.GL_VENDOR)))
 print("OpenGL renderer:", to_s(gl.glGetString(gl.GL_RENDERER)))
 ctx.free()
 PY
-  '
+'
 
 # ---------------- Training with Madrona cache integration ----------------
 apptainer exec --nv \
@@ -103,71 +101,101 @@ apptainer exec --nv \
   --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
   bash -lc '
-    set -e
+set -e
 
-    export PYTHONUNBUFFERED=1
+export PYTHONUNBUFFERED=1
 
-    # JAX / XLA tuning (optional but usually helpful)
-    export JAX_TRACEBACK_FILTERING=off
-    export JAX_DISABLE_CUSOLVER=1
-    export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
-    export XLA_PYTHON_CLIENT_PREALLOCATE=false
-    export XLA_PYTHON_CLIENT_ALLOCATOR=platform
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
+# JAX / XLA tuning (optional)
+export JAX_TRACEBACK_FILTERING=off
+export JAX_DISABLE_CUSOLVER=1
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 
-    echo "=== Madrona + GPU detection (inside container) ==="
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
-        echo "Actual GPU: $ACTUAL_GPU"
-        GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\\|L40S\\|A100\\|V100\\|RTX" | head -1)
-        if [ -z "$GPU_MODEL" ]; then
-            GPU_MODEL="unknown"
-        fi
-    else
-        echo "WARNING: nvidia-smi not found in container; using generic GPU tag"
-        GPU_MODEL="unknown"
-    fi
-    GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
+echo "=== Madrona + GPU detection (inside container) ==="
+if command -v nvidia-smi >/dev/null 2>&1; then
+  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
+  echo "Actual GPU: $ACTUAL_GPU"
+  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1)
+  if [ -z "$GPU_MODEL" ]; then
+    GPU_MODEL="unknown"
+  fi
+else
+  echo "WARNING: nvidia-smi not found in container; using generic GPU tag"
+  GPU_MODEL="unknown"
+fi
+GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
 
-    ENV_CONFIG="default"
+ENV_CONFIG="default"
 
-    # Cache build dir lives in your submit directory, shared host<->container (unchanged)
-    CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
-    mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
+# Cache build dir lives in your submit directory, shared host<->container
+CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
+mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
 
-    export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
-    export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
+export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
+export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
 
-    echo "Madrona cache configuration:"
-    echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
-    echo "  ENV_CONFIG      = $ENV_CONFIG"
-    echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
-    echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
-    if [ -f "$MADRONA_MWGPU_KERNEL_CACHE" ] && [ -f "$MADRONA_BVH_KERNEL_CACHE" ]; then
-        echo "  Cache files found (no recompile expected)."
-    else
-        echo "  No cache files yet; first run will compile and populate them."
-    fi
-    echo
+echo "Madrona cache configuration:"
+echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
+echo "  ENV_CONFIG      = $ENV_CONFIG"
+echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
+echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
+if [ -f "$MADRONA_MWGPU_KERNEL_CACHE" ] && [ -f "$MADRONA_BVH_KERNEL_CACHE" ]; then
+  echo "  Cache files found (no recompile expected)."
+else
+  echo "  No cache files yet; first run will compile and populate them."
+fi
+echo
 
-    echo "========================================="
-    echo "Starting MV-MAE training with MJX + Madrona"
-    echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
-    echo "========================================="
+echo "========================================="
+echo "Starting MV-MAE training with MJX + Madrona"
+echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
+echo "========================================="
 
-    # Critical change: run execute.py directly from /workspace (host-mounted)
-    python -m pip install --no-cache-dir --target /workspace/.pydeps wandb
-    stdbuf -oL -eL python -u execute.py \
-      --render_mode rgb_array \
-      --mvmae_patch_size 16 \
-      --mvmae_encoder_embed_dim 192 \
-      --mvmae_decoder_embed_dim 96 \
-      --mvmae_encoder_heads 8 \
-      --mvmae_decoder_heads 8 \
-      --hidden_dim 512 \
-      2>&1
+# ---------------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------------
+DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
 
-    echo "Training completed."
-  '
+PY_MM=$(python - <<'"'"'PY'"'"'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)
+
+SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
+BIN_DIR="${DEPS_PREFIX}/bin"
+
+mkdir -p "$DEPS_PREFIX"
+
+# Always install wandb
+python -m pip install --no-cache-dir --upgrade --prefix "$DEPS_PREFIX" wandb
+
+# Try to install rscope, but do not fail job if it is not available on pip
+python -m pip install --no-cache-dir --upgrade --prefix "$DEPS_PREFIX" rscope || \
+  echo "NOTE: pip package '\''rscope'\'' not available; skipping."
+
+# Make prefix visible for imports + CLI entrypoints (keep /workspace first)
+export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
+export PATH="${BIN_DIR}:${PATH}"
+
+# Sanity check (hard fail if wandb still cannot import)
+python - <<'"'"'PY'"'"'
+import wandb
+print("wandb ok:", wandb.__version__)
+PY
+
+# ---------------- Run training ----------------
+stdbuf -oL -eL python -u execute.py \
+  --render_mode rgb_array \
+  --mvmae_patch_size 16 \
+  --mvmae_encoder_embed_dim 192 \
+  --mvmae_decoder_embed_dim 96 \
+  --mvmae_encoder_heads 8 \
+  --mvmae_decoder_heads 8 \
+  --hidden_dim 512 \
+  2>&1
+
+echo "Training completed."
+'
 
 echo "Finished at $(date)"
