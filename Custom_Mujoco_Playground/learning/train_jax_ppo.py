@@ -366,7 +366,7 @@ def main(argv):
       network_factory=network_factory,
       seed=_SEED.value,
       restore_checkpoint_path=restore_checkpoint_path,
-      save_checkpoint_path=ckpt_path,
+      save_checkpoint_path=None, # CHANGE from ckpt_path t None
       wrap_env_fn=None if _VISION.value else wrapper.wrap_for_brax_training,
       num_eval_envs=num_eval_envs,
   )
