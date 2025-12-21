@@ -3,6 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
 #SBATCH --mem=50G
 #SBATCH --time=8:00:00
 #SBATCH --account=aip-aspuru-ab
