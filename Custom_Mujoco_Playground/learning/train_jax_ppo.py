@@ -509,9 +509,8 @@ def main(argv):
     frames = eval_env.render(
         traj, height=480, width=640, scene_option=scene_option
     )
-    media.write_video(f"rollout{i}.mp4", frames, fps=fps)
-    print(f"Rollout video saved as 'rollout{i}.mp4'.")
-
+    media.write_video(f"rollout{i}.gif", frames, fps=fps)
+    print(f"Rollout video saved as 'rollout{i}.gif'.")
 
 if __name__ == "__main__":
   app.run(main)
