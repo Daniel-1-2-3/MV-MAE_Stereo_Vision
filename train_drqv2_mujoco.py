@@ -348,10 +348,3 @@ def get_args():
     parser.add_argument("--img_w_size", type=int, default=64)
 
     return parser.parse_args()
-
-if __name__ == '__main__':
-    root_dir = Path.cwd()
-    args = get_args()
-    workspace = Workshop(**vars(args))
-    workspace.train()
-    save_agent(workspace.agent)
