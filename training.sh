@@ -186,13 +186,6 @@ PY
 
 # ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py \
-  --render_mode rgb_array \
-  --mvmae_patch_size 16 \
-  --mvmae_encoder_embed_dim 192 \
-  --mvmae_decoder_embed_dim 96 \
-  --mvmae_encoder_heads 8 \
-  --mvmae_decoder_heads 8 \
-  --hidden_dim 512 \
   2>&1
 
 echo "Training completed."
