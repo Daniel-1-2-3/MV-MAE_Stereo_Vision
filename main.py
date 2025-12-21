@@ -1,2 +1,2 @@
 def main():
-    print("hello")
+    print("testing sif build")
