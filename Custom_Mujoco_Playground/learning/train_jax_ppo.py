@@ -42,7 +42,6 @@ from Custom_Mujoco_Playground.config import manipulation_params
 import tensorboardX
 import wandb
 
-
 xla_flags = os.environ.get("XLA_FLAGS", "")
 xla_flags += " --xla_gpu_triton_gemm_any=True"
 os.environ["XLA_FLAGS"] = xla_flags

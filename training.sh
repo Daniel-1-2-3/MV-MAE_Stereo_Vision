@@ -21,9 +21,21 @@ if [[ ! -f "$IMG" ]]; then
   echo "ERROR: $IMG not found"; exit 2
 fi
 
+# ---------------- Bind host repo into container at a stable path ----------------
+# Requirement: you can add/edit files under host .../MV_MAE_Implementation without rebuilding the SIF.
+WORKDIR_IN_CONTAINER="/workspace"
+if [[ -d "$SLURM_SUBMIT_DIR/MV_MAE_Implementation" ]]; then
+  HOST_REPO_ROOT="$SLURM_SUBMIT_DIR"
+elif [[ "$(basename "$SLURM_SUBMIT_DIR")" == "MV_MAE_Implementation" ]]; then
+  HOST_REPO_ROOT="$(dirname "$SLURM_SUBMIT_DIR")"
+else
+  echo "FATAL: Could not locate MV_MAE_Implementation under \$SLURM_SUBMIT_DIR=$SLURM_SUBMIT_DIR"
+  exit 10
+fi
+
 # ---------------- Python path inside container ----------------
-# This matches Amey's MV_MAE setup: /opt/src has code, /opt/src/MV_MAE_Implementation is your repo.
-export APPTAINERENV_PYTHONPATH="/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
+# Prefer host-mounted repo at /workspace, keep /opt/src fallbacks for portability.
+export APPTAINERENV_PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # ---------------- EGL / MuJoCo GL setup (Amey-style) ----------------
 export APPTAINERENV_MUJOCO_GL=egl
@@ -57,16 +69,17 @@ fi
 GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
-# Binds: repo + EGL bits into container
+# Binds: submit dir + EGL bits + host repo mounted at /workspace
 BIND_FLAGS=( --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" )
 BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d" )
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
+BIND_FLAGS+=( --bind "$HOST_REPO_ROOT:$WORKDIR_IN_CONTAINER" )
 
 # ---------------- Quick EGL + GPU probe (Amey-style) ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
-  --pwd "$SLURM_SUBMIT_DIR" \
+  --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
   bash -lc '
 python - << "PY"
@@ -83,7 +96,7 @@ PY
 # ---------------- Training with Madrona cache integration ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
-  --pwd "$SLURM_SUBMIT_DIR" \
+  --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
   bash -lc '
     set -e
@@ -140,7 +153,7 @@ apptainer exec --nv \
     echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
     echo "========================================="
 
-    stdbuf -oL -eL python -u -m MV_MAE_Implementation.train_drqv2_mujoco \
+    stdbuf -oL -eL python -u -m MV_MAE_Implementation.execute \
       --render_mode rgb_array \
       --mvmae_patch_size 16 \
       --mvmae_encoder_embed_dim 192 \

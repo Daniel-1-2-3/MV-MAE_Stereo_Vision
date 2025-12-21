@@ -101,7 +101,7 @@ REQ
     cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
-export PYTHONPATH="/opt/src:${PYTHONPATH}"
+export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
 EOS
     chmod 644 /.singularity.d/env/99-autovenv.sh
 
@@ -113,6 +113,7 @@ EOS
     export DISPLAY=:1
     export HF_TOKEN=${HF_TOKEN:-}
     export WANDB_API_KEY=${WANDB_API_KEY:-}
+    export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
 
 
 %runscript
@@ -122,10 +123,15 @@ EOS
     fi
 
     . /opt/mvmae_venv/bin/activate
-    cd /opt/src
+
+    if [ -d "/workspace" ]; then
+        cd /workspace
+    else
+        cd /opt/src
+    fi
 
     echo "[MVMAE] Running training script..."
-    exec python -m MV_MAE_Implementation.train_drqv2_mujoco "$@"
+    exec python -m MV_MAE_Implementation.execute "$@"
 
 
 %help
@@ -133,12 +139,15 @@ EOS
     - Bulk deps (torch, mujoco, etc.) from local wheelhouse.
     - NVIDIA CUDA 12.8 wheels pinned.
     - JAX 0.4.36 with cuda12_local plugin installed from PyPI (GPU backend).
+    Dev workflow:
+      Bind your host repo root (the directory containing MV_MAE_Implementation/) to /workspace
+      and you can add/edit files without rebuilding the SIF.
 
     Build:
       apptainer build training.sif training.def
 
     Run default training:
-      apptainer run --nv training.sif
+      apptainer run --nv --bind "$PWD:/workspace" training.sif
 
     Exec custom:
-      apptainer exec --nv training.sif python3
+      apptainer exec --nv --bind "$PWD:/workspace" training.sif python3
