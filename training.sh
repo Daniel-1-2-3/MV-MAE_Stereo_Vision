@@ -21,20 +21,26 @@ if [[ ! -f "$IMG" ]]; then
   echo "ERROR: $IMG not found"; exit 2
 fi
 
-# ---------------- Bind host repo into container at a stable path ----------------
-# Requirement: you can add/edit files under host .../MV_MAE_Implementation without rebuilding the SIF.
-WORKDIR_IN_CONTAINER="/workspace"
-if [[ -d "$SLURM_SUBMIT_DIR/MV_MAE_Implementation" ]]; then
-  HOST_REPO_ROOT="$SLURM_SUBMIT_DIR"
-elif [[ "$(basename "$SLURM_SUBMIT_DIR")" == "MV_MAE_Implementation" ]]; then
-  HOST_REPO_ROOT="$(dirname "$SLURM_SUBMIT_DIR")"
-else
-  echo "FATAL: Could not locate MV_MAE_Implementation under \$SLURM_SUBMIT_DIR=$SLURM_SUBMIT_DIR"
+# ---------------- Project layout (your case) ----------------
+# You said: everything is under MV-MAE_Stereo_Vision (this submit dir).
+HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+
+# Inside the project root, we expect the Python package directory MV_MAE_Implementation/
+PKG_DIR="$HOST_PROJECT_ROOT/MV_MAE_Implementation"
+if [[ ! -d "$PKG_DIR" ]]; then
+  echo "FATAL: Expected Python package directory not found:"
+  echo "  $PKG_DIR"
+  echo "Your training command is: python -m MV_MAE_Implementation.execute"
+  echo "So the folder MV_MAE_Implementation/ must exist under MV-MAE_Stereo_Vision."
   exit 10
 fi
 
+# ---------------- Bind host project into container at a stable path ----------------
+# Requirement: edit/add files on host under .../MV_MAE_Implementation without rebuilding SIF.
+WORKDIR_IN_CONTAINER="/workspace"
+
 # ---------------- Python path inside container ----------------
-# Prefer host-mounted repo at /workspace, keep /opt/src fallbacks for portability.
+# Prefer host-mounted code under /workspace first, keep /opt/src fallbacks for portability.
 export APPTAINERENV_PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # ---------------- EGL / MuJoCo GL setup (Amey-style) ----------------
@@ -69,12 +75,14 @@ fi
 GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
-# Binds: submit dir + EGL bits + host repo mounted at /workspace
-BIND_FLAGS=( --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" )
+# Binds: project + EGL bits into container
+BIND_FLAGS=( --bind "$HOST_PROJECT_ROOT:$HOST_PROJECT_ROOT" )
 BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d" )
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
-BIND_FLAGS+=( --bind "$HOST_REPO_ROOT:$WORKDIR_IN_CONTAINER" )
+
+# NEW (only needed part): bind the whole project to /workspace so host code is used
+BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
 # ---------------- Quick EGL + GPU probe (Amey-style) ----------------
 apptainer exec --nv \
@@ -130,7 +138,7 @@ apptainer exec --nv \
     ENV_CONFIG="default"
 
     # Cache build dir lives in your project directory, shared host<->container
-    CACHE_BUILD_DIR="$SLURM_SUBMIT_DIR/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
+    CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
     mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
 
     export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
