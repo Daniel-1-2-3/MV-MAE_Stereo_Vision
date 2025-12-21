@@ -156,6 +156,7 @@ apptainer exec --nv \
     echo "========================================="
 
     # Critical change: run execute.py directly from /workspace (host-mounted)
+    python -m pip install --no-cache-dir --target /workspace/.pydeps wandb
     stdbuf -oL -eL python -u execute.py \
       --render_mode rgb_array \
       --mvmae_patch_size 16 \
