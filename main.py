@@ -1,9 +1,7 @@
 from pathlib import Path
+from absl import app
 from train_drqv2_mujoco import Workshop, get_args, save_agent
+from Custom_Mujoco_Playground.learning.train_jax_ppo import main
 
 def main():
-    print("Root path:", Path.cwd())
-    args = get_args()
-    workspace = Workshop(**vars(args))
-    workspace.train()
-    save_agent(workspace.agent)
+    app.run(main)
