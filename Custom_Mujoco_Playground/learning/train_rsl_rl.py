@@ -266,8 +266,8 @@ def main(argv):
       width=640,
       scene_option=scene_option,
   )
-  media.write_video("rollout.mp4", frames, fps=fps)
-  print("Rollout video saved as 'rollout.mp4'.")
+  media.write_video("rollout.gif", frames, fps=fps)
+  print("Rollout video saved as 'rollout.gif'.")
 
 
 if __name__ == "__main__":
