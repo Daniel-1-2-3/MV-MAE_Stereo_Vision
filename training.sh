@@ -167,13 +167,6 @@ BIN_DIR="${DEPS_PREFIX}/bin"
 
 mkdir -p "$DEPS_PREFIX"
 
-# Always install wandb
-python -m pip install --no-cache-dir --upgrade --prefix "$DEPS_PREFIX" wandb
-
-# Try to install rscope, but do not fail job if it is not available on pip
-python -m pip install --no-cache-dir --upgrade --prefix "$DEPS_PREFIX" rscope || \
-  echo "NOTE: pip package '\''rscope'\'' not available; skipping."
-
 # Make prefix visible for imports + CLI entrypoints (keep /workspace first)
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
