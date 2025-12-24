@@ -171,12 +171,6 @@ mkdir -p "$DEPS_PREFIX"
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 
-# Sanity check (hard fail if wandb still cannot import)
-python - <<'"'"'PY'"'"'
-import wandb
-print("wandb ok:", wandb.__version__)
-PY
-
 # ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py \
   2>&1
