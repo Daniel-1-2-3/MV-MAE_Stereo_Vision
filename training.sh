@@ -108,6 +108,14 @@ apptainer exec --nv \
   bash -lc '
 set -e
 
+echo "=== MuJoCo version ==="
+python - <<'PY'
+import mujoco
+print("MuJoCo version:", mujoco.__version__)
+print("MuJoCo build:", mujoco.get_build_info())
+PY
+echo "======================"
+
 export PYTHONUNBUFFERED=1
 
 # JAX / XLA tuning (optional)
