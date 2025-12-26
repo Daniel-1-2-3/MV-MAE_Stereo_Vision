@@ -108,21 +108,10 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
     self._xml_path = xml_path.as_posix()
     self._model_assets = panda.get_assets()
 
-    # Resolve the Panda model from Menagerie (not mujoco_playground's mjx_panda.xml).
-    menagerie_root = mjx_env.EXTERNAL_DEPS_PATH / "mujoco_menagerie"
-    panda_xml = menagerie_root / "franka_emika_panda" / "panda.xml"  # common menagerie path
-
-    if not panda_xml.exists():
-        raise FileNotFoundError(
-            f"Expected menagerie panda model at {panda_xml}, but it does not exist. "
-            f"Menagerie root resolved to: {menagerie_root}"
-        )
-
-    # Patch the include to an absolute path so from_xml_string can find it.
-    xml_text = xml_path.read_text().replace('mjx_panda.xml', panda_xml.as_posix())
-
     mj_model = self.modify_model(
-        mujoco.MjModel.from_xml_string(xml_text, assets=self._model_assets)
+        mujoco.MjModel.from_xml_string(
+            xml_path.read_text(), assets=self._model_assets
+        )
     )
     mj_model.opt.timestep = config.sim_dt
 
