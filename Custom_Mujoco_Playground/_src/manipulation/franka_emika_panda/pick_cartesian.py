@@ -23,13 +23,12 @@ import jax.numpy as jp
 from ml_collections import config_dict
 import mujoco
 from mujoco import mjx
-import numpy as np
+import numpy as np  
 
-from Custom_Mujoco_Playground._src import mjx_env
-from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
-from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_kinematics
-from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import pick
-
+from mujoco_playground._src import mjx_env
+from mujoco_playground._src.manipulation.franka_emika_panda import panda
+from mujoco_playground._src.manipulation.franka_emika_panda import panda_kinematics
+from mujoco_playground._src.manipulation.franka_emika_panda import pick
 
 def default_vision_config() -> config_dict.ConfigDict:
   return config_dict.create(
@@ -68,7 +67,7 @@ def default_config():
           lifted_reward=0.5,
           success_reward=2.0,
       ),
-      vision=False,
+      vision=True,
       vision_config=default_vision_config(),
       obs_noise=config_dict.create(brightness=[1.0, 1.0]),
       box_init_range=0.05,
@@ -109,10 +108,21 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
     self._xml_path = xml_path.as_posix()
     self._model_assets = panda.get_assets()
 
-    mj_model = self.modify_model(
-        mujoco.MjModel.from_xml_string(
-            xml_path.read_text(), assets=self._model_assets
+    # Resolve the Panda model from Menagerie (not mujoco_playground's mjx_panda.xml).
+    menagerie_root = mjx_env.EXTERNAL_DEPS_PATH / "mujoco_menagerie"
+    panda_xml = menagerie_root / "franka_emika_panda" / "panda.xml"  # common menagerie path
+
+    if not panda_xml.exists():
+        raise FileNotFoundError(
+            f"Expected menagerie panda model at {panda_xml}, but it does not exist. "
+            f"Menagerie root resolved to: {menagerie_root}"
         )
+
+    # Patch the include to an absolute path so from_xml_string can find it.
+    xml_text = xml_path.read_text().replace('mjx_panda.xml', panda_xml.as_posix())
+
+    mj_model = self.modify_model(
+        mujoco.MjModel.from_xml_string(xml_text, assets=self._model_assets)
     )
     mj_model.opt.timestep = config.sim_dt
 
@@ -136,12 +146,11 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
       try:
         # pylint: disable=import-outside-toplevel
         from madrona_mjx.renderer import BatchRenderer  # pytype: disable=import-error
-      except ImportError:
-        warnings.warn(
-            'Madrona MJX not installed. Cannot use vision with'
-            ' PandaPickCubeCartesian.'
-        )
-        return
+      except ImportError as e:
+        raise ImportError(
+            "Madrona MJX not installed, but vision=True was requested for "
+            "PandaPickCubeCartesian. Install madrona_mjx or run with vision=False."
+        ) from e
       self.renderer = BatchRenderer(
           m=self._mjx_model,
           gpu_id=self._config.vision_config.gpu_id,
