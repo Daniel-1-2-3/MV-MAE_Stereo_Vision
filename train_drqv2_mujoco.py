@@ -385,7 +385,6 @@ def main(argv):
         wrap_env_fn=None if _VISION.value else wrapper.wrap_for_brax_training,
         num_eval_envs=num_eval_envs,
     )
-    
     # --- Speed logging state ---
     times = [time.monotonic()]  # keep your original timing list
     _speed_start_t = times[0]
