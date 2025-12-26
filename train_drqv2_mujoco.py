@@ -264,6 +264,51 @@ def main(argv):
         env_cfg.vision_config.render_batch_size = ppo_params.num_envs
 
     env = registry.load(_ENV_NAME.value, config=env_cfg)
+    
+    # === DEBUG: check if renderer outputs live on GPU or CPU
+    if _VISION.value:
+        import numpy as np
+        import jax
+
+        def _describe(name, x):
+            print(f"[debug_render_device] {name}: type={type(x)}")
+            if isinstance(x, jax.Array):
+                # JAX device array (GPU if you are on CUDA backend)
+                print(f"  -> jax.Array device={x.device()} shape={x.shape} dtype={x.dtype}")
+            elif isinstance(x, np.ndarray):
+                # Host array (CPU)
+                print(f"  -> numpy.ndarray (CPU) shape={x.shape} dtype={x.dtype}")
+            else:
+                # Could be something like a custom buffer type
+                try:
+                    shape = getattr(x, "shape", None)
+                    dtype = getattr(x, "dtype", None)
+                    print(f"  -> other buffer shape={shape} dtype={dtype}")
+                except Exception:
+                    pass
+
+        key = jax.random.PRNGKey(0)
+
+        # Call reset ONCE (not jitted here) to initialize render_token + first rgb
+        s = env.reset(key)
+
+        # What the env is feeding into the policy
+        pix = s.obs.get("pixels/view_0", None)
+        _describe("obs['pixels/view_0']", pix)
+
+        # What the renderer returns at runtime
+        token = s.info.get("render_token", None)
+        _describe("render_token", token)
+
+        # Render one frame using the same call path as env.step()
+        _, rgb, _ = env.renderer.render(token, s.data, env._mjx_model)
+        _describe("renderer.render -> rgb", rgb)
+
+        # If rgb is batched, inspect first element too
+        try:
+            _describe("renderer.render -> rgb[0]", rgb[0])
+        except Exception:
+            pass
 
     if _RUN_EVALS.present:
         ppo_params.run_evals = _RUN_EVALS.value
