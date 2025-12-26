@@ -274,7 +274,8 @@ def main(argv):
             print(f"[debug_render_device] {name}: type={type(x)}")
             if isinstance(x, jax.Array):
                 # JAX device array (GPU if you are on CUDA backend)
-                print(f"  -> jax.Array device={x.device()} shape={x.shape} dtype={x.dtype}")
+                dev = x.device if hasattr(x, "device") and not callable(getattr(x, "device", None)) else x.device()
+                print(f"  -> jax.Array device={dev} shape={x.shape} dtype={x.dtype}")
             elif isinstance(x, np.ndarray):
                 # Host array (CPU)
                 print(f"  -> numpy.ndarray (CPU) shape={x.shape} dtype={x.dtype}")
