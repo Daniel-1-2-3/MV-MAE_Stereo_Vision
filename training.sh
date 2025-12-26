@@ -170,6 +170,8 @@ mkdir -p "$DEPS_PREFIX"
 # Make prefix visible for imports + CLI entrypoints (keep /workspace first)
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
+mkdir -p /workspace/mujoco_playground_deps
+export MUJOCO_PLAYGROUND_EXTERNAL_DEPS_PATH=/workspace/mujoco_playground_deps
 
 # ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py \
