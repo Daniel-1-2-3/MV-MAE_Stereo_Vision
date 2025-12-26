@@ -112,7 +112,7 @@ _LEARNING_RATE = flags.DEFINE_float("learning_rate", 5e-4, "Learning rate")
 _ENTROPY_COST = flags.DEFINE_float("entropy_cost", 5e-3, "Entropy cost")
 _NUM_ENVS = flags.DEFINE_integer("num_envs", 128, "Number of environments")
 _NUM_EVAL_ENVS = flags.DEFINE_integer(
-    "num_eval_envs", 32, "Number of evaluation environments"
+    "num_eval_envs", 64, "Number of evaluation environments"
 )
 _BATCH_SIZE = flags.DEFINE_integer("batch_size", 256, "Batch size")
 _MAX_GRAD_NORM = flags.DEFINE_float("max_grad_norm", 1.0, "Max grad norm")
@@ -400,11 +400,14 @@ def main(argv):
                 )
 
     # Load evaluation environment.
-    eval_env = None
+    eval_env = env
+    """
+    Replaced with eval_env = env to avoid more than 1 env
     if _VISION.value:
         eval_env = env
     else:
         eval_env = registry.load(_ENV_NAME.value, config=env_cfg)
+    """
 
     num_envs = 1
     if _VISION.value:
