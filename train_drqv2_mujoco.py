@@ -258,6 +258,7 @@ def main(argv):
         ppo_params.network_factory.policy_obs_key = _POLICY_OBS_KEY.value
     if _VALUE_OBS_KEY.present:
         ppo_params.network_factory.value_obs_key = _VALUE_OBS_KEY.value
+
     if _VISION.value:
         env_cfg.vision = True
         env_cfg.vision_config.render_batch_size = ppo_params.num_envs
@@ -270,6 +271,16 @@ def main(argv):
         ppo_params.log_training_metrics = _LOG_TRAINING_METRICS.value
     if _TRAINING_METRICS_STEPS.present:
         ppo_params.training_metrics_steps = _TRAINING_METRICS_STEPS.value
+
+    # === CHANGE (commented): Madrona backend cannot use built-in eval_env/run_evals ===
+    # Brax PPO's Madrona validation fails if eval rollouts are enabled / eval_env provided,
+    # even if eval_env points at the same Python object as env.
+    # So: force run_evals off when madrona_backend is true.
+    if getattr(ppo_params, "madrona_backend", False):
+        ppo_params.run_evals = False
+        # Optional: also zero num_evals to reduce confusion (train loop won't eval anyway).
+        ppo_params.num_evals = 0
+    # === END CHANGE ===
 
     print(f"Environment Config:\n{env_cfg}")
     print(f"PPO Training Parameters:\n{ppo_params}")
@@ -390,8 +401,13 @@ def main(argv):
             for key, value in metrics.items():
                 writer.add_scalar(key, value, num_steps)
             writer.flush()
-        if _RUN_EVALS.value:
+
+        # === CHANGE (commented): don't assume eval metrics exist ===
+        # If run_evals is disabled (Madrona backend), eval/episode_reward won't be present.
+        if _RUN_EVALS.value and "eval/episode_reward" in metrics:
             print(f"{num_steps}: reward={metrics['eval/episode_reward']:.3f}")
+        # === END CHANGE ===
+
         if _LOG_TRAINING_METRICS.value:
             if "episode/sum_reward" in metrics:
                 print(
@@ -400,14 +416,11 @@ def main(argv):
                 )
 
     # Load evaluation environment.
-    eval_env = env
-    """
-    Replaced with eval_env = env to avoid more than 1 env
-    if _VISION.value:
-        eval_env = env
-    else:
-        eval_env = registry.load(_ENV_NAME.value, config=env_cfg)
-    """
+    # === CHANGE (commented): DO NOT provide eval_env to ppo.train under Madrona ===
+    # Even if you set eval_env = env, Brax's Madrona validation still rejects having
+    # an eval_env argument / eval rollouts enabled. So pass eval_env=None.
+    eval_env = None
+    # === END CHANGE ===
 
     num_envs = 1
     if _VISION.value:
@@ -463,6 +476,11 @@ def main(argv):
     jit_inference_fn = jax.jit(inference_fn)
 
     # Run evaluation rollouts.
+    # === CHANGE (commented): use the training env instance for post-training rollouts ===
+    # Since eval_env is None during training (Madrona constraint), use env here.
+    rollout_env = env
+    # === END CHANGE ===
+
     def do_rollout(rng, state):
         empty_data = state.data.__class__(
             **{k: None for k in state.data.__annotations__}
@@ -474,7 +492,7 @@ def main(argv):
             state, rng = carry
             rng, act_key = jax.random.split(rng)
             act = jit_inference_fn(state.obs, act_key)[0]
-            state = eval_env.step(state, act)
+            state = rollout_env.step(state, act)
             traj_data = empty_traj.tree_replace({
                 "data.qpos": state.data.qpos,
                 "data.qvel": state.data.qvel,
@@ -494,7 +512,7 @@ def main(argv):
         return traj
 
     rng = jax.random.split(jax.random.PRNGKey(_SEED.value), _NUM_VIDEOS.value)
-    reset_states = jax.jit(jax.vmap(eval_env.reset))(rng)
+    reset_states = jax.jit(jax.vmap(rollout_env.reset))(rng)
     if _VISION.value:
         reset_states = jax.tree_util.tree_map(lambda x: x[0], reset_states)
     traj_stacked = jax.jit(jax.vmap(do_rollout))(rng, reset_states)
@@ -508,7 +526,7 @@ def main(argv):
 
     # Render and save the rollout.
     render_every = 2
-    fps = 1.0 / eval_env.dt / render_every
+    fps = 1.0 / rollout_env.dt / render_every
     print(f"FPS for rendering: {fps}")
     scene_option = mujoco.MjvOption()
     scene_option.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
@@ -516,7 +534,7 @@ def main(argv):
     scene_option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = False
     for i, rollout in enumerate(trajectories):
         traj = rollout[::render_every]
-        frames = eval_env.render(
+        frames = rollout_env.render(
             traj, height=480, width=640, scene_option=scene_option
         )
         media.write_video(f"rollout{i}.gif", frames, fps=fps)
