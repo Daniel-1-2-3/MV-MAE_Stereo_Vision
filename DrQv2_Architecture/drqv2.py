@@ -1,67 +1,67 @@
-import numpy as np
-import time
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 import DrQv2_Architecture.utils as utils
 from MAE_Model.model import MAEModel
 from MAE_Model.encoder import ViTMaskedEncoder
 from gymnasium.spaces import Box
 
+from typing import Tuple
+import jax.numpy as jnp
+from flax import linen as nn
+
 class Actor(nn.Module):
-    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
-        super().__init__()
+    repr_dim: int
+    action_shape: Tuple[int, ...]
+    feature_dim: int
+    hidden_dim: int
 
-        self.trunk = nn.Sequential(
-            nn.Linear(repr_dim, feature_dim),
-            nn.LayerNorm(feature_dim), nn.Tanh()
-        )
+    @nn.compact
+    def __call__(self, obs: jnp.ndarray, std):
+        # trunk: Linear -> LayerNorm -> Tanh
+        h = nn.Dense(self.feature_dim, name="trunk_dense")(obs)
+        h = nn.LayerNorm(name="trunk_ln")(h)
+        h = jnp.tanh(h)
 
-        self.policy = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, action_shape[0])
-        )
+        # policy: Linear -> ReLU -> Linear -> ReLU -> Linear
+        x = nn.Dense(self.hidden_dim, name="pi_fc1")(h)
+        x = nn.relu(x)
+        x = nn.Dense(self.hidden_dim, name="pi_fc2")(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.action_shape[0], name="pi_out")(x)
 
-        self.apply(utils.weight_init)
-
-    def forward(self, obs, std):
-        h = self.trunk(obs)
-
-        mu = self.policy(h)
-        mu = torch.tanh(mu)
-        std = torch.ones_like(mu) * std
+        mu = jnp.tanh(x)
+        std = jnp.ones_like(mu) * std
 
         dist = utils.TruncatedNormal(mu, std)
         return dist
 
 class Critic(nn.Module):
-    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
-        super().__init__()
+    repr_dim: int
+    action_shape: Tuple[int, ...]
+    feature_dim: int
+    hidden_dim: int
 
-        self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim),
-                                   nn.LayerNorm(feature_dim), nn.Tanh())
+    @nn.compact
+    def __call__(self, obs: jnp.ndarray, action: jnp.ndarray):
+        # trunk: Linear -> LayerNorm -> Tanh
+        h = nn.Dense(self.feature_dim, name="trunk_dense")(obs)
+        h = nn.LayerNorm(name="trunk_ln")(h)
+        h = jnp.tanh(h)
 
-        self.Q1 = nn.Sequential(
-            nn.Linear(feature_dim + action_shape[0], hidden_dim),
-            nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
+        # torch.cat([h, action], dim=-1)
+        h_action = jnp.concatenate([h, action], axis=-1)
 
-        self.Q2 = nn.Sequential(
-            nn.Linear(feature_dim + action_shape[0], hidden_dim),
-            nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
+        # Q1: Linear -> ReLU -> Linear -> ReLU -> Linear -> (1)
+        q1 = nn.Dense(self.hidden_dim, name="q1_fc1")(h_action)
+        q1 = nn.relu(q1)
+        q1 = nn.Dense(self.hidden_dim, name="q1_fc2")(q1)
+        q1 = nn.relu(q1)
+        q1 = nn.Dense(1, name="q1_out")(q1)
 
-        self.apply(utils.weight_init)
-
-    def forward(self, obs, action):
-        h = self.trunk(obs)
-        h_action = torch.cat([h, action], dim=-1)
-        q1 = self.Q1(h_action)
-        q2 = self.Q2(h_action)
+        # Q2: Linear -> ReLU -> Linear -> ReLU -> Linear -> (1)
+        q2 = nn.Dense(self.hidden_dim, name="q2_fc1")(h_action)
+        q2 = nn.relu(q2)
+        q2 = nn.Dense(self.hidden_dim, name="q2_fc2")(q2)
+        q2 = nn.relu(q2)
+        q2 = nn.Dense(1, name="q2_out")(q2)
 
         return q1, q2
 class DrQV2Agent:

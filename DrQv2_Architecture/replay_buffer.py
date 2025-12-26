@@ -1,187 +1,195 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-import datetime
-import io
-import random
-import traceback
-from collections import defaultdict
+from __future__ import annotations
+from dataclasses import dataclass
 from typing import Tuple
-from dm_env import specs
-from pathlib import Path
 
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import IterableDataset
-from DrQv2_Architecture.env_wrappers import ExtendedTimeStep
+import jax
+import jax.numpy as jnp
 
-def episode_len(episode):
-    # subtract -1 because the dummy first transition
-    return next(iter(episode.values())).shape[0] - 1
+@dataclass(frozen=True)
+class ReplayBufferState:
+    # Ring storage: [capacity, ...]
+    obs: jnp.ndarray        # [C, H, 2W, 3]?? NO: we store per-transition obs: [capacity, H, 2W, 3]
+    action: jnp.ndarray     # [capacity, act_dim]
+    reward: jnp.ndarray     # [capacity, 1] or [capacity,] (match your pipeline)
+    discount: jnp.ndarray   # [capacity, 1] or [capacity,]
+    done: jnp.ndarray       # [capacity,] bool
 
-def save_episode(episode, fn):
-    with io.BytesIO() as bs:
-        np.savez_compressed(bs, **episode)
-        bs.seek(0)
-        with fn.open('wb') as f:
-            f.write(bs.read())
+    # Ring pointers
+    ptr: jnp.ndarray        # scalar int32: next write index (physical)
+    size: jnp.ndarray       # scalar int32: number of valid items (<= capacity)
 
-def load_episode(fn):
-    with fn.open('rb') as f:
-        episode = np.load(f)
-        episode = {k: episode[k] for k in episode.keys()}
-        return episode
+    capacity: int           # static python int (kept in pytree as static via dataclass usage)
 
-class ReplayBufferStorage:
-    def __init__(self, data_specs: Tuple[specs.Array, ...], replay_dir: Path):
-        self._data_specs = data_specs
-        self._replay_dir = replay_dir
-        replay_dir.mkdir(exist_ok=True)
-        self._current_episode = defaultdict(list)
-        self._preload()
+def rb_init(
+    capacity: int,
+    obs_shape: Tuple[int, int, int],     # (H, 2W, 3)
+    action_shape: Tuple[int, ...],       # (act_dim,)
+    reward_shape: Tuple[int, ...] = (1,),
+    discount_shape: Tuple[int, ...] = (1,),
+    obs_dtype=jnp.float32,
+    action_dtype=jnp.float32,
+    reward_dtype=jnp.float32,
+    discount_dtype=jnp.float32,
+) -> ReplayBufferState:
+    H, W2, C = obs_shape
+    return ReplayBufferState(
+        obs=jnp.zeros((capacity, H, W2, C), dtype=obs_dtype),
+        action=jnp.zeros((capacity, *action_shape), dtype=action_dtype),
+        reward=jnp.zeros((capacity, *reward_shape), dtype=reward_dtype),
+        discount=jnp.ones((capacity, *discount_shape), dtype=discount_dtype),
+        done=jnp.zeros((capacity,), dtype=jnp.bool_),
+        ptr=jnp.array(0, jnp.int32),
+        size=jnp.array(0, jnp.int32),
+        capacity=capacity,
+    )
 
-    def __len__(self):
-        return self._num_transitions
+def _ring_phys_index(rb: ReplayBufferState, t_logical: jnp.ndarray) -> jnp.ndarray:
+    """
+    Map logical time index t in [0, size) to physical ring index in [0, capacity).
+    Oldest element is logical t=0.
+    """
+    # Oldest element sits at: start = (ptr - size) mod capacity
+    start = (rb.ptr - rb.size) % rb.capacity
+    return (start + t_logical) % rb.capacity
 
-    def add(self, time_step: ExtendedTimeStep):
-        for spec in self._data_specs:
-            value = time_step[spec.name]
-            if np.isscalar(value):
-                value = np.full(spec.shape, value, spec.dtype)
-            assert spec.shape == value.shape and spec.dtype == value.dtype
-            self._current_episode[spec.name].append(value)
-        if time_step.last():
-            episode = dict()
-            for spec in self._data_specs:
-                value = self._current_episode[spec.name]
-                episode[spec.name] = np.array(value, spec.dtype)
-            self._current_episode = defaultdict(list)
-            self._store_episode(episode)
+@jax.jit
+def rb_add(
+    rb: ReplayBufferState,
+    obs_b: jnp.ndarray,       # [B, H, 2W, 3]  (your fused normalized output)
+    action_b: jnp.ndarray,    # [B, act_dim]
+    reward_b: jnp.ndarray,    # [B, ...]
+    discount_b: jnp.ndarray,  # [B, ...]
+    done_b: jnp.ndarray,      # [B] bool
+) -> ReplayBufferState:
+    """
+    Fully jittable batched add. Writes B transitions into the ring.
+    """
+    B = obs_b.shape[0]
+    idxs = (rb.ptr + jnp.arange(B, dtype=jnp.int32)) % rb.capacity
 
-    def _preload(self):
-        self._num_episodes = 0
-        self._num_transitions = 0
-        for fn in self._replay_dir.glob('*.npz'):
-            _, _, eps_len = fn.stem.split('_')
-            self._num_episodes += 1
-            self._num_transitions += int(eps_len)
+    new_obs = rb.obs.at[idxs].set(obs_b)
+    new_action = rb.action.at[idxs].set(action_b)
+    new_reward = rb.reward.at[idxs].set(reward_b)
+    new_discount = rb.discount.at[idxs].set(discount_b)
+    new_done = rb.done.at[idxs].set(done_b)
 
-    def _store_episode(self, episode):
-        eps_idx = self._num_episodes
-        eps_len = episode_len(episode)
-        self._num_episodes += 1
-        self._num_transitions += eps_len
-        ts = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
-        eps_fn = f'{ts}_{eps_idx}_{eps_len}.npz'
-        save_episode(episode, self._replay_dir / eps_fn)
+    new_ptr = (rb.ptr + B) % rb.capacity
+    new_size = jnp.minimum(rb.size + B, rb.capacity)
 
-class ReplayBuffer(IterableDataset):
-    def __init__(self, replay_dir, max_size, num_workers, nstep, discount,
-                 fetch_every, save_snapshot):
-        self._replay_dir = replay_dir
-        self._size = 0
-        self._max_size = max_size
-        self._num_workers = max(1, num_workers)
-        self._episode_fns = []
-        self._episodes = dict()
-        self._nstep = nstep
-        self._discount = discount
-        self._fetch_every = fetch_every
-        self._samples_since_last_fetch = fetch_every
-        self._save_snapshot = save_snapshot
+    return ReplayBufferState(
+        obs=new_obs,
+        action=new_action,
+        reward=new_reward,
+        discount=new_discount,
+        done=new_done,
+        ptr=new_ptr,
+        size=new_size,
+        capacity=rb.capacity,
+    )
 
-    def _sample_episode(self):
-        eps_fn = random.choice(self._episode_fns)
-        return self._episodes[eps_fn]
+def _valid_start(rb: ReplayBufferState, t: jnp.ndarray, nstep: int) -> jnp.ndarray:
+    """
+    Valid if:
+      - t+nstep < size  (so next_obs exists)
+      - no terminal inside [t, t+nstep-1] in the rollout window
+    """
+    # Must have indices t ... t+nstep (for next_obs at t+nstep)
+    enough_room = (t + nstep) < rb.size
 
-    def _store_episode(self, eps_fn):
-        try:
-            episode = load_episode(eps_fn)
-        except:
-            return False
-        eps_len = episode_len(episode)
-        while eps_len + self._size > self._max_size:
-            early_eps_fn = self._episode_fns.pop(0)
-            early_eps = self._episodes.pop(early_eps_fn)
-            self._size -= episode_len(early_eps)
-            early_eps_fn.unlink(missing_ok=True)
-        self._episode_fns.append(eps_fn)
-        self._episode_fns.sort()
-        self._episodes[eps_fn] = episode
-        self._size += eps_len
+    # Check done in the rollout window [t, t+nstep-1]
+    # We'll gather done via physical indices
+    ts = t + jnp.arange(nstep, dtype=jnp.int32)  # length nstep
+    phys = jax.vmap(lambda tt: _ring_phys_index(rb, tt))(ts)
+    done_any = jnp.any(rb.done[phys])
 
-        if not self._save_snapshot:
-            eps_fn.unlink(missing_ok=True)
-        return True
+    return enough_room & (~done_any)
 
-    def _try_fetch(self):
-        if self._samples_since_last_fetch < self._fetch_every:
-            return
-        self._samples_since_last_fetch = 0
-        try:
-            worker_id = torch.utils.data.get_worker_info().id
-        except:
-            worker_id = 0
-        eps_fns = sorted(self._replay_dir.glob('*.npz'), reverse=True)
-        fetched_size = 0
-        for eps_fn in eps_fns:
-            eps_idx, eps_len = [int(x) for x in eps_fn.stem.split('_')[1:]]
-            if eps_idx % self._num_workers != worker_id:
-                continue
-            if eps_fn in self._episodes.keys():
-                break
-            if fetched_size + eps_len > self._max_size:
-                break
-            fetched_size += eps_len
-            if not self._store_episode(eps_fn):
-                break
-            
-    def _sample(self):
-        # Resample if it is an very short episode (ie only 2 steps long). Prevents crash.
-        while True:
-            try:
-                self._try_fetch()
-            except:
-                traceback.print_exc()
-            self._samples_since_last_fetch += 1
+def rb_sample(rb: ReplayBufferState, key: jax.Array, batch_size: int, nstep: int, gamma: float):
+    """
+    Fully jittable sampling.
+    Returns (obs, action, reward_n, discount_n, next_obs) with batch dimension first.
 
-            episode = self._sample_episode()
-            T = episode_len(episode)
-            max_start = T - self._nstep + 1
+    batch_size, nstep should be static for best compile behavior.
+    """
+    # If not enough data, return zeros (still jittable)
+    min_needed = nstep + 1
 
-            # If the episode is too short for n-step, skip it and try another one
-            if max_start <= 0:
-                continue
+    def empty():
+        # shape-correct zero batch
+        obs0 = jnp.zeros((batch_size,) + rb.obs.shape[1:], rb.obs.dtype)
+        act0 = jnp.zeros((batch_size,) + rb.action.shape[1:], rb.action.dtype)
+        rew0 = jnp.zeros((batch_size,) + rb.reward.shape[1:], rb.reward.dtype)
+        disc0 = jnp.ones((batch_size,) + rb.discount.shape[1:], rb.discount.dtype)
+        nxt0 = jnp.zeros((batch_size,) + rb.obs.shape[1:], rb.obs.dtype)
+        return obs0, act0, rew0, disc0, nxt0
 
-            # add +1 for the first dummy transition (keeps original indexing)
-            idx = np.random.randint(0, max_start) + 1
+    def nonempty():
+        # We do bounded retry inside jit by oversampling candidates and picking the first valid.
+        # Oversample factor: 8 candidates per sample (tune if you have very short episodes).
+        K = 8
+        max_t = rb.size - min_needed  # max start logical index inclusive
+        max_t = jnp.maximum(max_t, 0)
 
-            obs = episode['observation'][idx - 1]
-            action = episode['action'][idx]
-            next_obs = episode['observation'][idx + self._nstep - 1]
-            reward = np.zeros_like(episode['reward'][idx])
-            discount = np.ones_like(episode['discount'][idx])
+        # candidates: [batch_size, K]
+        key1, key2 = jax.random.split(key)
+        cand = jax.random.randint(key1, (batch_size, K), 0, max_t + 1, dtype=jnp.int32)
 
-            for i in range(self._nstep):
-                step_reward = episode['reward'][idx + i]
-                reward += discount * step_reward
-                discount *= episode['discount'][idx + i] * self._discount
+        # validity mask: [batch_size, K]
+        valid = jax.vmap(lambda row: jax.vmap(lambda t: _valid_start(rb, t, nstep))(row))(cand)
 
-            return (obs, action, reward, discount, next_obs)
+        # pick first valid (or fallback to cand[:,0] if none valid)
+        first_idx = jnp.argmax(valid, axis=1)  # returns 0 if all False
+        has_any = jnp.any(valid, axis=1)
 
-    def __iter__(self):
-        while True:
-            yield self._sample()
-    
-def _worker_init_fn(worker_id):
-    seed = np.random.get_state()[1][0] + worker_id
-    np.random.seed(int(seed))
-    random.seed(int(seed))
+        chosen = cand[jnp.arange(batch_size), first_idx]
+        chosen = jnp.where(has_any, chosen, cand[:, 0])
 
-def make_replay_loader(replay_dir, max_size, batch_size, num_workers, save_snapshot, nstep, discount):
-    max_size_per_worker = max_size // max(1, num_workers)
-    iterable = ReplayBuffer(replay_dir, max_size_per_worker, num_workers, nstep, discount, fetch_every=1000, save_snapshot=save_snapshot)
-    loader = torch.utils.data.DataLoader(iterable, batch_size=batch_size, num_workers=num_workers, pin_memory=True, worker_init_fn=_worker_init_fn)
-    return loader
+        # gather obs/action at start
+        phys0 = jax.vmap(lambda t: _ring_phys_index(rb, t))(chosen)
+        obs = rb.obs[phys0]
+        action = rb.action[phys0]
+
+        # n-step accumulate reward/discount exactly like your loop:
+        #   reward += disc * step_reward
+        #   disc *= step_discount * gamma
+        def one_sample(t0):
+            # gather sequences of length nstep for reward/discount
+            ts = t0 + jnp.arange(nstep, dtype=jnp.int32)
+            phys = jax.vmap(lambda tt: _ring_phys_index(rb, tt))(ts)
+
+            r_seq = rb.reward[phys]      # [nstep, ...]
+            d_seq = rb.discount[phys]    # [nstep, ...]
+
+            r_acc = jnp.zeros_like(r_seq[0])
+            d_acc = jnp.ones_like(d_seq[0])
+
+            def body(i, carry):
+                r, d = carry
+                r = r + d * r_seq[i]
+                d = d * d_seq[i] * gamma
+                return (r, d)
+
+            r_acc, d_acc = jax.lax.fori_loop(0, nstep, body, (r_acc, d_acc))
+            return r_acc, d_acc
+
+        reward_n, discount_n = jax.vmap(one_sample)(chosen)
+
+        # next_obs at t+nstep
+        phys_next = jax.vmap(lambda t: _ring_phys_index(rb, t + nstep))(chosen)
+        next_obs = rb.obs[phys_next]
+
+        return obs, action, reward_n, discount_n, next_obs
+
+    return jax.lax.cond(rb.size < min_needed, empty, nonempty)
+
+# Make batch_size and nstep static (recommended)
+rb_sample_jit = jax.jit(rb_sample, static_argnames=("batch_size", "nstep"))
+
+"""
+# add transitions
+rb = rb_add(rb, obs_fused, action, reward, discount, done)
+
+# sample a training batch
+rng, k = jax.random.split(rng)
+obs_b, act_b, rew_b, disc_b, next_obs_b = rb_sample_jit(rb, k, batch_size=256, nstep=3, gamma=0.99)
+"""
