@@ -121,16 +121,13 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
     # Set gripper in sight of camera
     self._post_init(obj_name='box', keyframe='low_home')
     self._box_geom = self._mj_model.geom('box').id
-
-    # Contact sensor ID.
-    self._box_hand_found_sensor = self._mj_model.sensor('box_hand_found').id
-
-    # Contact sensor IDs.
-    self._floor_hand_found_sensor = [
-        self._mj_model.sensor(f"{geom}_floor_found").id
-        for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
-    ]
-
+    
+    # Geom IDs for distance-based "contacts" (MuJoCo 3.3.4-safe)
+    self._hand_capsule_geom = self._mj_model.geom('hand_capsule').id
+    self._left_pad_geom = self._mj_model.geom('left_finger_pad').id
+    self._right_pad_geom = self._mj_model.geom('right_finger_pad').id
+    self._floor_geom = self._mj_model.geom('floor').id  # not strictly needed for z-checks
+    
     if self._vision:
       try:
         # pylint: disable=import-outside-toplevel
@@ -329,18 +326,24 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
 
     # Dense rewards
     raw_rewards = self._get_reward(data, state.info)
+    # distance-based penalties (add into raw_rewards BEFORE scaling)
+    hand_pos = data.geom_xpos[self._hand_capsule_geom]
+    box_pos_g = data.geom_xpos[self._box_geom]
+    hand_box_dist = jp.linalg.norm(hand_pos - box_pos_g)
+    hand_box = hand_box_dist < 0.02
+    raw_rewards['no_box_collision'] = jp.where(hand_box, 0.0, 1.0)
+
+    lp_z = data.geom_xpos[self._left_pad_geom][2]
+    rp_z = data.geom_xpos[self._right_pad_geom][2]
+    hc_z = data.geom_xpos[self._hand_capsule_geom][2]
+    floor_hit = (lp_z < 0.002) | (rp_z < 0.002) | (hc_z < 0.002)
+    raw_rewards['no_floor_collision'] = jp.where(floor_hit, 0.0, 1.0)
+
+    # scale everything
     rewards = {
         k: v * self._config.reward_config.reward_scales[k]
         for k, v in raw_rewards.items()
     }
-
-    # Penalize collision with box.
-    hand_box = (
-        data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]]
-        > 0
-    )
-    raw_rewards['no_box_collision'] = jp.where(hand_box, 0.0, 1.0)
-
     total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
     if not self._vision:

@@ -112,7 +112,6 @@ echo "=== MuJoCo version ==="
 python - <<'PY'
 import mujoco
 print("MuJoCo version:", mujoco.__version__)
-print("MuJoCo build:", mujoco.get_build_info())
 PY
 echo "======================"
 
