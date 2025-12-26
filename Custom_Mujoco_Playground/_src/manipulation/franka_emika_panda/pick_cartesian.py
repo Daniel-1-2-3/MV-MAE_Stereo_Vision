@@ -402,7 +402,7 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
     obs = self._get_obs(data, state.info)
     obs = jp.concat([obs, no_soln.reshape(1), action], axis=0)
     if self._vision:
-      _, rgb, _ = self.renderer.render(state.info['render_token'], data)
+      _, rgb, _ = self.renderer.render(state.info['render_token'], data, self._mjx_model)
       obs = jp.asarray(rgb[0][..., :3], dtype=jp.float32) / 255.0
       obs = adjust_brightness(obs, state.info['brightness'])
       obs = {'pixels/view_0': obs}
