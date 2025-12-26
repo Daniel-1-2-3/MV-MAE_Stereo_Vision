@@ -385,12 +385,36 @@ def main(argv):
         wrap_env_fn=None if _VISION.value else wrapper.wrap_for_brax_training,
         num_eval_envs=num_eval_envs,
     )
-
-    times = [time.monotonic()]
+    
+    # --- Speed logging state ---
+    times = [time.monotonic()]  # keep your original timing list
+    _speed_start_t = times[0]
+    _speed_last_t = times[0]
+    _speed_last_steps = 0
 
     # Progress function for logging
     def progress(num_steps, metrics):
-        times.append(time.monotonic())
+        nonlocal _speed_last_t, _speed_last_steps
+
+        now_t = time.monotonic()
+        times.append(now_t)
+
+        # --- Periodic speed logs (every progress callback) ---
+        dt = now_t - _speed_last_t
+        dsteps = num_steps - _speed_last_steps
+        if dt > 0 and dsteps > 0:
+            sps = dsteps / dt
+            sec_per_step = dt / dsteps
+            avg_sps = num_steps / max(1e-9, (now_t - _speed_start_t))
+            print(
+                f"[speed] steps={num_steps}  "
+                f"inst={sps:,.1f} steps/s  "
+                f"inst={sec_per_step*1e3:.3f} ms/step  "
+                f"avg={avg_sps:,.1f} steps/s"
+            )
+
+        _speed_last_t = now_t
+        _speed_last_steps = num_steps
 
         # Log to Weights & Biases
         if _USE_WANDB.value and not _PLAY_ONLY.value:
@@ -402,11 +426,9 @@ def main(argv):
                 writer.add_scalar(key, value, num_steps)
             writer.flush()
 
-        # === CHANGE (commented): don't assume eval metrics exist ===
-        # If run_evals is disabled (Madrona backend), eval/episode_reward won't be present.
+        # Don't assume eval metrics exist
         if _RUN_EVALS.value and "eval/episode_reward" in metrics:
             print(f"{num_steps}: reward={metrics['eval/episode_reward']:.3f}")
-        # === END CHANGE ===
 
         if _LOG_TRAINING_METRICS.value:
             if "episode/sum_reward" in metrics:
