@@ -70,10 +70,15 @@ GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
 # ---------------- Binds ----------------
+# ---- mujoco_playground external_deps fix (site-packages is read-only) ----
+HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
+mkdir -p "$HOST_MJP_DEPS"
+MJP_DEPS_IN_CONTAINER="/opt/mvmae_venv/lib/python3.12/site-packages/mujoco_playground/external_deps"
 BIND_FLAGS=( --bind "$HOST_PROJECT_ROOT:$HOST_PROJECT_ROOT" )
 BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d" )
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
+BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 
 # Critical bind: mount the entire project to /workspace
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
@@ -170,8 +175,6 @@ mkdir -p "$DEPS_PREFIX"
 # Make prefix visible for imports + CLI entrypoints (keep /workspace first)
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
-mkdir -p /workspace/mujoco_playground_deps
-export MUJOCO_PLAYGROUND_EXTERNAL_DEPS_PATH=/workspace/mujoco_playground_deps
 
 # ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py \
