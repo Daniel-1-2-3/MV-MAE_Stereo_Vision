@@ -127,7 +127,12 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
     self._left_pad_geom = self._mj_model.geom('left_finger_pad').id
     self._right_pad_geom = self._mj_model.geom('right_finger_pad').id
     self._floor_geom = self._mj_model.geom('floor').id  # not strictly needed for z-checks
-    
+    self._floor_hand_geom_ids = [
+        self._hand_capsule_geom,
+        self._left_pad_geom,
+        self._right_pad_geom,
+    ]
+        
     if self._vision:
       try:
         # pylint: disable=import-outside-toplevel
