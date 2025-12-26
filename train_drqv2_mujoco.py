@@ -1,357 +1,519 @@
-import warnings
-warnings.filterwarnings('ignore', category=DeprecationWarning)
+# Copyright 2025 DeepMind Technologies Limited
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""Train a PPO agent using JAX on the specified environment."""
 
+import datetime
+import functools
+import json
 import os
-# On the cluster we want EGL. training.sh already sets MUJOCO_GL/MUJOCO_PLATFORM/PYOPENGL_PLATFORM.
-# Only set sensible defaults if they are missing (e.g., when running locally).
-os.environ.setdefault("MUJOCO_GL", "glfw")
-os.environ.setdefault("MUJOCO_PLATFORM", "glfw")
-os.environ.setdefault("PYOPENGL_PLATFORM", "glfw")
-os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
-
-from pathlib import Path
-import numpy as np
-import torch
 import time
-import argparse
+import warnings
+
+from absl import app
+from absl import flags
+from absl import logging
+from brax.training.agents.ppo import networks as ppo_networks
+from brax.training.agents.ppo import networks_vision as ppo_networks_vision
+from brax.training.agents.ppo import train as ppo
+from etils import epath
 import jax
-from dm_env import specs
-import DrQv2_Architecture.utils as utils
-from DrQv2_Architecture.logger import Logger
-from DrQv2_Architecture.replay_buffer import ReplayBufferStorage, make_replay_loader
-from DrQv2_Architecture.video import VideoRecorder
-from DrQv2_Architecture.drqv2 import DrQV2Agent
-from DrQv2_Architecture.env_wrappers import ExtendedTimeStepWrapper, ActionRepeatWrapper, FrameStackWrapper
-from Mujoco_Sim.mujoco_pick_env import StereoPickCube
-from gymnasium.spaces import Box
+import jax.numpy as jp
+import mediapy as media
+from ml_collections import config_dict
+import mujoco
+import Custom_Mujoco_Playground
+from Custom_Mujoco_Playground import registry
+from Custom_Mujoco_Playground import wrapper
+from Custom_Mujoco_Playground.config import dm_control_suite_params
+from Custom_Mujoco_Playground.config import locomotion_params
+from Custom_Mujoco_Playground.config import manipulation_params
+import tensorboardX
+import wandb
 
-torch.backends.cudnn.benchmark = True
+xla_flags = os.environ.get("XLA_FLAGS", "")
+xla_flags += " --xla_gpu_triton_gemm_any=True"
+os.environ["XLA_FLAGS"] = xla_flags
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["MUJOCO_GL"] = "egl"
 
-class Workshop:
-    def __init__(
-        self,
-        # General variables
-        device: torch.device | None = None,
-        # RL training
-        buffer_size: int = 100_000,
-        total_timesteps: int = 500_000,
-        learning_starts: int = 10_000, # Turn on grads at step and start training at step n
-        num_expl_steps: int = 5000, # Random actions (not policy determined) until step n
-        episode_horizon: int = 300, # Truncates episode after 300 steps
-        batch_size: int = 64,
-        critic_target_tau: float = 0.001, # Soft-update for target critic
-        update_every_steps: int = 2,
-        update_mvmae_every_steps: int = 10,
-        stddev_schedule: str = 'linear(1.0,0.1,500000)', # Type of scheduler, value taken from cfgs/task/medium.yaml, stddev for exploration noise
-        stddev_clip: int = 0.3, # How much to clip sampled action noise
-        use_tb: bool = True,
-        lr: float = 1e-4,
-        discount: float = 0.99,
-        action_repeat: int = 2,
-        # MVMAE variables
-        nviews: int = 2,
-        mvmae_patch_size: int = 8,
-        mvmae_encoder_embed_dim: int = 256,
-        mvmae_decoder_embed_dim: int = 128, 
-        mvmae_encoder_heads: int = 16, 
-        mvmae_decoder_heads: int = 16,
-        masking_ratio: float = 0.75,
-        coef_mvmae: float = 0.005,
-        # Actor + critic 
-        feature_dim: int = 100,
-        hidden_dim: int = 1024,
-        # Image specs
-        render_mode: str = "rgb_array",
-        in_channels: int = 3 * 3, # Number of frames stacked * 3 (RGB)
-        img_h_size: int = 64,
-        img_w_size: int = 64,
-    ):  
-        # Overall obs space expects frame stacked obs, sawyer env expects single image
-        self.overall_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels), dtype=np.float32)
-        self.mujoco_env_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels // 3), dtype=np.float32)
-        self.action_space = Box(low = -1.0, high = 1.0, shape = (8,), dtype = np.float32)
-        self.device = device if (device is not None) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.buffer_size = buffer_size
-        self.total_timesteps = total_timesteps
-        self.learning_starts = learning_starts
-        self.num_expl_steps = num_expl_steps
-        self.episode_horizon = episode_horizon
-        self.batch_size = batch_size
-        self.critic_target_tau = critic_target_tau
-        self.update_every_steps = update_every_steps
-        self.update_mvmae_every_steps = update_mvmae_every_steps
-        self.stddev_schedule = stddev_schedule
-        self.stddev_clip = stddev_clip
-        self.use_tb = use_tb
-        self.lr = lr
-        self.discount = discount
-        self.action_repeat = action_repeat
-        
-        self.nviews = nviews
-        self.mvmae_patch_size = mvmae_patch_size
-        self.mvmae_encoder_embed_dim = mvmae_encoder_embed_dim
-        self.mvmae_decoder_embed_dim = mvmae_decoder_embed_dim
-        self.mvmae_encoder_heads = mvmae_encoder_heads
-        self.mvmae_decoder_heads = mvmae_decoder_heads
-        self.masking_ratio = masking_ratio
-        self.coef_mvmae = coef_mvmae
-        
-        self.feature_dim = feature_dim
-        self.hidden_dim = hidden_dim
-        
-        self.render_mode = render_mode
-        self.in_channels = in_channels
-        self.img_h_size = img_h_size
-        self.img_w_size = img_w_size
-        
-        self.work_dir = Path.cwd()
-        print(f'Workspace: {self.work_dir}')
-        self._global_step = 0
-        self._global_episode = 0
-        
-        self.seed = 1
-        utils.set_seed_everywhere(self.seed)
-        
-        self.agent = self.make_agent() # Make agent
-        self.setup() # Make envs and setup replay buffer
-        self.timer = utils.Timer()
-        
-        # Evaluation
-        self.eval_every_frames = 10_000
-        self.num_eval_episodes = 10
-        
-    def make_agent(self):
-        # DrQv2 agent takes action_shape as (A, ) tuple
-        return DrQV2Agent(
-            action_shape = (self.action_space.shape[0], ),
-            device = self.device,
-            lr = self.lr,
+# Ignore the info logs from brax
+logging.set_verbosity(logging.WARNING)
 
-            nviews = self.nviews,
-            mvmae_patch_size = self.mvmae_patch_size,
-            mvmae_encoder_embed_dim = self.mvmae_encoder_embed_dim,
-            mvmae_decoder_embed_dim = self.mvmae_decoder_embed_dim,
-            mvmae_encoder_heads = self.mvmae_encoder_heads,
-            mvmae_decoder_heads = self.mvmae_decoder_heads,
-            in_channels = self.in_channels,
-            img_h_size = self.img_h_size,
-            img_w_size = self.img_w_size,
-            masking_ratio = self.masking_ratio,
-            coef_mvmae = self.coef_mvmae,
-            
-            feature_dim = self.feature_dim,
-            hidden_dim = self.hidden_dim,
+# Suppress warnings
 
-            critic_target_tau = self.critic_target_tau,
-            num_expl_steps = self.num_expl_steps,
-            update_every_steps = self.update_every_steps,
-            update_mvmae_every_steps = self.update_mvmae_every_steps,
-            stddev_schedule = self.stddev_schedule,
-            stddev_clip = self.stddev_clip,
-            use_tb = self.use_tb
+# Suppress RuntimeWarnings from JAX
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="jax")
+# Suppress DeprecationWarnings from JAX
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="jax")
+# Suppress UserWarnings from absl (used by JAX and TensorFlow)
+warnings.filterwarnings("ignore", category=UserWarning, module="absl")
+
+
+_ENV_NAME = flags.DEFINE_string(
+    "env_name",
+    "LeapCubeReorient",
+    f"Name of the environment. One of {', '.join(registry.ALL_ENVS)}",
+)
+_IMPL = flags.DEFINE_enum("impl", "jax", ["jax", "warp"], "MJX implementation")
+_VISION = flags.DEFINE_boolean("vision", False, "Use vision input")
+_LOAD_CHECKPOINT_PATH = flags.DEFINE_string(
+    "load_checkpoint_path", None, "Path to load checkpoint from"
+)
+_SUFFIX = flags.DEFINE_string("suffix", None, "Suffix for the experiment name")
+_PLAY_ONLY = flags.DEFINE_boolean(
+    "play_only", False, "If true, only play with the model and do not train"
+)
+_USE_WANDB = flags.DEFINE_boolean(
+    "use_wandb",
+    False,
+    "Use Weights & Biases for logging (ignored in play-only mode)",
+)
+_USE_TB = flags.DEFINE_boolean(
+    "use_tb", False, "Use TensorBoard for logging (ignored in play-only mode)"
+)
+_DOMAIN_RANDOMIZATION = flags.DEFINE_boolean(
+    "domain_randomization", False, "Use domain randomization"
+)
+_SEED = flags.DEFINE_integer("seed", 1, "Random seed")
+_NUM_TIMESTEPS = flags.DEFINE_integer(
+    "num_timesteps", 1_000_000, "Number of timesteps"
+)
+_NUM_VIDEOS = flags.DEFINE_integer(
+    "num_videos", 1, "Number of videos to record after training."
+)
+_NUM_EVALS = flags.DEFINE_integer("num_evals", 5, "Number of evaluations")
+_REWARD_SCALING = flags.DEFINE_float("reward_scaling", 0.1, "Reward scaling")
+_EPISODE_LENGTH = flags.DEFINE_integer("episode_length", 1000, "Episode length")
+_NORMALIZE_OBSERVATIONS = flags.DEFINE_boolean(
+    "normalize_observations", True, "Normalize observations"
+)
+_ACTION_REPEAT = flags.DEFINE_integer("action_repeat", 1, "Action repeat")
+_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 10, "Unroll length")
+_NUM_MINIBATCHES = flags.DEFINE_integer(
+    "num_minibatches", 8, "Number of minibatches"
+)
+_NUM_UPDATES_PER_BATCH = flags.DEFINE_integer(
+    "num_updates_per_batch", 8, "Number of updates per batch"
+)
+_DISCOUNTING = flags.DEFINE_float("discounting", 0.97, "Discounting")
+_LEARNING_RATE = flags.DEFINE_float("learning_rate", 5e-4, "Learning rate")
+_ENTROPY_COST = flags.DEFINE_float("entropy_cost", 5e-3, "Entropy cost")
+_NUM_ENVS = flags.DEFINE_integer("num_envs", 1024, "Number of environments")
+_NUM_EVAL_ENVS = flags.DEFINE_integer(
+    "num_eval_envs", 128, "Number of evaluation environments"
+)
+_BATCH_SIZE = flags.DEFINE_integer("batch_size", 256, "Batch size")
+_MAX_GRAD_NORM = flags.DEFINE_float("max_grad_norm", 1.0, "Max grad norm")
+_CLIPPING_EPSILON = flags.DEFINE_float(
+    "clipping_epsilon", 0.2, "Clipping epsilon for PPO"
+)
+_POLICY_HIDDEN_LAYER_SIZES = flags.DEFINE_list(
+    "policy_hidden_layer_sizes",
+    [64, 64, 64],
+    "Policy hidden layer sizes",
+)
+_VALUE_HIDDEN_LAYER_SIZES = flags.DEFINE_list(
+    "value_hidden_layer_sizes",
+    [64, 64, 64],
+    "Value hidden layer sizes",
+)
+_POLICY_OBS_KEY = flags.DEFINE_string(
+    "policy_obs_key", "state", "Policy obs key"
+)
+_VALUE_OBS_KEY = flags.DEFINE_string("value_obs_key", "state", "Value obs key")
+_RSCOPE_ENVS = flags.DEFINE_integer(
+    "rscope_envs",
+    None,
+    "Number of parallel environment rollouts to save for the rscope viewer",
+)
+_DETERMINISTIC_RSCOPE = flags.DEFINE_boolean(
+    "deterministic_rscope",
+    True,
+    "Run deterministic rollouts for the rscope viewer",
+)
+_RUN_EVALS = flags.DEFINE_boolean(
+    "run_evals",
+    True,
+    "Run evaluation rollouts between policy updates.",
+)
+_LOG_TRAINING_METRICS = flags.DEFINE_boolean(
+    "log_training_metrics",
+    False,
+    "Whether to log training metrics and callback to progress_fn. Significantly"
+    " slows down training if too frequent.",
+)
+_TRAINING_METRICS_STEPS = flags.DEFINE_integer(
+    "training_metrics_steps",
+    1_000_000,
+    "Number of steps between logging training metrics. Increase if training"
+    " experiences slowdown.",
+)
+
+
+def get_rl_config(env_name: str) -> config_dict.ConfigDict:
+  if env_name in Custom_Mujoco_Playground.manipulation._envs:
+    if _VISION.value:
+      return manipulation_params.brax_vision_ppo_config(env_name, _IMPL.value)
+    return manipulation_params.brax_ppo_config(env_name, _IMPL.value)
+  elif env_name in Custom_Mujoco_Playground.locomotion._envs:
+    return locomotion_params.brax_ppo_config(env_name, _IMPL.value)
+  elif env_name in Custom_Mujoco_Playground.dm_control_suite._envs:
+    if _VISION.value:
+      return dm_control_suite_params.brax_vision_ppo_config(
+          env_name, _IMPL.value
+      )
+    return dm_control_suite_params.brax_ppo_config(env_name, _IMPL.value)
+
+  raise ValueError(f"Env {env_name} not found in {registry.ALL_ENVS}.")
+
+
+def rscope_fn(full_states, obs, rew, done):
+  """
+  All arrays are of shape (unroll_length, rscope_envs, ...)
+  full_states: dict with keys 'qpos', 'qvel', 'time', 'metrics'
+  obs: nd.array or dict obs based on env configuration
+  rew: nd.array rewards
+  done: nd.array done flags
+  """
+  # Calculate cumulative rewards per episode, stopping at first done flag
+  done_mask = jp.cumsum(done, axis=0)
+  valid_rewards = rew * (done_mask == 0)
+  episode_rewards = jp.sum(valid_rewards, axis=0)
+  print(
+      "Collected rscope rollouts with reward"
+      f" {episode_rewards.mean():.3f} +- {episode_rewards.std():.3f}"
+  )
+
+
+def main(argv):
+  """Run training and evaluation for the specified environment."""
+
+  del argv
+
+  # Load environment configuration
+  env_cfg = registry.get_default_config(_ENV_NAME.value)
+  env_cfg["impl"] = _IMPL.value
+
+  ppo_params = get_rl_config(_ENV_NAME.value)
+
+  if _NUM_TIMESTEPS.present:
+    ppo_params.num_timesteps = _NUM_TIMESTEPS.value
+  if _PLAY_ONLY.present:
+    ppo_params.num_timesteps = 0
+  if _NUM_EVALS.present:
+    ppo_params.num_evals = _NUM_EVALS.value
+  if _REWARD_SCALING.present:
+    ppo_params.reward_scaling = _REWARD_SCALING.value
+  if _EPISODE_LENGTH.present:
+    ppo_params.episode_length = _EPISODE_LENGTH.value
+  if _NORMALIZE_OBSERVATIONS.present:
+    ppo_params.normalize_observations = _NORMALIZE_OBSERVATIONS.value
+  if _ACTION_REPEAT.present:
+    ppo_params.action_repeat = _ACTION_REPEAT.value
+  if _UNROLL_LENGTH.present:
+    ppo_params.unroll_length = _UNROLL_LENGTH.value
+  if _NUM_MINIBATCHES.present:
+    ppo_params.num_minibatches = _NUM_MINIBATCHES.value
+  if _NUM_UPDATES_PER_BATCH.present:
+    ppo_params.num_updates_per_batch = _NUM_UPDATES_PER_BATCH.value
+  if _DISCOUNTING.present:
+    ppo_params.discounting = _DISCOUNTING.value
+  if _LEARNING_RATE.present:
+    ppo_params.learning_rate = _LEARNING_RATE.value
+  if _ENTROPY_COST.present:
+    ppo_params.entropy_cost = _ENTROPY_COST.value
+  if _NUM_ENVS.present:
+    ppo_params.num_envs = _NUM_ENVS.value
+  if _NUM_EVAL_ENVS.present:
+    ppo_params.num_eval_envs = _NUM_EVAL_ENVS.value
+  if _BATCH_SIZE.present:
+    ppo_params.batch_size = _BATCH_SIZE.value
+  if _MAX_GRAD_NORM.present:
+    ppo_params.max_grad_norm = _MAX_GRAD_NORM.value
+  if _CLIPPING_EPSILON.present:
+    ppo_params.clipping_epsilon = _CLIPPING_EPSILON.value
+  if _POLICY_HIDDEN_LAYER_SIZES.present:
+    ppo_params.network_factory.policy_hidden_layer_sizes = list(
+        map(int, _POLICY_HIDDEN_LAYER_SIZES.value)
+    )
+  if _VALUE_HIDDEN_LAYER_SIZES.present:
+    ppo_params.network_factory.value_hidden_layer_sizes = list(
+        map(int, _VALUE_HIDDEN_LAYER_SIZES.value)
+    )
+  if _POLICY_OBS_KEY.present:
+    ppo_params.network_factory.policy_obs_key = _POLICY_OBS_KEY.value
+  if _VALUE_OBS_KEY.present:
+    ppo_params.network_factory.value_obs_key = _VALUE_OBS_KEY.value
+  if _VISION.value:
+    env_cfg.vision = True
+    env_cfg.vision_config.render_batch_size = ppo_params.num_envs
+  env = registry.load(_ENV_NAME.value, config=env_cfg)
+  if _RUN_EVALS.present:
+    ppo_params.run_evals = _RUN_EVALS.value
+  if _LOG_TRAINING_METRICS.present:
+    ppo_params.log_training_metrics = _LOG_TRAINING_METRICS.value
+  if _TRAINING_METRICS_STEPS.present:
+    ppo_params.training_metrics_steps = _TRAINING_METRICS_STEPS.value
+
+  print(f"Environment Config:\n{env_cfg}")
+  print(f"PPO Training Parameters:\n{ppo_params}")
+
+  # Generate unique experiment name
+  now = datetime.datetime.now()
+  timestamp = now.strftime("%Y%m%d-%H%M%S")
+  exp_name = f"{_ENV_NAME.value}-{timestamp}"
+  if _SUFFIX.value is not None:
+    exp_name += f"-{_SUFFIX.value}"
+  print(f"Experiment name: {exp_name}")
+
+  # Set up logging directory
+  logdir = epath.Path("logs").resolve() / exp_name
+  logdir.mkdir(parents=True, exist_ok=True)
+  print(f"Logs are being stored in: {logdir}")
+
+  # Initialize Weights & Biases if required
+  if _USE_WANDB.value and not _PLAY_ONLY.value:
+    wandb.init(project="mjxrl", name=exp_name)
+    wandb.config.update(env_cfg.to_dict())
+    wandb.config.update({"env_name": _ENV_NAME.value})
+
+  # Initialize TensorBoard if required
+  if _USE_TB.value and not _PLAY_ONLY.value:
+    writer = tensorboardX.SummaryWriter(logdir)
+
+  # Handle checkpoint loading
+  if _LOAD_CHECKPOINT_PATH.value is not None:
+    # Convert to absolute path
+    ckpt_path = epath.Path(_LOAD_CHECKPOINT_PATH.value).resolve()
+    if ckpt_path.is_dir():
+      latest_ckpts = list(ckpt_path.glob("*"))
+      latest_ckpts = [ckpt for ckpt in latest_ckpts if ckpt.is_dir()]
+      latest_ckpts.sort(key=lambda x: int(x.name))
+      latest_ckpt = latest_ckpts[-1]
+      restore_checkpoint_path = latest_ckpt
+      print(f"Restoring from: {restore_checkpoint_path}")
+    else:
+      restore_checkpoint_path = ckpt_path
+      print(f"Restoring from checkpoint: {restore_checkpoint_path}")
+  else:
+    print("No checkpoint path provided, not restoring from checkpoint")
+    restore_checkpoint_path = None
+
+  # Set up checkpoint directory
+  ckpt_path = logdir / "checkpoints"
+  ckpt_path.mkdir(parents=True, exist_ok=True)
+  print(f"Checkpoint path: {ckpt_path}")
+
+  # Save environment configuration
+  with open(ckpt_path / "config.json", "w", encoding="utf-8") as fp:
+    json.dump(env_cfg.to_dict(), fp, indent=4)
+
+  training_params = dict(ppo_params)
+  if "network_factory" in training_params:
+    del training_params["network_factory"]
+
+  network_fn = (
+      ppo_networks_vision.make_ppo_networks_vision
+      if _VISION.value
+      else ppo_networks.make_ppo_networks
+  )
+  if hasattr(ppo_params, "network_factory"):
+    network_factory = functools.partial(
+        network_fn, **ppo_params.network_factory
+    )
+  else:
+    network_factory = network_fn
+
+  if _DOMAIN_RANDOMIZATION.value:
+    training_params["randomization_fn"] = registry.get_domain_randomizer(
+        _ENV_NAME.value
+    )
+
+  if _VISION.value:
+    env = wrapper.wrap_for_brax_training(
+        env,
+        vision=True,
+        num_vision_envs=env_cfg.vision_config.render_batch_size,
+        episode_length=ppo_params.episode_length,
+        action_repeat=ppo_params.action_repeat,
+        randomization_fn=training_params.get("randomization_fn"),
+    )
+
+  num_eval_envs = (
+      ppo_params.num_envs
+      if _VISION.value
+      else ppo_params.get("num_eval_envs", 128)
+  )
+
+  if "num_eval_envs" in training_params:
+    del training_params["num_eval_envs"]
+
+  train_fn = functools.partial(
+      ppo.train,
+      **training_params,
+      network_factory=network_factory,
+      seed=_SEED.value,
+      restore_checkpoint_path=restore_checkpoint_path,
+      save_checkpoint_path=None, # CHANGE from ckpt_path t None
+      wrap_env_fn=None if _VISION.value else wrapper.wrap_for_brax_training,
+      num_eval_envs=num_eval_envs,
+  )
+
+  times = [time.monotonic()]
+
+  # Progress function for logging
+  def progress(num_steps, metrics):
+    times.append(time.monotonic())
+
+    # Log to Weights & Biases
+    if _USE_WANDB.value and not _PLAY_ONLY.value:
+      wandb.log(metrics, step=num_steps)
+
+    # Log to TensorBoard
+    if _USE_TB.value and not _PLAY_ONLY.value:
+      for key, value in metrics.items():
+        writer.add_scalar(key, value, num_steps)
+      writer.flush()
+    if _RUN_EVALS.value:
+      print(f"{num_steps}: reward={metrics['eval/episode_reward']:.3f}")
+    if _LOG_TRAINING_METRICS.value:
+      if "episode/sum_reward" in metrics:
+        print(
+            f"{num_steps}: mean episode"
+            f" reward={metrics['episode/sum_reward']:.3f}"
         )
-    
-    # StereoPickCube with wrappers for frame stacking, action repeat, time_step formatting
-    def make_env(self, render_mode):
-        env = StereoPickCube(
-            render_mode=render_mode, 
-            img_h_size=self.img_h_size,
-            img_w_size=self.img_w_size,
-            discount=self.discount,
-            max_path_length=self.episode_horizon
-        )
-        env = FrameStackWrapper(env, num_frames=self.in_channels // 3)
-        env = ActionRepeatWrapper(env, num_repeats=self.action_repeat)
-        env = ExtendedTimeStepWrapper(env)
-        return env
-    
-    def setup(self):
-        self.logger = Logger(self.work_dir / "Training_Results", use_tb=True)
-        self.train_env = self.make_env("rgb_array")
-        self.eval_env = self.make_env(self.render_mode)
-        
-        data_specs = (
-            specs.Array(self.overall_obs_space.shape, self.overall_obs_space.dtype, name="observation"),
-            specs.Array(self.train_env.action_space.shape, self.train_env.action_space.dtype, name="action"),
-            specs.Array((1,), np.float32, name="reward"),
-            specs.Array((1,), np.float32, name="discount")
-        )
-        self.replay_storage = ReplayBufferStorage(data_specs, self.work_dir / 'buffer')
-        self.replay_loader = make_replay_loader(
-            self.work_dir / 'buffer', self.buffer_size,
-            self.batch_size, 4, False, 3, self.discount) # Samples 3 consecutive steps, frame stacking
-        self._replay_iter = None
-        
-        self.video_recorder = VideoRecorder(self.work_dir / "Training_Results") # Video recorder for eval frames
-    
-    @property
-    def global_step(self):
-        return self._global_step
 
-    @property
-    def global_episode(self):
-        return self._global_episode
+  # Load evaluation environment.
+  eval_env = None
+  if _VISION.value:
+    eval_env = env
+  else:
+    eval_env = registry.load(_ENV_NAME.value, config=env_cfg)
 
-    @property
-    def global_frame(self):
-        return self.global_step * self.action_repeat
+  num_envs = 1
+  if _VISION.value:
+    num_envs = env_cfg.vision_config.render_batch_size
 
-    @property
-    def replay_iter(self): # An iterator of replay buffer dataloader
-        if self._replay_iter is None:
-            self._replay_iter = iter(self.replay_loader)
-        return self._replay_iter
+  policy_params_fn = lambda *args: None
+  if _RSCOPE_ENVS.value:
+    # Interactive visualisation of policy checkpoints
+    from rscope import brax as rscope_utils
 
-    def eval(self):
-        step, episode, total_reward = 0, 0, 0
-        eval_until_episode = utils.Until(self.num_eval_episodes)
+    if not _VISION.value:
+      rscope_env = registry.load(_ENV_NAME.value, config=env_cfg)
+      rscope_env = wrapper.wrap_for_brax_training(
+          rscope_env,
+          episode_length=ppo_params.episode_length,
+          action_repeat=ppo_params.action_repeat,
+          randomization_fn=training_params.get("randomization_fn"),
+      )
+    else:
+      rscope_env = env
 
-        master_key = jax.random.PRNGKey(0)
-        while eval_until_episode(episode):
-            master_key, episode_key = jax.random.split(master_key)
-            time_step = self.eval_env.reset(episode_key)
-            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
-            while not time_step.last():
-                with torch.no_grad(), utils.eval_mode(self.agent):
-                    action = self.agent.act(time_step.observation, self.global_step, eval_mode=True)
-                action = np.asarray(action, dtype=np.float32)
-                action = jax.device_put(action)
-                time_step = self.eval_env.step(time_step, action)
-                self.video_recorder.record(self.eval_env)
-                total_reward += float(time_step.reward[0])
-                step += 1
+    rscope_handle = rscope_utils.BraxRolloutSaver(
+        rscope_env,
+        ppo_params,
+        _VISION.value,
+        _RSCOPE_ENVS.value,
+        _DETERMINISTIC_RSCOPE.value,
+        jax.random.PRNGKey(_SEED.value),
+        rscope_fn,
+    )
 
-            episode += 1
-            self.video_recorder.save(f'{self.global_frame}.mp4')
+    def policy_params_fn(current_step, make_policy, params):  # pylint: disable=unused-argument
+      rscope_handle.set_make_policy(make_policy)
+      rscope_handle.dump_rollout(params)
 
-        with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
-            log('episode_reward', total_reward / episode)
-            log('episode_length', step * self.action_repeat / episode)
-            log('episode', self.global_episode)
-            log('step', self.global_step)
+  # Train or load the model
+  make_inference_fn, params, _ = train_fn(  # pylint: disable=no-value-for-parameter
+      environment=env,
+      progress_fn=progress,
+      policy_params_fn=policy_params_fn,
+      eval_env=eval_env,
+  )
 
-    def train(self):
-        train_until_step = utils.Until(self.total_timesteps, self.action_repeat) # True until self.action_repeat * self._global_step > self.total_timesteps
-        seed_until_step = utils.Until(self.learning_starts, self.action_repeat) # True until self.action_repeat * self._global_step > self.learning_starts
-        eval_every_step = utils.Every(self.eval_every_frames, self.action_repeat) # True for every self.eval_every_frames / self.action_repeat frames
+  print("Done training.")
+  if len(times) > 1:
+    print(f"Time to JIT compile: {times[1] - times[0]}")
+    print(f"Time to train: {times[-1] - times[1]}")
 
-        episode_step, episode_reward = 0, 0
-        
-        master_key = jax.random.PRNGKey(0)
-        master_key, episode_key = jax.random.split(master_key)
-        time_step = self.train_env.reset(episode_key) # time_step here is a ExtendedTimeStep object due to wrappers
-        self.replay_storage.add(time_step)
+  print("Starting inference...")
 
-        metrics = None
-        while train_until_step(self.global_step):
-            if time_step.last():
-                self._global_episode += 1
-                # Wait until all the metrics schema is populated
-                if metrics is not None:
-                    # log stats
-                    elapsed_time, total_time = self.timer.reset()
-                    episode_frame = episode_step * self.action_repeat
-                    with self.logger.log_and_dump_ctx(self.global_frame, ty='train') as log:
-                        log('fps', episode_frame / elapsed_time)
-                        log('total_time', total_time)
-                        log('episode_reward', episode_reward)
-                        log('episode_length', episode_frame)
-                        log('episode', self.global_episode)
-                        log('buffer_size', len(self.replay_storage))
-                        log('step', self.global_step)
+  # Create inference function.
+  inference_fn = make_inference_fn(params, deterministic=True)
+  jit_inference_fn = jax.jit(inference_fn)
 
-                # Reset env
-                master_key, episode_key = jax.random.split(master_key)
-                time_step = self.train_env.reset(episode_key)
-                self.replay_storage.add(time_step)
+  # Run evaluation rollouts.
+  def do_rollout(rng, state):
+    empty_data = state.data.__class__(
+        **{k: None for k in state.data.__annotations__}
+    )  # pytype: disable=attribute-error
+    empty_traj = state.__class__(**{k: None for k in state.__annotations__})  # pytype: disable=attribute-error
+    empty_traj = empty_traj.replace(data=empty_data)
 
-                episode_step = 0
-                episode_reward = 0
+    def step(carry, _):
+      state, rng = carry
+      rng, act_key = jax.random.split(rng)
+      act = jit_inference_fn(state.obs, act_key)[0]
+      state = eval_env.step(state, act)
+      traj_data = empty_traj.tree_replace({
+          "data.qpos": state.data.qpos,
+          "data.qvel": state.data.qvel,
+          "data.time": state.data.time,
+          "data.ctrl": state.data.ctrl,
+          "data.mocap_pos": state.data.mocap_pos,
+          "data.mocap_quat": state.data.mocap_quat,
+          "data.xfrc_applied": state.data.xfrc_applied,
+      })
+      if _VISION.value:
+        traj_data = jax.tree_util.tree_map(lambda x: x[0], traj_data)
+      return (state, rng), traj_data
 
-            # Try to evaluate, evals at intervals
-            if eval_every_step(self.global_step):
-                self.logger.log('eval_total_time', self.timer.total_time(), self.global_frame)
-                self.eval()
+    _, traj = jax.lax.scan(
+        step, (state, rng), None, length=_EPISODE_LENGTH.value
+    )
+    return traj
 
-            t0 = time.perf_counter()
-            # Sample action
-            with torch.no_grad(), utils.eval_mode(self.agent):
-                action = self.agent.act(time_step.observation, self.global_step, eval_mode=False)
-            
-            # Try to update the agent, will only update past self.learning_starts
-            if not seed_until_step(self.global_step):
-                metrics = self.agent.update(self.replay_iter, self.global_step)
-                self.logger.log_metrics(metrics, self.global_frame, ty='train')
-            t1 = time.perf_counter()
+  rng = jax.random.split(jax.random.PRNGKey(_SEED.value), _NUM_VIDEOS.value)
+  reset_states = jax.jit(jax.vmap(eval_env.reset))(rng)
+  if _VISION.value:
+    reset_states = jax.tree_util.tree_map(lambda x: x[0], reset_states)
+  traj_stacked = jax.jit(jax.vmap(do_rollout))(rng, reset_states)
+  trajectories = [None] * _NUM_VIDEOS.value
+  for i in range(_NUM_VIDEOS.value):
+    t = jax.tree.map(lambda x, i=i: x[i], traj_stacked)
+    trajectories[i] = [
+        jax.tree.map(lambda x, j=j: x[j], t)
+        for j in range(_EPISODE_LENGTH.value)
+    ]
 
-            # Take env step
-            action = np.asarray(action, dtype=np.float32)
-            action = jax.device_put(action)
-            time_step = self.train_env.step(time_step, action)
-            episode_reward += float(time_step.reward[0])
-            self.replay_storage.add(time_step)
-            episode_step += 1
-            self._global_step += 1
-    
-def save_agent(agent: DrQV2Agent, path="agent_weights.pt"):
-    torch.save({
-        "mvmae": agent.mvmae.state_dict(),
-        "actor": agent.actor.state_dict(),
-        "critic": agent.critic.state_dict(),
-        "critic_target": agent.critic_target.state_dict(),
-    }, path)
-
-def load_agent(agent: DrQV2Agent, path="agent_weights.pt"):
-    checkpoint = torch.load(path, map_location=agent.device)
-    agent.mvmae.load_state_dict(checkpoint["mvmae"])
-    agent.actor.load_state_dict(checkpoint["actor"])
-    agent.critic.load_state_dict(checkpoint["critic"])
-    agent.critic_target.load_state_dict(checkpoint["critic_target"])
-
-def get_args():
-    parser = argparse.ArgumentParser()
-
-    # General variables
-    parser.add_argument("--device", type=str, default=None, help="Torch device string, e.g. 'cuda' or 'cpu'")
-    # RL training
-    parser.add_argument("--buffer_size", type=int, default=100_000)
-    parser.add_argument("--total_timesteps", type=int, default=500_000)
-    parser.add_argument("--learning_starts", type=int, default=10_000, help="Start training (and using grads) at this step")
-    parser.add_argument("--num_expl_steps", type=int, default=5000, help="Number of random action steps before policy actions")
-    parser.add_argument("--episode_horizon", type=int, default=300)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--critic_target_tau", type=float, default=0.001)
-    parser.add_argument("--update_every_steps", type=int, default=2)
-    parser.add_argument("--update_mvmae_every_steps", type=int, default=10)
-    parser.add_argument("--stddev_schedule", type=str, default="linear(1.0,0.1,500000)")
-    parser.add_argument("--stddev_clip", type=float, default=0.3)
-    parser.add_argument("--use_tb", action="store_true")
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--discount", type=float, default=0.99)
-    parser.add_argument("--action_repeat", type=int, default=2)
-    # MV-MAE variables
-    parser.add_argument("--nviews", type=int, default=2)
-    parser.add_argument("--mvmae_patch_size", type=int, default=8)
-    parser.add_argument("--mvmae_encoder_embed_dim", type=int, default=256)
-    parser.add_argument("--mvmae_decoder_embed_dim", type=int, default=128)
-    parser.add_argument("--mvmae_encoder_heads", type=int, default=16)
-    parser.add_argument("--mvmae_decoder_heads", type=int, default=16)
-    parser.add_argument("--masking_ratio", type=float, default=0.75)
-    parser.add_argument("--coef_mvmae", type=float, default=0.005)
-    # Actor + Critic
-    parser.add_argument("--feature_dim", type=int, default=100)
-    parser.add_argument("--hidden_dim", type=int, default=1024)
-    # Image specs
-    parser.add_argument("--render_mode", type=str, default="rgb_array")
-    parser.add_argument("--in_channels", type=int, default=3 * 3)
-    parser.add_argument("--img_h_size", type=int, default=64)
-    parser.add_argument("--img_w_size", type=int, default=64)
-
-    return parser.parse_args()
+  # Render and save the rollout.
+  render_every = 2
+  fps = 1.0 / eval_env.dt / render_every
+  print(f"FPS for rendering: {fps}")
+  scene_option = mujoco.MjvOption()
+  scene_option.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
+  scene_option.flags[mujoco.mjtVisFlag.mjVIS_PERTFORCE] = False
+  scene_option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = False
+  for i, rollout in enumerate(trajectories):
+    traj = rollout[::render_every]
+    frames = eval_env.render(
+        traj, height=480, width=640, scene_option=scene_option
+    )
+    media.write_video(f"rollout{i}.gif", frames, fps=fps)
+    print(f"Rollout video saved as 'rollout{i}.gif'.")
 
 if __name__ == "__main__":
-    print("Root path:", Path.cwd())
-    args = get_args()
-    workspace = Workshop(**vars(args))
-    workspace.train()
-    save_agent(workspace.agent)
+  app.run(main)
