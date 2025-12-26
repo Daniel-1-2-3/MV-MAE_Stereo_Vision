@@ -184,7 +184,7 @@ export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 
 # ---------------- Run training ----------------
-stdbuf -oL -eL python -u execute.py --num_envs=1 --num_eval_envs=1 --log_training_metrics=true --training_metrics_steps=500 --vision=True \
+stdbuf -oL -eL python -u execute.py --num_envs=1 --num_eval_envs=1 --log_training_metrics=true --training_metrics_steps=500 --num_timesteps=100_000 --vision=True \
   2>&1
 
 echo "Training completed."
