@@ -50,7 +50,7 @@
     </body>
   </worldbody>
 
-  <include file="sensor.xml"/>
+  <!--<include file="sensor.xml"/>-->
 
   <keyframe>
     <key name="low_home"
