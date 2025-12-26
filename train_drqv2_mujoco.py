@@ -110,7 +110,7 @@ _NUM_UPDATES_PER_BATCH = flags.DEFINE_integer(
 _DISCOUNTING = flags.DEFINE_float("discounting", 0.97, "Discounting")
 _LEARNING_RATE = flags.DEFINE_float("learning_rate", 5e-4, "Learning rate")
 _ENTROPY_COST = flags.DEFINE_float("entropy_cost", 5e-3, "Entropy cost")
-_NUM_ENVS = flags.DEFINE_integer("num_envs", 1024, "Number of environments")
+_NUM_ENVS = flags.DEFINE_integer("num_envs", 128, "Number of environments")
 _NUM_EVAL_ENVS = flags.DEFINE_integer(
     "num_eval_envs", 32, "Number of evaluation environments"
 )
