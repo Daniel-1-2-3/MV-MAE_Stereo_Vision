@@ -112,7 +112,7 @@ _LEARNING_RATE = flags.DEFINE_float("learning_rate", 5e-4, "Learning rate")
 _ENTROPY_COST = flags.DEFINE_float("entropy_cost", 5e-3, "Entropy cost")
 _NUM_ENVS = flags.DEFINE_integer("num_envs", 1024, "Number of environments")
 _NUM_EVAL_ENVS = flags.DEFINE_integer(
-    "num_eval_envs", 128, "Number of evaluation environments"
+    "num_eval_envs", 32, "Number of evaluation environments"
 )
 _BATCH_SIZE = flags.DEFINE_integer("batch_size", 256, "Batch size")
 _MAX_GRAD_NORM = flags.DEFINE_float("max_grad_norm", 1.0, "Max grad norm")
@@ -354,7 +354,7 @@ def main(argv):
   num_eval_envs = (
       ppo_params.num_envs
       if _VISION.value
-      else ppo_params.get("num_eval_envs", 128)
+      else ppo_params.get("num_eval_envs", 32)
   )
 
   if "num_eval_envs" in training_params:
