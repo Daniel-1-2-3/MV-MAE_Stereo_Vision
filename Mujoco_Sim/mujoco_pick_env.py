@@ -18,6 +18,7 @@ Pick up a cube to a fixed location using a motor-space delta controller (ctrl +=
 from typing import Any, Dict, Optional, Union
 
 import jax
+from mujoco.mjx._src import math
 import jax.numpy as jp
 from ml_collections import config_dict
 import mujoco
@@ -309,57 +310,25 @@ class StereoPickCube(pick.PandaPickCube):
         # Dense rewards (base task)
         raw_rewards = self._get_reward(data, info)
 
-        # Extra penalties (must exist in reward_scales dict)
-        hand_pos = data.geom_xpos[self._hand_capsule_geom]
-        box_pos_g = data.geom_xpos[self._box_geom]
-        hand_box_dist = jp.linalg.norm(hand_pos - box_pos_g)
-        hand_box = hand_box_dist < 0.02
-        raw_rewards["no_box_collision"] = jp.where(hand_box, 0.0, 1.0)
-
-        lp_z = data.geom_xpos[self._left_pad_geom][2]
-        rp_z = data.geom_xpos[self._right_pad_geom][2]
-        hc_z = data.geom_xpos[self._hand_capsule_geom][2]
-        floor_hit = (lp_z < 0.002) | (rp_z < 0.002) | (hc_z < 0.002)
-        raw_rewards["no_floor_collision"] = jp.where(floor_hit, 0.0, 1.0)
-
-        # Scale everything
         rewards = {
             k: v * self._config.reward_config.reward_scales[k]
             for k, v in raw_rewards.items()
         }
-        total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
+        reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
-        if not self._vision:
-            # Vision policy cannot access the required state-based observations.
-            da = jp.linalg.norm(action - info["prev_action"])
-            info["prev_action"] = action
-            total_reward += self._config.reward_config.action_rate * da
-            total_reward += no_soln * self._config.reward_config.no_soln_reward
-
-        # Sparse rewards
         box_pos = data.xpos[self._obj_body]
-        lifted = (box_pos[2] > 0.05) * self._config.reward_config.lifted_reward
-        total_reward += lifted
-        success = self._get_success(data, info)
-        total_reward += success * self._config.reward_config.success_reward
-
-        # Reward progress
-        reward = jp.maximum(total_reward - info["prev_reward"], jp.zeros_like(total_reward))
-        info["prev_reward"] = jp.maximum(total_reward, info["prev_reward"])
-        reward = jp.where(newly_reset, 0.0, reward)  # prevent first-step artifact
-
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
         out_of_bounds |= box_pos[2] < 0.0
-        metrics = dict(state.metrics)  # NEW: copy once; no in-place update
+
+        # pick.py termination: ONLY OOB / NaNs (no success termination)
+        done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
+
+        metrics = dict(state.metrics)  # copy once; no in-place update
         metrics["out_of_bounds"] = out_of_bounds.astype(float)
         for k, v in raw_rewards.items():
             metrics[f"reward/{k}"] = v
-        metrics["reward/lifted"] = lifted.astype(float)
-        metrics["reward/success"] = success.astype(float)
 
-        done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any() | success
-
-        # Ensure exact sync between newly_reset and the autoresetwrapper.
+        # Keep autoreset wrapper sync (time-limit truncation uses _steps)
         steps = info["_steps"] + self._config.action_repeat
         steps = jp.where(done | (steps >= self._config.episode_length), 0, steps)
         info["_steps"] = steps
@@ -387,6 +356,54 @@ class StereoPickCube(pick.PandaPickCube):
         if self._vision:  # randomized camera positions cannot see location along y line
             box_pos, target_pos = box_pos[2], target_pos[2]
         return jp.linalg.norm(box_pos - target_pos) < self._config.success_threshold
+
+    def _get_reward(self, data: mjx.Data, info: dict[str, Any]) -> dict[str, Any]:
+        """pick.py-style dense reward components.
+
+        Returns an *unscaled* dict of reward terms. Scaling happens in step().
+        """
+        target_pos = info["target_pos"]
+
+        # Box pose
+        box_pos = data.xpos[self._obj_body]
+        box_mat = data.xmat[self._obj_body]
+
+        # Target orientation from mocap target (same structure as pick.py)
+        target_mat = math.quat_to_mat(data.mocap_quat[self._mocap_target])
+        pos_err = jp.linalg.norm(target_pos - box_pos)
+        rot_err = jp.linalg.norm(target_mat.ravel()[:6] - box_mat.ravel()[:6])
+
+        # Use hand capsule geom as a gripper proxy
+        hand_pos = data.geom_xpos[self._hand_capsule_geom]
+
+        box_target = 1.0 - jp.tanh(5.0 * (0.9 * pos_err + 0.1 * rot_err))
+        gripper_box = 1.0 - jp.tanh(5.0 * jp.linalg.norm(box_pos - hand_pos))
+
+        # Keep robot near init pose; EXCLUDE the box freejoint so lifting isn't punished.
+        # Object freejoint is 7 DoF starting at self._obj_qposadr (pos3 + quat4).
+        obj_adr = self._obj_qposadr
+        qpos_robot = jp.concatenate([data.qpos[:obj_adr], data.qpos[obj_adr + 7 :]])
+        init_q = jp.array(self._init_q)
+        init_q_robot = jp.concatenate([init_q[:obj_adr], init_q[obj_adr + 7 :]])
+        robot_target_qpos = 1.0 - jp.tanh(jp.linalg.norm(qpos_robot - init_q_robot))
+
+        # Floor collision proxy (same reward term name/meaning as pick.py)
+        lp_z = data.geom_xpos[self._left_pad_geom][2]
+        rp_z = data.geom_xpos[self._right_pad_geom][2]
+        hc_z = data.geom_xpos[self._hand_capsule_geom][2]
+        floor_hit = (lp_z < 0.002) | (rp_z < 0.002) | (hc_z < 0.002)
+        no_floor_collision = 1.0 - floor_hit.astype(float)
+
+        # Gate box_target until the gripper reaches the box
+        reached = (jp.linalg.norm(box_pos - hand_pos) < 0.012)
+        info["reached_box"] = 1.0 * jp.maximum(info["reached_box"], reached.astype(float))
+
+        return {
+            "gripper_box": gripper_box,
+            "box_target": box_target * info["reached_box"],
+            "no_floor_collision": no_floor_collision,
+            "robot_target_qpos": robot_target_qpos,
+        }
 
     @property
     def action_size(self) -> int:
