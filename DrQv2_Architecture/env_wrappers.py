@@ -1,111 +1,113 @@
-from collections import deque
-from typing import Any, NamedTuple
-import numpy as np
-from dm_env import StepType
-class FrameStackWrapper():
-    def __init__(self, env, num_frames):
+from __future__ import annotations
+
+from typing import Any
+from flax import struct
+import jax
+import jax.numpy as jnp
+
+@struct.dataclass
+class FrameStackInfo:
+    frames: jax.Array  # (K, 1, H, W2, C)
+    filled: jax.Array  # int32 scalar
+
+@struct.dataclass
+class FrameStackState:
+    """Wrapper state that carries framestack without touching info."""
+    inner: Any
+    obs: jax.Array
+    reward: jax.Array
+    done: jax.Array
+    info: Any
+    fs: FrameStackInfo
+
+
+class FrameStackWrapper:
+    def __init__(self, env, num_frames: int):
         self._env = env
-        self._num_frames = num_frames
-        self._frames_deque = deque([], maxlen=num_frames)
-    
-    def _transform_observation(self, time_step):
-        self._frames_deque.append(time_step["observation"])
-        if len(self._frames_deque) != self._num_frames:
-            last_frame: np.ndarray = self._frames_deque[-1]
-            for i in range(self._num_frames - len(self._frames_deque)):
-                self._frames_deque.append(last_frame.copy())
-        
-        assert len(self._frames_deque) == self._num_frames
-        time_step["observation"] = np.concatenate(list(self._frames_deque), axis=2)
-        return time_step
+        self._K = int(num_frames)
+
+    def _init_fs(self, obs: jnp.ndarray) -> FrameStackInfo:
+        frames = jnp.broadcast_to(obs, (self._K,) + obs.shape)  # (K,1,H,W2,C)
+        return FrameStackInfo(frames=frames, filled=jnp.int32(1))
+
+    def _push(self, fs: FrameStackInfo, obs: jnp.ndarray) -> FrameStackInfo:
+        frames = jnp.roll(fs.frames, shift=1, axis=0)
+        frames = frames.at[0].set(obs)
+        filled = jnp.minimum(fs.filled + 1, jnp.int32(self._K))
+        return FrameStackInfo(frames=frames, filled=filled)
+
+    def _stack(self, fs: FrameStackInfo) -> jnp.ndarray:
+        return jnp.concatenate(tuple(fs.frames[i] for i in range(self._K)), axis=-1)
 
     def reset(self, rng):
-        self._frames_deque.clear()
-        return self._transform_observation(self._env.reset(rng))
+        st = self._env.reset(rng)
+        fs = self._init_fs(st.obs)
+        return FrameStackState(
+            inner=st,
+            obs=self._stack(fs),
+            reward=st.reward,
+            done=st.done,
+            info=st.info,
+            fs=fs,
+        )
 
-    def step(self, time_step, action):
-        return self._transform_observation(self._env.step(time_step, action))
+    def step(self, st: FrameStackState, action):
+        st1 = self._env.step(st.inner, action)
+
+        done1 = (st1.done > 0.5)
+        fs1 = jax.lax.cond(
+            done1,
+            lambda: self._init_fs(st1.obs),
+            lambda: self._push(st.fs, st1.obs),
+        )
+
+        return FrameStackState(
+            inner=st1,
+            obs=self._stack(fs1),
+            reward=st1.reward,
+            done=st1.done,
+            info=st1.info,
+            fs=fs1,
+        )
 
     def __getattr__(self, name):
         return getattr(self._env, name)
 
 class ActionRepeatWrapper:
-    def __init__(self, env: FrameStackWrapper, num_repeats):
+    def __init__(self, env, num_repeats: int):
         self._env = env
-        self._num_repeats = num_repeats
+        self._N = int(num_repeats)
 
-    def step(self, time_step, action):
-        reward = 0.0
-        discount = 1.0
-        for _ in range(self._num_repeats):
-            time_step = self._env.step(time_step, action)
-            reward += float(time_step["reward"]) * discount
-            discount *= float(time_step["discount"])
-            if time_step["step_type"] == StepType.LAST:
-                break
+    def reset(self, rng):
+        return self._env.reset(rng)
 
-        time_step["discount"] = discount
-        time_step["reward"] = reward
-        return time_step
+    def step(self, st, action):
+        done0 = (st.done > 0.5).astype(jnp.float32)
 
-    def __getattr__(self, name):
-        return getattr(self._env, name)
+        def body(carry, _):
+            st0, r_acc, disc_acc, done_prev = carry
 
-class ExtendedTimeStep(NamedTuple):
-    data: Any
-    metrics: Any
-    observation: Any
-    info: Any
-    step_type: Any
-    action: Any
-    done: Any
-    reward: Any
-    discount: Any
+            def do_step():
+                st1 = self._env.step(st0, action)
+                done1 = (st1.done > 0.5).astype(jnp.float32)
+                disc1 = 1.0 - done1
+                r_acc1 = r_acc + disc_acc * st1.reward
+                disc_acc1 = disc_acc * disc1
+                return st1, r_acc1, disc_acc1, done1
 
-    def first(self):
-        return self.step_type == StepType.FIRSTsss
+            def skip_step():
+                return st0, r_acc, disc_acc, done_prev
 
-    def mid(self):
-        return self.step_type == StepType.MID
+            return jax.lax.cond(done_prev > 0.0, skip_step, do_step), None
 
-    def last(self):
-        return self.step_type == StepType.LAST
-
-    def __getitem__(self, attr):
-        if isinstance(attr, str):
-            return getattr(self, attr)
-        else:
-            return tuple.__getitem__(self, attr)
-
-class ExtendedTimeStepWrapper:
-    def __init__(self, env: ActionRepeatWrapper):
-        self._env = env
-
-    def reset(self, state):
-        return self._augment_info(self._env.reset(state))
-
-    def step(self, state, action):
-        # The var info is a dict containing observation, step_type, action, reward, and discount
-        ret = self._env.step(state, action)
-        return self._augment_info(ret, action)
-
-    def _augment_info(self, ret, action=None):
-        if action is None:
-            action = np.zeros(self._env.action_space.shape, dtype=self._env.action_space.dtype)
-        
-        reward = np.array([float(ret["reward"])], dtype=np.float32)
-        discount = np.array([float(ret["discount"])], dtype=np.float32)
-        return ExtendedTimeStep(
-            data=ret["data"],
-            metrics=ret["metrics"],
-            observation=ret["observation"],
-            info=ret["info"],
-            step_type=ret["step_type"],
-            action=action.astype(np.float32),
-            done=float(ret["done"]),
-            reward=reward,
-            discount=discount,
+        (stN, r_acc, disc_acc, doneN), _ = jax.lax.scan(
+            body,
+            (st, jnp.asarray(0.0, jnp.float32), jnp.asarray(1.0, jnp.float32), done0),
+            xs=None,
+            length=self._N,
         )
+
+        return stN.replace(reward=r_acc)
 
     def __getattr__(self, name):
         return getattr(self._env, name)

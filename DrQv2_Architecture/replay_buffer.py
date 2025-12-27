@@ -1,11 +1,12 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from flax import struct
 from typing import Tuple
 
 import jax
 import jax.numpy as jnp
 
-@dataclass(frozen=True)
+@struct.dataclass
 class ReplayBufferState:
     # Ring storage: [capacity, ...]
     obs: jnp.ndarray        # [C, H, 2W, 3]?? NO: we store per-transition obs: [capacity, H, 2W, 3]
@@ -17,8 +18,7 @@ class ReplayBufferState:
     # Ring pointers
     ptr: jnp.ndarray        # scalar int32: next write index (physical)
     size: jnp.ndarray       # scalar int32: number of valid items (<= capacity)
-
-    capacity: int           # static python int (kept in pytree as static via dataclass usage)
+    capacity: int = struct.field(pytree_node=False) # static python int (kept in pytree as static via dataclass usage)
 
 def rb_init(
     capacity: int,

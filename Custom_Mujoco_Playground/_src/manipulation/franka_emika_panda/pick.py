@@ -54,7 +54,6 @@ def default_config() -> config_dict.ConfigDict:
   )
   return config
 
-
 class PandaPickCube(panda.PandaBase):
   """Bring a box to a target."""
 
