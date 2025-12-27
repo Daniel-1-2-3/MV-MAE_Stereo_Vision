@@ -18,5 +18,4 @@ from absl import app
 import train_drqv2_mujoco
 
 def main():
-    #app.run(train_jax_ppo.main)
-    app.run(train_drqv2_mujoco.main)
+    train_drqv2_mujoco.main()
