@@ -337,7 +337,6 @@ def main(argv):
         # one block-level sync so numbers are real (same sync you already do for timing)
         rew = rew.block_until_ready()
         mean_rew = float(jp.mean(rew))
-        print(f"[reward] steps={int(carry[4])} mean_rew={mean_rew:.4f}", flush=True)
 
         # One sync per block (required for meaningful timing / fps)
         carry[4].block_until_ready()
@@ -355,6 +354,7 @@ def main(argv):
             f"dt={dt:.3f}s  "
             f"fps={fps:.1f}  "
             f"ms/step={ms_per_step:.3f}",
+            f"mean_rew={mean_rew:.4f}",
             flush=True,
         )
 
