@@ -59,7 +59,7 @@ _COEF_MVMAE = flags.DEFINE_float("coef_mvmae", 1.0, "MV-MAE coefficient")
 _CRITIC_TAU = flags.DEFINE_float("critic_target_tau", 0.01, "Critic target tau")
 
 # The key “reference-like” knob: scan chunk length
-_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 512, "Steps per jitted scan chunk")
+_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 10000, "Steps per jitted scan chunk")
 
 _DEBUG_TIMING = flags.DEFINE_boolean(
     "debug_timing",
@@ -405,47 +405,43 @@ def main(argv):
             flush=True,
         )
 
-        # -------------------------
-        # Periodic evaluation (every 10k steps) (NEW)
-        # -------------------------
-        if (new_step % _EVAL_EVERY) == 0:
-            # Reset eval state on host (renderer.init in reset is not JIT-friendly)
-            rng_host = carry[3]
-            rng_host, rk_eval = jax.random.split(rng_host)
-            eval_state = env.reset(rk_eval)
+        # EVAL
+        # Reset eval state on host (renderer.init in reset is not JIT-friendly)
+        rng_host = carry[3]
+        rng_host, rk_eval = jax.random.split(rng_host)
+        eval_state = env.reset(rk_eval)
 
-            # Run JIT'd eval rollout (~1000 steps)
-            (eval_state_out, agent_state_out, eval_step_out), (eval_rew, eval_done, eval_frames) = eval_scan_jit(
-                eval_state, carry[1], jp.asarray(0, jp.int32)
-            )
+        # Run JIT'd eval rollout (~1000 steps)
+        (eval_state_out, agent_state_out, eval_step_out), (eval_rew, eval_done, eval_frames) = eval_scan_jit(
+            eval_state, carry[1], jp.asarray(0, jp.int32)
+        )
 
-            # One sync for all eval outputs
-            eval_rew = eval_rew.block_until_ready()
-            eval_done = eval_done.block_until_ready()
-            eval_frames = eval_frames.block_until_ready()
+        # One sync for all eval outputs
+        eval_rew = eval_rew.block_until_ready()
+        eval_done = eval_done.block_until_ready()
+        eval_frames = eval_frames.block_until_ready()
 
-            eval_return = float(jp.sum(eval_rew))
-            eval_mean_rew = float(jp.mean(eval_rew))
-            eval_done_rate = float(jp.mean(eval_done.astype(jp.float32)))
+        eval_return = float(jp.sum(eval_rew))
+        eval_mean_rew = float(jp.mean(eval_rew))
+        eval_done_rate = float(jp.mean(eval_done.astype(jp.float32)))
 
-            print(
-                f"[eval] at_step={new_step}  "
-                f"eval_steps={_EVAL_STEPS}  "
-                f"return={eval_return:.3f}  "
-                f"mean_rew={eval_mean_rew:.4f}  "
-                f"done_rate={eval_done_rate:.4f}",
-                flush=True,
-            )
+        print(
+            f"[eval] at_step={new_step}  "
+            f"eval_steps={_EVAL_STEPS}  "
+            f"return={eval_return:.3f}  "
+            f"mean_rew={eval_mean_rew:.4f}  "
+            f"done_rate={eval_done_rate:.4f}",
+            flush=True,
+        )
 
-            # Save GIF (format matches video.py: uint8 RGB resized to (render_size*2, render_size))
-            frames_np = np.array(eval_frames)  # (T,H,2W,3) uint8
-            _save_eval_gif(eval_video_dir, frames_np, file_name=f"step_{new_step:08d}", fps=_EVAL_FPS)
+        # Save GIF (format matches video.py: uint8 RGB resized to (render_size*2, render_size))
+        frames_np = np.array(eval_frames)  # (T,H,2W,3) uint8
+        _save_eval_gif(eval_video_dir, frames_np, file_name=f"step_{new_step:08d}", fps=_EVAL_FPS)
 
-            # Put updated rng back into carry (so eval consumes RNG deterministically)
-            carry = (carry[0], carry[1], carry[2], rng_host, carry[4])
+        # Put updated rng back into carry (so eval consumes RNG deterministically)
+        carry = (carry[0], carry[1], carry[2], rng_host, carry[4])
 
     print("Done training.")
-
 
 if __name__ == "__main__":
     app.run(main)
