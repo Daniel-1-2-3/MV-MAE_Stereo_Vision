@@ -30,7 +30,7 @@ class TrainConfig:
 
     # replay
     buffer_size: int = 100_000
-    batch_size: int = 64
+    batch_size: int = 32
     nstep: int = 3
     gamma: float = 0.99
 
