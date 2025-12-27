@@ -289,18 +289,6 @@ class StereoPickCube(pick.PandaPickCube):
             state.info["prev_action"],
         )
 
-        # Occasionally aid exploration.
-        state.info["rng"], key_swap = jax.random.split(state.info["rng"])
-        to_sample = newly_reset * jax.random.bernoulli(key_swap, 0.05)
-        swapped_data = state.data.replace(qpos=self._guide_q, ctrl=self._guide_ctrl)
-        data = jax.tree_util.tree_map_with_path(
-            lambda path, x, y: ((1 - to_sample) * x + to_sample * y).astype(x.dtype)
-            if len(path) == 1
-            else x,
-            state.data,
-            swapped_data,
-        )
-
         # Motor-space control (PandaPickCube-style): ctrl += action * scale
         delta = action * self._config.action_scale
         ctrl = data.ctrl + delta

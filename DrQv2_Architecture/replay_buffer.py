@@ -45,12 +45,12 @@ def rb_init(
         capacity=capacity,
     )
 
-
 def _float01_to_u8(x: jnp.ndarray) -> jnp.ndarray:
-    """Convert float image in [0,1] to uint8 [0,255] safely."""
-    x = jnp.clip(x * 255.0, 0.0, 255.0)
+    # Ensure finite before scaling/casting.
+    x = jnp.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+    x = jnp.clip(x, 0.0, 1.0)
+    x = jnp.round(x * 255.0)
     return x.astype(jnp.uint8)
-
 
 def _u8_to_float01(x: jnp.ndarray, dtype=jnp.float32) -> jnp.ndarray:
     """Convert uint8 image [0,255] to float in [0,1]."""
