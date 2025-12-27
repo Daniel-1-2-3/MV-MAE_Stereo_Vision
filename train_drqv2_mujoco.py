@@ -58,13 +58,7 @@ class TrainConfig:
     num_eval_episodes: int = 10
 
 def make_env(cfg: TrainConfig, render_mode: str):
-    env = StereoPickCube(
-        render_mode=render_mode,
-        img_h_size=cfg.img_h_size,
-        img_w_size=cfg.img_w_size,
-        discount=cfg.discount,
-        max_path_length=cfg.episode_horizon,
-    )
+    env = StereoPickCube()
     # apply ActionRepeat first, then FrameStack on top.
     env = ActionRepeatWrapper(env, num_repeats=cfg.action_repeat)
     env = FrameStackWrapper(env, num_frames=cfg.in_channels // 3)
