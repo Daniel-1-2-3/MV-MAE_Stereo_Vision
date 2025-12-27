@@ -60,6 +60,22 @@ _UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 32, "Steps per jitted sca
 _LOG_EVERY_STEPS = flags.DEFINE_integer("log_every_steps", 20_480, "Print speed every N steps")
 _SYNC_TIMINGS = flags.DEFINE_boolean("sync_timings", False, "Block for accurate timings")
 
+_DEBUG_TIMING = flags.DEFINE_boolean(
+    "debug_timing",
+    False,
+    "Print detailed timing/compile diagnostics (may slow training).",
+)
+_DEBUG_EVERY_STEP = flags.DEFINE_boolean(
+    "debug_every_step",
+    False,
+    "If true, run step-by-step (no scan) and time/log every env+update step. Very slow; use for diagnosis only.",
+)
+_DEBUG_COMPILE_LOWER = flags.DEFINE_boolean(
+    "debug_compile_lower",
+    True,
+    "If debug_timing, also call .lower(...).compile() to measure compile time (no execute) for key jitted functions.",
+)
+
 # Reference-style env var setup
 xla_flags = os.environ.get("XLA_FLAGS", "")
 xla_flags += " --xla_gpu_triton_gemm_any=True"
@@ -82,6 +98,26 @@ def _maybe_block(x):
 def _sync_tree(x):
     jax.tree_util.tree_map(_maybe_block, x)
 
+
+
+def _timeit(msg: str, fn, *args, block: bool = True, **kwargs):
+    """Run fn(*args, **kwargs), return (out, seconds). Optionally block_until_ready."""
+    t0 = time.monotonic()
+    out = fn(*args, **kwargs)
+    if block:
+        _sync_tree(out)
+    dt = time.monotonic() - t0
+    print(f"[timing] {msg}: {dt:.6f}s", flush=True)
+    return out, dt
+
+
+def _compile_time(jitted_fn, example_args, name: str):
+    """Measure compile-only time via lower(...).compile()."""
+    t0 = time.monotonic()
+    _ = jitted_fn.lower(*example_args).compile()
+    dt = time.monotonic() - t0
+    print(f"[compile] {name} lower().compile(): {dt:.3f}s", flush=True)
+    return dt
 
 def _extract_obs(state) -> jp.ndarray:
     # Your env returns obs as (1, H, 2W, 3) before stacking; wrappers may change it.
@@ -275,6 +311,68 @@ def main(argv):
     carry = (env_state, agent_state, rb, rng, step_j)
     total_steps = int(_NUM_TIMESTEPS.value)
 
+    # -------------------------
+    # Optional detailed debug timing / compile diagnostics
+    # -------------------------
+    if _DEBUG_TIMING.value:
+        print("[debug] timing diagnostics enabled", flush=True)
+        obs0 = _extract_obs(env_state)
+
+        # Compile-only timings (no execution) for key jitted fns.
+        if _DEBUG_COMPILE_LOWER.value:
+            try:
+                _compile_time(act_jit, (agent_state, obs0, step_j, jp.asarray(False)), "act_jit")
+            except Exception as e:
+                print(f"[compile] act_jit lower().compile() failed: {e}", flush=True)
+
+            try:
+                _compile_time(rollout_scan_jit, (carry,), "rollout_scan_jit")
+            except Exception as e:
+                print(f"[compile] rollout_scan_jit lower().compile() failed: {e}", flush=True)
+
+        # First-call timings (compile+execute) with blocking so timestamps are real.
+        try:
+            (_, _, _), _ = _timeit(
+                "act_jit first call (compile+exec)",
+                act_jit,
+                agent_state,
+                obs0,
+                step_j,
+                jp.asarray(False),
+                block=True,
+            )
+        except Exception as e:
+            print(f"[timing] act_jit first call failed: {e}", flush=True)
+
+        try:
+            _, _ = _timeit("rollout_scan_jit first call (compile+exec)", rollout_scan_jit, carry, block=True)
+        except Exception as e:
+            print(f"[timing] rollout_scan_jit first call failed: {e}", flush=True)
+
+        print("[debug] timing diagnostics warmup finished", flush=True)
+
+    # Debug mode: run step-by-step (no scan) and time every step (VERY slow).
+    if _DEBUG_EVERY_STEP.value:
+        print("[debug] per-step timing enabled (this will be slow)", flush=True)
+        step_jit = jax.jit(lambda c: one_step(c, None))
+
+        for i in range(total_steps):
+            # Measure the whole step (env.step + rb_add + update) as executed on device.
+            t_step0 = time.monotonic()
+            carry, out = step_jit(carry)
+            _sync_tree((carry, out))  # force completion
+            dt = time.monotonic() - t_step0
+
+            # out = (rew, done, stddev, metrics)
+            rew, done, stddev, metrics = out
+            cur_step = int(_maybe_block(carry[4]))
+            print(
+                f"[step] t={dt:.6f}s  step={cur_step}  rew={float(_maybe_block(rew)):.4f}  done={bool(_maybe_block(done))}  stddev={float(_maybe_block(stddev)):.4f}",
+                flush=True,
+            )
+
+        print("[debug] per-step timing run finished", flush=True)
+        return
     while int(_maybe_block(carry[4])) < total_steps:
         carry, traj = rollout_scan_jit(carry)
 
