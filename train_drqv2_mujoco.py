@@ -67,9 +67,8 @@ def make_env(cfg: TrainConfig, render_mode: str):
 def main():
     cfg = TrainConfig()
 
-    # Create train and eval envs
+    # Create train env (also used for eval)
     train_env = make_env(cfg, render_mode="rgb_array")
-    eval_env = make_env(cfg, render_mode="rgb_array")
 
     act_dim = train_env.action_size
     obs_shape = (cfg.img_h_size, cfg.nviews * cfg.img_w_size, cfg.in_channels)
@@ -135,6 +134,7 @@ def main():
 
     # training state
     rng = jax.random.PRNGKey(cfg.seed)
+    eval_rng = jax.random.PRNGKey(cfg.seed + 12345) # separate stream for eval
     rng, reset_key = jax.random.split(rng)
     env_state = train_env.reset(reset_key)
 
@@ -146,25 +146,31 @@ def main():
     next_eval_at = cfg.eval_every_steps
 
     def do_eval(agent_state_in):
-        nonlocal rng
+        nonlocal eval_rng, env_state  # env_state exists in outer scope
+        saved_env_state = env_state  # Save training env_state so eval doesn't mess up the on-going episode
+
         returns = []
         for _ in range(cfg.num_eval_episodes):
-            rng, k = jax.random.split(rng)
-            st = eval_env.reset(k)
+            eval_rng, k = jax.random.split(eval_rng)
+            st = train_env.reset(k)
+
             done = False
             R = 0.0
             steps = 0
-            while not bool(done) and steps < cfg.episode_horizon:
-                step_j = jnp.asarray(0, jnp.int32)  # not used for schedule in eval (but required)
-                action, agent_state_tmp, _std = act_jit(
-                    agent_state_in, st.obs, step_j, jnp.asarray(True)
-                )
-                # keep agent_state_in unchanged in eval (don’t advance RNG permanently)
-                st = eval_env.step(st, action)
+
+            while (not bool(done)) and steps < cfg.episode_horizon:
+                step_j = jnp.asarray(0, jnp.int32)
+
+                # eval_mode=True => mean action (no sampling)
+                action, _unused_state, _std = act_jit(agent_state_in, st.obs, step_j, jnp.asarray(True))
+                st = train_env.step(st, action)
                 R += float(st.reward)
                 done = bool(st.done > 0.5)
                 steps += 1
+
             returns.append(R)
+
+        env_state = saved_env_state # Restore training env_state
         return sum(returns) / max(1, len(returns))
 
     # train / eval alternating 
