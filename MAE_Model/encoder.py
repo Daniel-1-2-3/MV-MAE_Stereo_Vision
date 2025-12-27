@@ -51,12 +51,11 @@ class ViTMaskedEncoder(nn.Module):
         )  # (grid_h * grid_w, embed_dim)
 
         pe = jnp.array(pe_np).repeat(self.nviews, axis=0)  # (total_patches, embed_dim)
-
-        self.pos_embed_all = self.variable(
-            "constants",
+        self.pos_embed_all = self.param(
             "pos_embed_all",
-            lambda: pe,
-        ).value
+            lambda rng, shape: pe,
+            pe.shape,
+        )
 
     def __call__(self, x: jnp.ndarray, mask_x: bool, *, deterministic: bool) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
         """
