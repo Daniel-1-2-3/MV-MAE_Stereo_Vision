@@ -483,10 +483,12 @@ class DrQV2Agent:
             # Recompute z for actor update, using updated mvmae params, no gradients
             z_for_actor = agent.mvmae.apply(
                 {"params": new_mvmae_params},
-                obs, deterministic=False,
+                obs,
+                deterministic=True,
                 method=MAEModel.encoder_no_masking,
                 rngs={},
             )
+
             z_for_actor = jax.lax.stop_gradient(z_for_actor).reshape(z_for_actor.shape[0], -1)
 
             # Actor update (uses updated critic params)
