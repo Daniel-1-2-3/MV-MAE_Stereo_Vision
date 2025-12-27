@@ -81,7 +81,7 @@ def main():
         discount_shape=(1,),
     )
 
-    agent = DrQV2Agent(
+    agent = DrQV2Agent.create(
         action_shape=(act_dim,),
         nviews=cfg.nviews,
         mvmae_patch_size=8,

@@ -94,9 +94,11 @@ class AgentState:
 
     rng: jax.Array
     
-class DrQV2Agent(nn.Module):
+@struct.dataclass
+class DrQV2Agent:
+    # Static / config
     action_shape: Tuple[int, ...]
-    # MVMAE
+
     nviews: int = 2
     mvmae_patch_size: int = 8
     mvmae_encoder_embed_dim: int = 256
@@ -107,60 +109,80 @@ class DrQV2Agent(nn.Module):
     img_h_size: int = 64
     img_w_size: int = 64
     masking_ratio: float = 0.75
-    # Actor/Critic
+
     feature_dim: int = 100
     hidden_dim: int = 1024
-    # Optimizer
     lr: float = 1e-4
 
-    def setup(self):
-        self.mvmae = MAEModel(
-            nviews=self.nviews,
-            patch_size=self.mvmae_patch_size,
-            encoder_embed_dim=self.mvmae_encoder_embed_dim,
-            decoder_embed_dim=self.mvmae_decoder_embed_dim,
-            encoder_heads=self.mvmae_encoder_heads,
-            decoder_heads=self.mvmae_decoder_heads,
-            in_channels=self.in_channels,
-            img_h_size=self.img_h_size,
-            img_w_size=self.img_w_size,
-            masking_ratio=self.masking_ratio,
+    # Non-pytree fields (module objects + optimizer transforms)
+    mvmae: Any = struct.field(pytree_node=False, default=None)
+    actor: Any = struct.field(pytree_node=False, default=None)
+    critic: Any = struct.field(pytree_node=False, default=None)
+
+    mvmae_tx: Any = struct.field(pytree_node=False, default=None)
+    actor_tx: Any = struct.field(pytree_node=False, default=None)
+    critic_tx: Any = struct.field(pytree_node=False, default=None)
+
+    repr_dim: int = struct.field(pytree_node=False, default=0)
+
+    @staticmethod
+    def create(action_shape: Tuple[int, ...], **kwargs) -> "DrQV2Agent":
+        agent = DrQV2Agent(action_shape=action_shape, **kwargs)
+
+        total_patches = (agent.img_h_size // agent.mvmae_patch_size) * (
+            (agent.nviews * agent.img_w_size) // agent.mvmae_patch_size
+        )
+        repr_dim = int(total_patches * agent.mvmae_encoder_embed_dim)
+
+        mvmae = MAEModel(
+            nviews=agent.nviews,
+            patch_size=agent.mvmae_patch_size,
+            encoder_embed_dim=agent.mvmae_encoder_embed_dim,
+            decoder_embed_dim=agent.mvmae_decoder_embed_dim,
+            encoder_heads=agent.mvmae_encoder_heads,
+            decoder_heads=agent.mvmae_decoder_heads,
+            in_channels=agent.in_channels,
+            img_h_size=agent.img_h_size,
+            img_w_size=agent.img_w_size,
+            masking_ratio=agent.masking_ratio,
+        )
+        actor = Actor(
+            repr_dim=repr_dim,
+            action_shape=agent.action_shape,
+            feature_dim=agent.feature_dim,
+            hidden_dim=agent.hidden_dim,
+        )
+        critic = Critic(
+            repr_dim=repr_dim,
+            action_shape=agent.action_shape,
+            feature_dim=agent.feature_dim,
+            hidden_dim=agent.hidden_dim,
         )
 
-        total_patches = (self.img_h_size // self.mvmae_patch_size) * ((self.nviews * self.img_w_size) // self.mvmae_patch_size)
-        self.repr_dim = int(total_patches * self.mvmae_encoder_embed_dim)  # static int
-
-        self.actor = Actor(
-            repr_dim=self.repr_dim,
-            action_shape=self.action_shape,
-            feature_dim=self.feature_dim,
-            hidden_dim=self.hidden_dim,
+        return agent.replace(
+            mvmae=mvmae,
+            actor=actor,
+            critic=critic,
+            mvmae_tx=optax.adam(agent.lr),
+            actor_tx=optax.adam(agent.lr),
+            critic_tx=optax.adam(agent.lr),
+            repr_dim=repr_dim,
         )
-        self.critic = Critic(
-            repr_dim=self.repr_dim,
-            action_shape=self.action_shape,
-            feature_dim=self.feature_dim,
-            hidden_dim=self.hidden_dim,
-        )
-
-        # Optimizers (transformations). Opt state is created in init_state().
-        self.mvmae_tx = optax.adam(self.lr)
-        self.actor_tx = optax.adam(self.lr)
-        self.critic_tx = optax.adam(self.lr)
 
     def init_state(self, seed: int) -> AgentState:
-        """Equivalent of old __init__ initialization, but JAX-safe."""
         rng = jax.random.PRNGKey(seed)
         rng, k_mae_p, k_mae_do, k_mae_mask, k_actor, k_critic = jax.random.split(rng, 6)
 
-        # Dummy observation input
         dummy_obs = jnp.zeros(
             (1, self.img_h_size, self.nviews * self.img_w_size, self.in_channels),
             dtype=jnp.float32,
         )
 
-        # Init runs the MVMAE forward so params exits
-        mvmae_vars = self.mvmae.init({"params": k_mae_p, "dropout": k_mae_do, "mask": k_mae_mask}, dummy_obs, deterministic=False)
+        mvmae_vars = self.mvmae.init(
+            {"params": k_mae_p, "dropout": k_mae_do, "mask": k_mae_mask},
+            dummy_obs,
+            deterministic=False,
+        )
         mvmae_params = mvmae_vars["params"]
 
         dummy_z = jnp.zeros((1, self.repr_dim), dtype=jnp.float32)
@@ -171,20 +193,15 @@ class DrQV2Agent(nn.Module):
         dummy_action = jnp.zeros((1, self.action_shape[0]), dtype=jnp.float32)
         critic_vars = self.critic.init({"params": k_critic}, dummy_z, dummy_action)
         critic_params = critic_vars["params"]
-        critic_target_params = critic_params
-
-        mvmae_opt_state = self.mvmae_tx.init(mvmae_params)
-        actor_opt_state = self.actor_tx.init(actor_params)
-        critic_opt_state = self.critic_tx.init(critic_params)
 
         return AgentState(
             mvmae_params=mvmae_params,
             actor_params=actor_params,
             critic_params=critic_params,
-            critic_target_params=critic_target_params,
-            mvmae_opt_state=mvmae_opt_state,
-            actor_opt_state=actor_opt_state,
-            critic_opt_state=critic_opt_state,
+            critic_target_params=critic_params,
+            mvmae_opt_state=self.mvmae_tx.init(mvmae_params),
+            actor_opt_state=self.actor_tx.init(actor_params),
+            critic_opt_state=self.critic_tx.init(critic_params),
             rng=rng,
         )
 
