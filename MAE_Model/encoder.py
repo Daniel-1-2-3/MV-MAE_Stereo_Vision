@@ -36,9 +36,7 @@ class ViTMaskedEncoder(nn.Module):
             for _ in range(self.depth)
         ]
 
-        # Separate norms (matches your original behavior)
-        self.norm_masked = nn.LayerNorm(epsilon=1e-6)
-        self.norm_unmasked = nn.LayerNorm(epsilon=1e-6)
+        self.norm = nn.LayerNorm(epsilon=1e-6)
 
         # Positional embeddings (constant buffer)
         each_view_w = self.img_w_fused_size // self.nviews
@@ -82,7 +80,7 @@ class ViTMaskedEncoder(nn.Module):
         for block in self.vit_blocks:
             x = block(x, deterministic=deterministic)
 
-        x = self.norm_masked(x) if mask_x else self.norm_unmasked(x)
+        x = x = self.norm(x)
         return x, mask
 
     def random_view_masking(self, x: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
