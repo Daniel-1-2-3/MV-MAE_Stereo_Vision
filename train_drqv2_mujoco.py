@@ -62,12 +62,12 @@ _SYNC_TIMINGS = flags.DEFINE_boolean("sync_timings", False, "Block for accurate 
 
 _DEBUG_TIMING = flags.DEFINE_boolean(
     "debug_timing",
-    False,
+    True,
     "Print detailed timing/compile diagnostics (may slow training).",
 )
 _DEBUG_EVERY_STEP = flags.DEFINE_boolean(
     "debug_every_step",
-    False,
+    True,
     "If true, run step-by-step (no scan) and time/log every env+update step. Very slow; use for diagnosis only.",
 )
 _DEBUG_COMPILE_LOWER = flags.DEFINE_boolean(
