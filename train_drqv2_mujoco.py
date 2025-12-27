@@ -56,19 +56,10 @@ _CRITIC_TAU = flags.DEFINE_float("critic_target_tau", 0.01, "Critic target tau")
 # The key “reference-like” knob: scan chunk length
 _UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 32, "Steps per jitted scan chunk")
 
-# Logging
-_LOG_EVERY_STEPS = flags.DEFINE_integer("log_every_steps", 20_480, "Print speed every N steps")
-_SYNC_TIMINGS = flags.DEFINE_boolean("sync_timings", False, "Block for accurate timings")
-
 _DEBUG_TIMING = flags.DEFINE_boolean(
     "debug_timing",
     True,
     "Print detailed timing/compile diagnostics (may slow training).",
-)
-_DEBUG_EVERY_STEP = flags.DEFINE_boolean(
-    "debug_every_step",
-    True,
-    "If true, run step-by-step (no scan) and time/log every env+update step. Very slow; use for diagnosis only.",
 )
 _DEBUG_COMPILE_LOWER = flags.DEFINE_boolean(
     "debug_compile_lower",
@@ -312,90 +303,55 @@ def main(argv):
     total_steps = int(_NUM_TIMESTEPS.value)
 
     # -------------------------
-    # Optional detailed debug timing / compile diagnostics
+    # Compile diagnostics (compile-only)
     # -------------------------
     if _DEBUG_TIMING.value:
-        print("[debug] timing diagnostics enabled", flush=True)
+        print("[debug] compile diagnostics enabled", flush=True)
         obs0 = _extract_obs(env_state)
 
-        # Compile-only timings (no execution) for key jitted fns.
         if _DEBUG_COMPILE_LOWER.value:
-            try:
-                _compile_time(act_jit, (agent_state, obs0, step_j, jp.asarray(False)), "act_jit")
-            except Exception as e:
-                print(f"[compile] act_jit lower().compile() failed: {e}", flush=True)
+            _compile_time(act_jit, (agent_state, obs0, step_j, jp.asarray(False)), "act_jit")
+            _compile_time(rollout_scan_jit, (carry,), "rollout_scan_jit")
 
-            try:
-                _compile_time(rollout_scan_jit, (carry,), "rollout_scan_jit")
-            except Exception as e:
-                print(f"[compile] rollout_scan_jit lower().compile() failed: {e}", flush=True)
+        print("[debug] compile diagnostics finished", flush=True)
 
-        # First-call timings (compile+execute) with blocking so timestamps are real.
-        try:
-            (_, _, _), _ = _timeit(
-                "act_jit first call (compile+exec)",
-                act_jit,
-                agent_state,
-                obs0,
-                step_j,
-                jp.asarray(False),
-                block=True,
-            )
-        except Exception as e:
-            print(f"[timing] act_jit first call failed: {e}", flush=True)
+    # -------------------------
+    # Block timing (one log per scan block)
+    # -------------------------
+    unroll = int(_UNROLL_LENGTH.value)
+    total_steps = int(_NUM_TIMESTEPS.value)
 
-        try:
-            _, _ = _timeit("rollout_scan_jit first call (compile+exec)", rollout_scan_jit, carry, block=True)
-        except Exception as e:
-            print(f"[timing] rollout_scan_jit first call failed: {e}", flush=True)
+    # (Optional) warm-up a single call so the first block timing isn't "compile+exec"
+    # Comment out if you already did compile diagnostics above.
+    carry, _ = rollout_scan_jit(carry)
+    carry[4].block_until_ready()  # one sync so warmup completes
 
-        print("[debug] timing diagnostics warmup finished", flush=True)
+    while True:
+        cur_step = int(carry[4])  # cheap; already host int from prior sync
+        if cur_step >= total_steps:
+            break
 
-    # Debug mode: run step-by-step (no scan) and time every step (VERY slow).
-    if _DEBUG_EVERY_STEP.value:
-        print("[debug] per-step timing enabled (this will be slow)", flush=True)
-        step_jit = jax.jit(lambda c: one_step(c, None))
+        t0 = time.monotonic()
+        carry, _ = rollout_scan_jit(carry)
 
-        for i in range(total_steps):
-            # Measure the whole step (env.step + rb_add + update) as executed on device.
-            t_step0 = time.monotonic()
-            carry, out = step_jit(carry)
-            _sync_tree((carry, out))  # force completion
-            dt = time.monotonic() - t_step0
+        # One sync per block (required for meaningful timing / fps)
+        carry[4].block_until_ready()
+        dt = time.monotonic() - t0
 
-            # out = (rew, done, stddev, metrics)
-            rew, done, stddev, metrics = out
-            cur_step = int(_maybe_block(carry[4]))
-            print(
-                f"[step] t={dt:.6f}s  step={cur_step}  rew={float(_maybe_block(rew)):.4f}  done={bool(_maybe_block(done))}  stddev={float(_maybe_block(stddev)):.4f}",
-                flush=True,
-            )
+        new_step = int(carry[4])
+        dsteps = new_step - cur_step  # should usually equal `unroll` unless you change step increments
 
-        print("[debug] per-step timing run finished", flush=True)
-        return
-    while int(_maybe_block(carry[4])) < total_steps:
-        carry, traj = rollout_scan_jit(carry)
+        fps = (dsteps / dt) if dt > 0 else float("inf")
+        ms_per_step = (dt / dsteps) * 1e3 if dsteps > 0 else float("inf")
 
-        if _SYNC_TIMINGS.value:
-            _sync_tree((carry, traj))
-
-        cur_step = int(_maybe_block(carry[4]))
-        if cur_step - speed_last_steps >= int(_LOG_EVERY_STEPS.value):
-            now_t = time.monotonic()
-            dt = now_t - speed_last_t
-            dsteps = cur_step - speed_last_steps
-            if dt > 0 and dsteps > 0:
-                sps = dsteps / dt
-                ms_per_step = (dt / dsteps) * 1e3
-                avg_sps = cur_step / max(1e-9, (now_t - speed_start_t))
-                print(
-                    f"[speed] steps={cur_step}  "
-                    f"inst={sps:,.1f} steps/s  "
-                    f"inst={ms_per_step:.3f} ms/step  "
-                    f"avg={avg_sps:,.1f} steps/s"
-                )
-            speed_last_t = now_t
-            speed_last_steps = cur_step
+        print(
+            f"[block] steps={new_step}  "
+            f"block_steps={dsteps}  "
+            f"dt={dt:.3f}s  "
+            f"fps={fps:.1f}  "
+            f"ms/step={ms_per_step:.3f}",
+            flush=True,
+        )
 
     print("Done training.")
 

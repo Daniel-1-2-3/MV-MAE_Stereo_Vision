@@ -307,7 +307,7 @@ class StereoPickCube(pick.PandaPickCube):
         data = mjx_env.step(self._mjx_model, data, ctrl, self.n_substeps)
 
         # Dense rewards (base task)
-        raw_rewards = self._get_reward(data, state.info)
+        raw_rewards = self._get_reward(data, info)
 
         # Extra penalties (must exist in reward_scales dict)
         hand_pos = data.geom_xpos[self._hand_capsule_geom]
@@ -331,7 +331,7 @@ class StereoPickCube(pick.PandaPickCube):
 
         if not self._vision:
             # Vision policy cannot access the required state-based observations.
-            da = jp.linalg.norm(action - state.info["prev_action"])
+            da = jp.linalg.norm(action - info["prev_action"])
             info["prev_action"] = action
             total_reward += self._config.reward_config.action_rate * da
             total_reward += no_soln * self._config.reward_config.no_soln_reward
@@ -340,12 +340,12 @@ class StereoPickCube(pick.PandaPickCube):
         box_pos = data.xpos[self._obj_body]
         lifted = (box_pos[2] > 0.05) * self._config.reward_config.lifted_reward
         total_reward += lifted
-        success = self._get_success(data, state.info)
+        success = self._get_success(data, info)
         total_reward += success * self._config.reward_config.success_reward
 
         # Reward progress
-        reward = jp.maximum(total_reward - state.info["prev_reward"], jp.zeros_like(total_reward))
-        state.info["prev_reward"] = jp.maximum(total_reward, state.info["prev_reward"])
+        reward = jp.maximum(total_reward - info["prev_reward"], jp.zeros_like(total_reward))
+        info["prev_reward"] = jp.maximum(total_reward, info["prev_reward"])
         reward = jp.where(newly_reset, 0.0, reward)  # prevent first-step artifact
 
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
@@ -365,12 +365,12 @@ class StereoPickCube(pick.PandaPickCube):
         info["_steps"] = steps
 
         # Vision obs (always enabled per your guarantee)
-        _, rgb, _ = self._render_jit(state.info["render_token"], data)
+        _, rgb, _ = self._render_jit(info["render_token"], data)
         # rgb is (num_cams, num_worlds, H, W, 4) for batch renderer
         img_left  = jp.asarray(rgb[0, 0, ..., :3], dtype=jp.float32) / 255.0
         img_right = jp.asarray(rgb[1, 0, ..., :3], dtype=jp.float32) / 255.0
         obs = Prepare.fuse_normalize([img_left, img_right])
-        obs = adjust_brightness(obs, state.info["brightness"])
+        obs = adjust_brightness(obs, info["brightness"])
 
         return state.replace(
             data=data,
