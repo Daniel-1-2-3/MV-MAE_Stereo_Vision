@@ -18,4 +18,4 @@ from absl import app
 import train_drqv2_mujoco
 
 def main():
-    train_drqv2_mujoco.main()
+    app.run(train_drqv2_mujoco.main)

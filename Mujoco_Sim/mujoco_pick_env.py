@@ -282,15 +282,17 @@ class StereoPickCube(pick.PandaPickCube):
 
     def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
         """Runs one timestep of the environment's dynamics."""
-        state.info["newly_reset"] = state.info["_steps"] == 0
+        info = dict(state.info)  # NEW: copy once; do not mutate original
 
-        newly_reset = state.info["newly_reset"]
-        state.info["prev_reward"] = jp.where(newly_reset, 0.0, state.info["prev_reward"])
-        state.info["reached_box"] = jp.where(newly_reset, 0.0, state.info["reached_box"])
-        state.info["prev_action"] = jp.where(
+        newly_reset = (info["_steps"] == 0)
+        info["newly_reset"] = newly_reset
+
+        info["prev_reward"] = jp.where(newly_reset, 0.0, info["prev_reward"])
+        info["reached_box"] = jp.where(newly_reset, 0.0, info["reached_box"])
+        info["prev_action"] = jp.where(
             newly_reset,
             jp.zeros((int(self._mjx_model.nu),), dtype=jp.float32),
-            state.info["prev_action"],
+            info["prev_action"],
         )
 
         data = state.data
@@ -330,7 +332,7 @@ class StereoPickCube(pick.PandaPickCube):
         if not self._vision:
             # Vision policy cannot access the required state-based observations.
             da = jp.linalg.norm(action - state.info["prev_action"])
-            state.info["prev_action"] = action
+            info["prev_action"] = action
             total_reward += self._config.reward_config.action_rate * da
             total_reward += no_soln * self._config.reward_config.no_soln_reward
 
@@ -348,24 +350,19 @@ class StereoPickCube(pick.PandaPickCube):
 
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
         out_of_bounds |= box_pos[2] < 0.0
-        state.metrics.update(out_of_bounds=out_of_bounds.astype(float))
-        state.metrics.update({f"reward/{k}": v for k, v in raw_rewards.items()})
-        state.metrics.update(
-            {
-                "reward/lifted": lifted.astype(float),
-                "reward/success": success.astype(float),
-            }
-        )
+        metrics = dict(state.metrics)  # NEW: copy once; no in-place update
+        metrics["out_of_bounds"] = out_of_bounds.astype(float)
+        for k, v in raw_rewards.items():
+            metrics[f"reward/{k}"] = v
+        metrics["reward/lifted"] = lifted.astype(float)
+        metrics["reward/success"] = success.astype(float)
 
         done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any() | success
 
         # Ensure exact sync between newly_reset and the autoresetwrapper.
-        state.info["_steps"] += self._config.action_repeat
-        state.info["_steps"] = jp.where(
-            done | (state.info["_steps"] >= self._config.episode_length),
-            0,
-            state.info["_steps"],
-        )
+        steps = info["_steps"] + self._config.action_repeat
+        steps = jp.where(done | (steps >= self._config.episode_length), 0, steps)
+        info["_steps"] = steps
 
         # Vision obs (always enabled per your guarantee)
         _, rgb, _ = self._render_jit(state.info["render_token"], data)
@@ -380,7 +377,8 @@ class StereoPickCube(pick.PandaPickCube):
             obs=obs,
             reward=reward,
             done=done.astype(float),
-            info=state.info,
+            metrics=metrics,
+            info=info,
         )
 
     def _get_success(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
