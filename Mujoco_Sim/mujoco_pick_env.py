@@ -23,6 +23,7 @@ from ml_collections import config_dict
 import mujoco
 from mujoco import mjx
 import numpy as np
+from pathlib import Path
 
 from Custom_Mujoco_Playground._src import mjx_env
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
@@ -30,6 +31,28 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import pick
 from MAE_Model.prepare_input import Prepare
 
+def _add_assets_from_dir(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
+    """Adds every file under `root` into MuJoCo assets.
+
+    We register BOTH:
+      - the relative path key (e.g. 'assets/mesh.obj')
+      - the basename key (e.g. 'mesh.obj')
+    because different XMLs reference files differently.
+    """
+    root = root.resolve()
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        data = p.read_bytes()
+
+        rel_key = p.relative_to(root).as_posix()
+        base_key = p.name
+
+        # Prefer existing entries (don't clobber), but fill missing ones.
+        assets.setdefault(rel_key, data)
+        assets.setdefault(base_key, data)
+
+    return assets
 
 def default_vision_config() -> config_dict.ConfigDict:
     return config_dict.create(
@@ -40,7 +63,6 @@ def default_vision_config() -> config_dict.ConfigDict:
         use_rasterizer=False,
         enabled_geom_groups=[0, 1, 2],
     )
-
 
 def default_config():
     config = config_dict.create(
@@ -101,7 +123,15 @@ class StereoPickCube(pick.PandaPickCube):
             / "mjx_single_cube_camera.xml"
         )
         self._xml_path = xml_path.as_posix()
-        self._model_assets = panda.get_assets()
+        self._model_assets = dict(panda.get_assets())  # copy, in case it's not a plain dict
+        menagerie_dir = (
+            Path.cwd()
+            / "mujoco_playground_external_deps"
+            / "mujoco_menagerie"
+            / "franka_emika_panda"
+        )
+        # This is the missing include target directory
+        self._model_assets = _add_assets_from_dir(self._model_assets, menagerie_dir)
 
         mj_model = self.modify_model(
             mujoco.MjModel.from_xml_string(xml_path.read_text(), assets=self._model_assets)
