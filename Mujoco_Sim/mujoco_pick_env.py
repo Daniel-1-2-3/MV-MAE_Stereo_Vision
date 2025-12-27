@@ -53,7 +53,7 @@ def _add_assets_from_dir_unique_basename(
 def default_vision_config() -> config_dict.ConfigDict:
     return config_dict.create(
         gpu_id=0,
-        render_batch_size=128,
+        render_batch_size=1,
         render_width=64,
         render_height=64,
         use_rasterizer=False,
