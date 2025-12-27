@@ -154,11 +154,17 @@ def main(argv):
     # -------------------------
     # Replay buffer
     # -------------------------
+    
     rb = rb_init(
-        capacity=int(_BUFFER_SIZE.value),
-        obs_shape=(obs_shape[0], obs_shape[1], obs_shape[2]),
-        action_dim=int(act_dim),
+    capacity=int(_BUFFER_SIZE.value),
+    obs_shape=(obs_shape[0], obs_shape[1], obs_shape[2]),
+    action_shape=(int(act_dim),),
+        # optional: keep defaults unless you want to override
+        # reward_shape=(1,),
+        # discount_shape=(1,),
+        # obs_dtype=jnp.uint8,
     )
+
 
     # -------------------------
     # Agent
