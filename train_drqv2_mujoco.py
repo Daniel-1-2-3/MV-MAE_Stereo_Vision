@@ -1,361 +1,362 @@
+# train_sac_like_ppo_scan.py
+# Matches the structure of train_drqv2_mujoco_2.py (PPO reference) but runs SAC/DrQv2.
+# Key: env.step (and renderer.render inside it) executes inside jax.lax.scan under jit.
+
 from __future__ import annotations
 
+import datetime
+import json
+import os
 import time
+import warnings
 from dataclasses import dataclass
-from contextlib import contextmanager
-from typing import Dict, Optional, Callable, Any
+from typing import Any, Dict, Tuple
+
+from absl import app, flags, logging
 
 import jax
 import jax.numpy as jnp
+from etils import epath
 
+import Custom_Mujoco_Playground
+from Custom_Mujoco_Playground import registry
+
+# Your SAC/DrQv2 + replay + wrappers
 from DrQv2_Architecture.drqv2 import DrQV2Agent
 from DrQv2_Architecture.replay_buffer import rb_init, rb_add, rb_sample_jit
 from DrQv2_Architecture.env_wrappers import FrameStackWrapper, ActionRepeatWrapper
-from Mujoco_Sim.mujoco_pick_env import StereoPickCube
 
 
 # -------------------------
-# Timing helpers
+# Env + run flags (mirror PPO reference style)
 # -------------------------
-@contextmanager
-def timed(name: str, stats: Dict[str, float], sync: Optional[Callable[[], None]] = None):
-    t0 = time.monotonic_ns()
-    yield
-    if sync is not None:
-        sync()
-    dt_ms = (time.monotonic_ns() - t0) / 1e6
-    stats[name] = stats.get(name, 0.0) + dt_ms
-
-
-def sync_tree(x: Any):
-    """Force device completion for a pytree."""
-    def _sync_one(y):
-        return y.block_until_ready() if hasattr(y, "block_until_ready") else y
-
-    jax.tree_util.tree_map(_sync_one, x)
+_ENV_NAME = flags.DEFINE_string(
+    "env_name",
+    "PandaPickCubeCartesian",
+    f"Name of the environment. One of {', '.join(registry.ALL_ENVS)}",
+)
+_IMPL = flags.DEFINE_enum("impl", "jax", ["jax", "warp"], "MJX implementation")
+_VISION = flags.DEFINE_boolean("vision", True, "Use vision input")
+_SUFFIX = flags.DEFINE_string("suffix", None, "Suffix for the experiment name")
+_SEED = flags.DEFINE_integer("seed", 1, "Random seed")
+_NUM_TIMESTEPS = flags.DEFINE_integer("num_timesteps", 1_000_000, "Total env steps")
 
 
 # -------------------------
-# Config
+# SAC/DrQ flags (keep minimal; tune as needed)
 # -------------------------
-@dataclass
-class TrainConfig:
-    seed: int = 1
+_IMG_H = flags.DEFINE_integer("img_h", 64, "Input image height")
+_IMG_W = flags.DEFINE_integer("img_w", 64, "Single-view width (final fused is 2W for stereo)")
+_NVIEWS = flags.DEFINE_integer("nviews", 2, "Number of views fused side-by-side")
+_STACK_K = flags.DEFINE_integer("stack_k", 3, "Frame stack count (channels = 3*K)")
+_ACTION_REPEAT = flags.DEFINE_integer("action_repeat", 2, "Action repeat")
+_EPISODE_LENGTH = flags.DEFINE_integer("episode_length", 300, "Episode horizon/length")
 
-    # env
-    img_h_size: int = 64
-    img_w_size: int = 64
-    nviews: int = 2
-    action_repeat: int = 2
-    episode_horizon: int = 300
-    discount: float = 0.99
+_BUFFER_SIZE = flags.DEFINE_integer("buffer_size", 100_000, "Replay capacity")
+_BATCH_SIZE = flags.DEFINE_integer("batch_size", 32, "SAC batch size")
+_NSTEP = flags.DEFINE_integer("nstep", 3, "N-step returns")
+_GAMMA = flags.DEFINE_float("gamma", 0.99, "Discount factor")
 
-    # obs stacking (in_channels = 3 * K)
-    in_channels: int = 9  # e.g., K=3 frames
+_NUM_EXPL_STEPS = flags.DEFINE_integer("num_expl_steps", 2_000, "Uniform random exploration steps")
+_STD_START = flags.DEFINE_float("std_start", 1.0, "Policy std schedule start")
+_STD_END = flags.DEFINE_float("std_end", 0.1, "Policy std schedule end")
+_STD_DURATION = flags.DEFINE_integer("std_duration", 100_000, "Std schedule duration")
+_STDDEV_CLIP = flags.DEFINE_float("stddev_clip", 0.3, "Pre-tanh clip (Torch parity)")
 
-    # replay
-    buffer_size: int = 100_000
-    batch_size: int = 32
-    nstep: int = 3
-    gamma: float = 0.99
+# Update cadence (mirrors your old TrainConfig usage)
+_UPDATE_EVERY = flags.DEFINE_integer("update_every_steps", 2, "Update every N env steps")
+_UPDATE_MVMAE_EVERY = flags.DEFINE_integer("update_mvmae_every_steps", 4, "Update MV-MAE every N env steps")
+_COEF_MVMAE = flags.DEFINE_float("coef_mvmae", 1.0, "MV-MAE loss coefficient")
+_CRITIC_TAU = flags.DEFINE_float("critic_target_tau", 0.01, "Critic target EMA tau")
 
-    # training schedule
-    total_steps: int = 200_000
-    learning_starts: int = 2_000
-    num_expl_steps: int = 2_000
+# Scan/unroll (THIS is the reference-style structural change)
+_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 32, "Steps per jitted scan chunk")
 
-    # update cadence
-    update_every_steps: int = 2
-    update_mvmae_every_steps: int = 10
-
-    # actor noise schedule (DrQV2Agent.act uses linear schedule)
-    std_start: float = 1.0
-    std_end: float = 0.1
-    std_duration: int = 500_000
-    stddev_clip: float = 0.3
-
-    # losses / target update
-    coef_mvmae: float = 0.005
-    critic_target_tau: float = 0.001
-
-    # eval
-    eval_every_steps: int = 10_000
-    num_eval_episodes: int = 10
-
-    # debugging / timing
-    print_every_steps: int = 3          # print timing breakdown every N steps
-    warmup_steps: int = 2               # do not print timing for first N steps
-    sync_timings: bool = True           # True => accurate timings (forces device sync)
-    heartbeat_every_steps: int = 50     # prints progress without syncing huge arrays
+# Logging
+_LOG_EVERY_STEPS = flags.DEFINE_integer("log_every_steps", 20_480, "Print speed every N steps")
+_SYNC_TIMINGS = flags.DEFINE_boolean("sync_timings", False, "If true, block for accurate timings")
 
 
-def make_env(cfg: TrainConfig, render_mode: str):
-    env = StereoPickCube()
-    env = ActionRepeatWrapper(env, num_repeats=cfg.action_repeat)           # repeat first
-    env = FrameStackWrapper(env, num_frames=cfg.in_channels // 3)           # then stack
-    return env
+# -------------------------
+# Runtime env vars (mirror PPO reference)
+# -------------------------
+xla_flags = os.environ.get("XLA_FLAGS", "")
+xla_flags += " --xla_gpu_triton_gemm_any=True"
+os.environ["XLA_FLAGS"] = xla_flags
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["MUJOCO_GL"] = "egl"
+
+logging.set_verbosity(logging.WARNING)
+
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="jax")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="jax")
+warnings.filterwarnings("ignore", category=UserWarning, module="absl")
 
 
-def main():
-    cfg = TrainConfig()
+# -------------------------
+# Helpers
+# -------------------------
+def _maybe_block(x):
+    if hasattr(x, "block_until_ready"):
+        return x.block_until_ready()
+    return x
 
-    # Create train env (also used for eval)
-    train_env = make_env(cfg, render_mode="rgb_array")
+def _sync_tree(x):
+    jax.tree_util.tree_map(_maybe_block, x)
 
-    act_dim = train_env.action_size
-    obs_shape = (cfg.img_h_size, cfg.nviews * cfg.img_w_size, cfg.in_channels)
+def _extract_obs(state) -> jnp.ndarray:
+    # Common keys used by playground wrappers: pixels/view_0 etc.
+    # Your DrQV2Agent expects fused/stacked obs already from your env wrappers.
+    # Here we assume your env wrapper produces a tensor obs (not dict).
+    if isinstance(state.obs, dict):
+        # If it is a dict, prefer 'pixels/view_0' if present, else first item.
+        if "pixels/view_0" in state.obs:
+            return state.obs["pixels/view_0"]
+        return next(iter(state.obs.values()))
+    return state.obs
 
+def _extract_reward_done(state) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    # Many playground states have .reward and .done as jnp arrays.
+    rew = getattr(state, "reward", None)
+    done = getattr(state, "done", None)
+    if rew is None:
+        # fallback: might be in metrics or info
+        rew = state.metrics.get("reward", jnp.asarray(0.0, jnp.float32)) if hasattr(state, "metrics") else jnp.asarray(0.0, jnp.float32)
+    if done is None:
+        done = state.metrics.get("done", jnp.asarray(False)) if hasattr(state, "metrics") else jnp.asarray(False)
+    # Ensure scalar shapes are consistent
+    rew = jnp.asarray(rew)
+    done = jnp.asarray(done).astype(jnp.bool_)
+    return rew, done
+
+def make_env() -> Any:
+    # Match reference: config via registry.get_default_config / registry.load
+    env_cfg = registry.get_default_config(_ENV_NAME.value)
+    env_cfg["impl"] = _IMPL.value
+
+    if _VISION.value:
+        env_cfg.vision = True
+        # IMPORTANT: single-world training here
+        env_cfg.vision_config.render_batch_size = 1
+
+    env = registry.load(_ENV_NAME.value, config=env_cfg)
+
+    # Mirror your pipeline: action-repeat, then frame-stack
+    env = ActionRepeatWrapper(env, num_repeats=_ACTION_REPEAT.value)
+    env = FrameStackWrapper(env, num_frames=_STACK_K.value)
+
+    return env, env_cfg
+
+
+# -------------------------
+# Main
+# -------------------------
+def main(argv):
+    del argv
+
+    env, env_cfg = make_env()
+
+    # Experiment name + logdir (mirror reference)
+    now = datetime.datetime.now()
+    timestamp = now.strftime("%Y%m%d-%H%M%S")
+    exp_name = f"{_ENV_NAME.value}-SAC-{timestamp}"
+    if _SUFFIX.value is not None:
+        exp_name += f"-{_SUFFIX.value}"
+
+    logdir = epath.Path("logs").resolve() / exp_name
+    logdir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = logdir / "checkpoints"
+    ckpt_path.mkdir(parents=True, exist_ok=True)
+
+    print(f"Experiment name: {exp_name}")
+    print(f"Logs are being stored in: {logdir}")
+
+    # Save env config like reference
+    with open(ckpt_path / "config.json", "w", encoding="utf-8") as fp:
+        json.dump(env_cfg.to_dict() if hasattr(env_cfg, "to_dict") else dict(env_cfg), fp, indent=4)
+
+    # Infer action/obs shapes
+    act_dim = env.action_size
+    in_channels = 3 * _STACK_K.value
+    obs_shape = (_IMG_H.value, _NVIEWS.value * _IMG_W.value, in_channels)
+
+    # Replay buffer on device
     rb = rb_init(
-        capacity=cfg.buffer_size,
-        obs_shape=obs_shape,
-        action_shape=(act_dim,),
-        reward_shape=(1,),
-        discount_shape=(1,),
+        capacity=_BUFFER_SIZE.value,
+        obs_shape=(obs_shape[0], obs_shape[1], obs_shape[2]),
+        action_dim=act_dim,
     )
 
+    # Agent
     agent = DrQV2Agent.create(
         action_shape=(act_dim,),
-        nviews=cfg.nviews,
-        mvmae_patch_size=8,
-        mvmae_encoder_embed_dim=256,
-        mvmae_decoder_embed_dim=128,
-        mvmae_encoder_heads=16,
-        mvmae_decoder_heads=16,
-        in_channels=cfg.in_channels,
-        img_h_size=cfg.img_h_size,
-        img_w_size=cfg.img_w_size,
-        masking_ratio=0.75,
-        feature_dim=100,
-        hidden_dim=1024,
-        lr=1e-4,
+        nviews=_NVIEWS.value,
+        in_channels=in_channels,
+        img_h_size=_IMG_H.value,
+        img_w_size=_IMG_W.value,
     )
-    agent_state = agent.init_state(cfg.seed)
+    agent_state = agent.init_state(_SEED.value)
 
-    # JIT wrapper for agent.act
+    # Jitted policy act (Torch-parity behavior is inside agent.act)
     act_jit = jax.jit(
-        lambda state, obs, step, eval_mode: DrQV2Agent.act(
+        lambda st, obs, step, eval_mode: DrQV2Agent.act(
             agent=agent,
-            state=state,
+            state=st,
             obs=obs,
             step=step,
             eval_mode=eval_mode,
-            num_expl_steps=cfg.num_expl_steps,
-            std_start=cfg.std_start,
-            std_end=cfg.std_end,
-            std_duration=cfg.std_duration,
-            clip_pre_tanh=cfg.stddev_clip,
+            num_expl_steps=_NUM_EXPL_STEPS.value,
+            std_start=_STD_START.value,
+            std_end=_STD_END.value,
+            std_duration=_STD_DURATION.value,
+            clip_pre_tanh=_STDDEV_CLIP.value,
             deterministic_encoder=False,
         )
     )
 
-    # Update step - JIT-able
+    # Jitted update step (handles update_every gating inside)
     update_jit = jax.jit(
-        lambda state, batch, step, stddev: DrQV2Agent.update_step(
+        lambda st, batch, step, stddev: DrQV2Agent.update_step(
             agent=agent,
-            state=state,
+            state=st,
             batch=batch,
             step=step,
-            update_every_steps=cfg.update_every_steps,
-            update_mvmae_every_steps=cfg.update_mvmae_every_steps,
-            coef_mvmae=cfg.coef_mvmae,
-            critic_target_tau=cfg.critic_target_tau,
+            update_every_steps=_UPDATE_EVERY.value,
+            update_mvmae_every_steps=_UPDATE_MVMAE_EVERY.value,
+            coef_mvmae=_COEF_MVMAE.value,
+            critic_target_tau=_CRITIC_TAU.value,
             stddev=stddev,
-            stddev_clip=cfg.stddev_clip,
+            stddev_clip=_STDDEV_CLIP.value,
         )
     )
 
-    # training state
-    rng = jax.random.PRNGKey(cfg.seed)
-    eval_rng = jax.random.PRNGKey(cfg.seed + 12345)
+    # Reset env
+    rng = jax.random.PRNGKey(_SEED.value)
     rng, reset_key = jax.random.split(rng)
-    env_state = train_env.reset(reset_key)
+    env_state = env.reset(reset_key)
 
-    # Keep episode stats ON DEVICE to avoid per-step device->host sync.
+    # Device episode stats (avoid python sync)
     ep_return = jnp.asarray(0.0, jnp.float32)
-    ep_len = 0
-    episode = 0
+    ep_len = jnp.asarray(0, jnp.int32)
 
-    wall_t0 = time.time()
-    next_eval_at = cfg.eval_every_steps
+    # ------------------------------------------------------------
+    # Reference-style compiled rollout: jitted lax.scan chunk
+    # ------------------------------------------------------------
+    def rollout_chunk(carry, _):
+        """
+        One step of: act -> env.step -> rb_add -> maybe update -> maybe reset
+        Runs inside lax.scan under jit, like reference rollouts.
+        """
+        (env_state, agent_state, rb, rng, step, ep_return, ep_len) = carry
 
-    def do_eval(agent_state_in):
-        nonlocal eval_rng, env_state
-        saved_env_state = env_state
+        obs = _extract_obs(env_state)
 
-        returns = []
-        for _ in range(cfg.num_eval_episodes):
-            eval_rng, k = jax.random.split(eval_rng)
-            st = train_env.reset(k)
+        # Policy action
+        action, agent_state2, stddev = act_jit(agent_state, obs, step, jnp.asarray(False))
 
-            R = 0.0
-            steps = 0
+        # Env step
+        next_env_state = env.step(env_state, action)
 
-            while steps < cfg.episode_horizon:
-                step_j = jnp.asarray(0, jnp.int32)
+        # Reward/done
+        rew, done = _extract_reward_done(next_env_state)
+        # discount for rb (1 - done) * gamma
+        disc = (jnp.asarray(1.0, jnp.float32) - done.astype(jnp.float32)) * jnp.asarray(_GAMMA.value, jnp.float32)
 
-                action, _unused_state, _std = act_jit(
-                    agent_state_in, st.obs, step_j, jnp.asarray(True)
-                )
-                st = train_env.step(st, action)
+        # Replay add (B=1)
+        rb2 = rb_add(
+            rb,
+            obs_b=obs[None, ...],
+            action_b=action[None, ...],
+            reward_b=rew[None, ...],
+            discount_b=disc[None, ...],
+            done_b=done[None, ...],
+        )
 
-                # Eval is allowed to sync; it's infrequent.
-                R += float(st.reward)
-                if bool(st.done > 0.5):
-                    break
-                steps += 1
+        # Sample + update (still inside jit; batch_size/nstep are static)
+        rng2, sample_key = jax.random.split(rng)
+        batch = rb_sample_jit(rb2, sample_key, batch_size=_BATCH_SIZE.value, nstep=_NSTEP.value, gamma=_GAMMA.value)
 
-            returns.append(R)
+        agent_state3, metrics = update_jit(agent_state2, batch, step, stddev)
 
-        env_state = saved_env_state
-        return sum(returns) / max(1, len(returns))
+        # Episode stats update
+        ep_return2 = ep_return + rew.astype(jnp.float32)
+        ep_len2 = ep_len + jnp.asarray(1, jnp.int32)
 
-    # -------------------------
-    # Warmup (compile once)
-    # -------------------------
-    # Warmup act_jit
+        # Auto-reset on done (still inside jit)
+        def _do_reset(args):
+            rng_in, = args
+            rng_out, k = jax.random.split(rng_in)
+            s0 = env.reset(k)
+            return s0, rng_out, jnp.asarray(0.0, jnp.float32), jnp.asarray(0, jnp.int32)
+
+        def _no_reset(args):
+            rng_in, = args
+            return next_env_state, rng_in, ep_return2, ep_len2
+
+        env_state3, rng3, ep_return3, ep_len3 = jax.lax.cond(
+            done,
+            _do_reset,
+            _no_reset,
+            (rng2,),
+        )
+
+        step2 = step + jnp.asarray(1, jnp.int32)
+
+        new_carry = (env_state3, agent_state3, rb2, rng3, step2, ep_return3, ep_len3)
+        # Trajectory outputs (optional)
+        out = (rew, done, stddev, metrics)
+        return new_carry, out
+
+    rollout_scan_jit = jax.jit(
+        lambda carry: jax.lax.scan(rollout_chunk, carry, None, length=_UNROLL_LENGTH.value),
+    )
+
+    # ------------------------------------------------------------
+    # Speed logging (mirror reference)
+    # ------------------------------------------------------------
+    times = [time.monotonic()]
+    speed_start_t = times[0]
+    speed_last_t = times[0]
+    speed_last_steps = 0
+
+    total_steps = int(_NUM_TIMESTEPS.value)
     step0 = jnp.asarray(0, jnp.int32)
-    _a, _st, _sd = act_jit(agent_state, env_state.obs, step0, jnp.asarray(False))
-    if cfg.sync_timings:
-        sync_tree((_a, _st, _sd))
 
-    # Warmup env step (compiles renderer/custom call path)
-    dummy_action = jnp.zeros((act_dim,), dtype=jnp.float32)
-    st1 = train_env.step(env_state, dummy_action)
-    if cfg.sync_timings:
-        sync_tree(st1)
+    carry = (env_state, agent_state, rb, rng, step0, ep_return, ep_len)
 
-    # -------------------------
-    # Train loop
-    # -------------------------
-    for step in range(cfg.total_steps):
-        step_stats: Dict[str, float] = {}
-        did_update = False
+    # Drive training by chunks (Python only launches compiled scan)
+    # This is analogous to reference code calling a compiled train_fn and using progress callbacks.
+    while int(_maybe_block(carry[4])) < total_steps:
+        t0 = time.monotonic()
 
-        if cfg.heartbeat_every_steps > 0 and (step % cfg.heartbeat_every_steps == 0):
-            # Heartbeat: prints without forcing extra device sync beyond Python itself.
-            print(f"progress step={step}")
+        carry, traj = rollout_scan_jit(carry)
 
-        with timed("make_step_j", step_stats):
-            step_j = jnp.asarray(step, jnp.int32)
+        if _SYNC_TIMINGS.value:
+            _sync_tree((carry, traj))
 
-        # ACT
-        with timed(
-            "act_jit",
-            step_stats,
-            sync=(lambda: sync_tree((action, stddev)) if cfg.sync_timings else None),
-        ):
-            action, agent_state, stddev = act_jit(
-                agent_state, env_state.obs, step_j, jnp.asarray(False)
-            )
+        t1 = time.monotonic()
 
-        # ENV STEP
-        with timed(
-            "env_step",
-            step_stats,
-            sync=(lambda: sync_tree(next_env_state) if cfg.sync_timings else None),
-        ):
-            next_env_state = train_env.step(env_state, action)
-
-        # REPLAY ADD
-        with timed(
-            "rb_add",
-            step_stats,
-            sync=(lambda: sync_tree((rb.ptr, rb.size)) if cfg.sync_timings else None),
-        ):
-            obs_b = env_state.obs  # (1,H,W2,C)
-            act_b = action[None, ...]
-            rew_b = jnp.asarray(next_env_state.reward, jnp.float32).reshape(1, 1)
-            done_b = jnp.asarray(next_env_state.done > 0.5).reshape(1,)
-            disc_b = (1.0 - done_b.astype(jnp.float32)).reshape(1, 1)
-            rb = rb_add(rb, obs_b, act_b, rew_b, disc_b, done_b)
-
-        # Episode bookkeeping: stay on device
-        with timed("ep_bookkeeping", step_stats):
-            ep_return = ep_return + jnp.asarray(next_env_state.reward, jnp.float32)
-            ep_len += 1
-            done_dev = (next_env_state.done > 0.5)  # device bool
-
-        # UPDATE
-        if step >= cfg.learning_starts:
-            did_update = True
-            with timed("rng_split", step_stats):
-                rng, k = jax.random.split(rng)
-
-            with timed(
-                "rb_sample_jit",
-                step_stats,
-                sync=(lambda: None),
-            ):
-                batch = rb_sample_jit(
-                    rb, k, batch_size=cfg.batch_size, nstep=cfg.nstep, gamma=cfg.gamma
+        # progress logging every LOG_EVERY_STEPS (like reference)
+        cur_step = int(_maybe_block(carry[4]))
+        if cur_step - speed_last_steps >= int(_LOG_EVERY_STEPS.value):
+            now_t = time.monotonic()
+            dt = now_t - speed_last_t
+            dsteps = cur_step - speed_last_steps
+            if dt > 0 and dsteps > 0:
+                sps = dsteps / dt
+                ms_per_step = (dt / dsteps) * 1e3
+                avg_sps = cur_step / max(1e-9, (now_t - speed_start_t))
+                print(
+                    f"[speed] steps={cur_step}  "
+                    f"inst={sps:,.1f} steps/s  "
+                    f"inst={ms_per_step:.3f} ms/step  "
+                    f"avg={avg_sps:,.1f} steps/s"
                 )
-                if cfg.sync_timings:
-                    sync_tree(batch)
+            speed_last_t = now_t
+            speed_last_steps = cur_step
 
-            with timed(
-                "update_jit",
-                step_stats,
-                sync=(lambda: sync_tree((action, stddev)) if cfg.sync_timings else None),
-            ):
-                agent_state, metrics = update_jit(agent_state, batch, step_j, stddev)
-
-        # EPISODE END CHECK
-        # Only one host sync here (bool()), unavoidable if you need Python control flow.
-        with timed("episode_check", step_stats):
-            done_host = bool(done_dev)
-
-        if done_host or (ep_len >= cfg.episode_horizon):
-            episode += 1
-            # Only sync ep_return when you print (infrequent).
-            ep_ret_host = float(ep_return)
-            print(
-                f"[train] episode={episode} step={step} ep_len={ep_len} ep_return={ep_ret_host:.3f}"
-            )
-            ep_return = jnp.asarray(0.0, jnp.float32)
-            ep_len = 0
-            with timed("reset_rng", step_stats):
-                rng, reset_key = jax.random.split(rng)
-            with timed(
-                "env_reset",
-                step_stats,
-                sync=(lambda: sync_tree(next_env_state) if cfg.sync_timings else None),
-            ):
-                next_env_state = train_env.reset(reset_key)
-
-        env_state = next_env_state
-
-        # EVAL (infrequent)
-        if (step + 1) >= next_eval_at:
-            with timed("eval_total", step_stats):
-                avg_R = do_eval(agent_state)
-
-            elapsed = time.time() - wall_t0
-            sps = (step + 1) / max(1e-9, elapsed)
-            print(f"[eval] step={step+1} avg_return={avg_R:.3f} steps_per_sec={sps:.1f}")
-            next_eval_at += cfg.eval_every_steps
-
-        # Print timing breakdown
-        if step >= cfg.warmup_steps and (cfg.print_every_steps > 0) and (step % cfg.print_every_steps == 0):
-            order = [
-                "make_step_j",
-                "act_jit",
-                "env_step",
-                "rb_add",
-                "ep_bookkeeping",
-                "rng_split",
-                "rb_sample_jit",
-                "update_jit",
-                "episode_check",
-                "reset_rng",
-                "env_reset",
-                "eval_total",
-            ]
-            parts = [f"{k}={step_stats[k]:.2f}ms" for k in order if k in step_stats]
-            total = sum(step_stats.values())
-            print("timing:", "  ".join(parts), f"  TOTAL={total:.2f}ms", f"  updated={did_update}")
-
-    print("Done training")
+    print("Done training.")
 
 
 if __name__ == "__main__":
-    main()
+    app.run(main)
