@@ -72,18 +72,25 @@ class ViTMaskedDecoder(nn.Module):
         batch, k_patches, d_dec = x.shape
         total_patches = mask.shape[1]
 
-        # If already full-length, skip scatter logic
-        # (This keeps it robust if run decoder on unmasked sequences)
+        # If already full-length, RETURN A FULL-LENGTH TENSOR (same shape as scatter branch)
+        # This avoids lax.cond branch shape mismatch.
         def _already_full():
-            return x
-
-        def _scatter_into_full():
-            unmasked = (mask == 0) # Unmasked positions are where mask == 0
+            unmasked = (mask == 0)
             x_full = jnp.broadcast_to(self.mask_tokens, (batch, total_patches, d_dec))
-            token_idx = jax.vmap( # Indices of unmasked patches per batch (size fixed to k_patches)
+            token_idx = jax.vmap(
                 lambda m: jnp.nonzero(m, size=k_patches, fill_value=0)[0]
             )(unmasked)  # (B, k_patches)
-            x_full = jax.vmap(lambda xf, idx, xb: xf.at[idx].set(xb))(x_full, token_idx, x) # Scatter: x_full[b, token_idx[b, :], :] = x[b, :, :]
+            x_full = jax.vmap(lambda xf, idx, xb: xf.at[idx].set(xb))(x_full, token_idx, x)
+            return x_full
+
+        def _scatter_into_full():
+            unmasked = (mask == 0)  # Unmasked positions are where mask == 0
+            x_full = jnp.broadcast_to(self.mask_tokens, (batch, total_patches, d_dec))
+            token_idx = jax.vmap(  # Indices of unmasked patches per batch (size fixed to k_patches)
+                lambda m: jnp.nonzero(m, size=k_patches, fill_value=0)[0]
+            )(unmasked)  # (B, k_patches)
+            # Scatter: x_full[b, token_idx[b, :], :] = x[b, :, :]
+            x_full = jax.vmap(lambda xf, idx, xb: xf.at[idx].set(xb))(x_full, token_idx, x)
             return x_full
 
         x = jax.lax.cond(k_patches == total_patches, _already_full, _scatter_into_full)
