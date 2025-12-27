@@ -59,7 +59,7 @@ _COEF_MVMAE = flags.DEFINE_float("coef_mvmae", 1.0, "MV-MAE coefficient")
 _CRITIC_TAU = flags.DEFINE_float("critic_target_tau", 0.01, "Critic target tau")
 
 # The key “reference-like” knob: scan chunk length
-_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 10000, "Steps per jitted scan chunk")
+_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 2000, "Steps per jitted scan chunk")
 
 _DEBUG_TIMING = flags.DEFINE_boolean(
     "debug_timing",
@@ -75,8 +75,7 @@ _DEBUG_COMPILE_LOWER = flags.DEFINE_boolean(
 # -------------------------
 # Eval config (NEW)
 # -------------------------
-_EVAL_EVERY = 10_000     # run eval every N training env steps
-_EVAL_STEPS = 1_000      # run eval for ~1000 steps
+_EVAL_STEPS = 500      # run eval for ~1000 steps
 _EVAL_FPS = 20
 _EVAL_RENDER_SIZE = 256
 
@@ -147,22 +146,20 @@ def _extract_reward_done(state) -> Tuple[jp.ndarray, jp.ndarray]:
     return rew, done
 
 
-def _obs_to_u8_frame(obs_hw_c: jp.ndarray) -> jp.ndarray:
-    """
-    obs_hw_c: (H, 2W, C) float32, normalized like Prepare.fuse_normalize.
-              If frame-stacked, we take the last 3 channels as the most recent RGB frame.
-
-    returns: (H, 2W, 3) uint8 RGB in [0,255]
-    """
-    rgb_norm = obs_hw_c[..., -3:]  # (H, 2W, 3)
-    rgb = rgb_norm * _STD + _MEAN
-    rgb = jp.clip(rgb, 0.0, 1.0)
+def _obs_to_u8_frame(obs: jp.ndarray) -> jp.ndarray:
+    obs = jp.asarray(obs)
+    if obs.ndim == 4:
+        obs = obs[0]  # (H,2W,C)
+    rgb_norm = obs[..., -3:]
+    rgb = jp.clip(rgb_norm * _STD + _MEAN, 0.0, 1.0)
     return (rgb * 255.0).astype(jp.uint8)
 
-
 def _save_eval_gif(save_dir: epath.Path, frames_u8: np.ndarray, file_name: str, fps: int = _EVAL_FPS):
-    """frames_u8: (T, H, 2W, 3) uint8."""
-    resized = [cv2.resize(f, (_EVAL_RENDER_SIZE * 2, _EVAL_RENDER_SIZE)) for f in frames_u8]
+    resized = []
+    for f in frames_u8:
+        if f.ndim == 4 and f.shape[0] == 1:
+            f = f[0]
+        resized.append(cv2.resize(f, (_EVAL_RENDER_SIZE * 2, _EVAL_RENDER_SIZE)))
     out_path = save_dir / (file_name + ".gif")
     imageio.mimsave(str(out_path), resized, fps=fps)
 
