@@ -44,9 +44,8 @@ def rb_init(
         size=jnp.array(0, jnp.int32),
         capacity=capacity,
     )
-
-def _float01_to_u8(x: jnp.ndarray) -> jnp.ndarray:
-    # Ensure finite before scaling/casting.
+    
+def _float01_to_u8(x):
     x = jnp.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
     x = jnp.clip(x, 0.0, 1.0)
     x = jnp.round(x * 255.0)

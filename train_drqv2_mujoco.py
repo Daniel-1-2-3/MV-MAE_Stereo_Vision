@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import argparse
 import time
 from dataclasses import dataclass
+from contextlib import contextmanager
+from typing import Dict, Optional, Callable, Any
 
 import jax
 import jax.numpy as jnp
@@ -10,9 +11,33 @@ import jax.numpy as jnp
 from DrQv2_Architecture.drqv2 import DrQV2Agent
 from DrQv2_Architecture.replay_buffer import rb_init, rb_add, rb_sample_jit
 from DrQv2_Architecture.env_wrappers import FrameStackWrapper, ActionRepeatWrapper
-
 from Mujoco_Sim.mujoco_pick_env import StereoPickCube
 
+
+# -------------------------
+# Timing helpers
+# -------------------------
+@contextmanager
+def timed(name: str, stats: Dict[str, float], sync: Optional[Callable[[], None]] = None):
+    t0 = time.monotonic_ns()
+    yield
+    if sync is not None:
+        sync()
+    dt_ms = (time.monotonic_ns() - t0) / 1e6
+    stats[name] = stats.get(name, 0.0) + dt_ms
+
+
+def sync_tree(x: Any):
+    """Force device completion for a pytree."""
+    def _sync_one(y):
+        return y.block_until_ready() if hasattr(y, "block_until_ready") else y
+
+    jax.tree_util.tree_map(_sync_one, x)
+
+
+# -------------------------
+# Config
+# -------------------------
 @dataclass
 class TrainConfig:
     seed: int = 1
@@ -57,12 +82,19 @@ class TrainConfig:
     eval_every_steps: int = 10_000
     num_eval_episodes: int = 10
 
+    # debugging / timing
+    print_every_steps: int = 10          # print timing breakdown every N steps
+    warmup_steps: int = 2               # do not print timing for first N steps
+    sync_timings: bool = True           # True => accurate timings (forces device sync)
+    heartbeat_every_steps: int = 50     # prints progress without syncing huge arrays
+
+
 def make_env(cfg: TrainConfig, render_mode: str):
     env = StereoPickCube()
-    # apply ActionRepeat first, then FrameStack on top.
-    env = ActionRepeatWrapper(env, num_repeats=cfg.action_repeat)
-    env = FrameStackWrapper(env, num_frames=cfg.in_channels // 3)
+    env = ActionRepeatWrapper(env, num_repeats=cfg.action_repeat)           # repeat first
+    env = FrameStackWrapper(env, num_frames=cfg.in_channels // 3)           # then stack
     return env
+
 
 def main():
     cfg = TrainConfig()
@@ -116,7 +148,7 @@ def main():
         )
     )
 
-    # Update step - JIT-able (agent captured; python ints are static via closure)
+    # Update step - JIT-able
     update_jit = jax.jit(
         lambda state, batch, step, stddev: DrQV2Agent.update_step(
             agent=agent,
@@ -134,93 +166,196 @@ def main():
 
     # training state
     rng = jax.random.PRNGKey(cfg.seed)
-    eval_rng = jax.random.PRNGKey(cfg.seed + 12345) # separate stream for eval
+    eval_rng = jax.random.PRNGKey(cfg.seed + 12345)
     rng, reset_key = jax.random.split(rng)
     env_state = train_env.reset(reset_key)
 
-    ep_return = 0.0
+    # Keep episode stats ON DEVICE to avoid per-step device->host sync.
+    ep_return = jnp.asarray(0.0, jnp.float32)
     ep_len = 0
     episode = 0
 
-    t0 = time.time()
+    wall_t0 = time.time()
     next_eval_at = cfg.eval_every_steps
 
     def do_eval(agent_state_in):
-        nonlocal eval_rng, env_state  # env_state exists in outer scope
-        saved_env_state = env_state  # Save training env_state so eval doesn't mess up the on-going episode
+        nonlocal eval_rng, env_state
+        saved_env_state = env_state
 
         returns = []
         for _ in range(cfg.num_eval_episodes):
             eval_rng, k = jax.random.split(eval_rng)
             st = train_env.reset(k)
 
-            done = False
             R = 0.0
             steps = 0
 
-            while (not bool(done)) and steps < cfg.episode_horizon:
+            while steps < cfg.episode_horizon:
                 step_j = jnp.asarray(0, jnp.int32)
 
-                # eval_mode=True => mean action (no sampling)
-                action, _unused_state, _std = act_jit(agent_state_in, st.obs, step_j, jnp.asarray(True))
+                action, _unused_state, _std = act_jit(
+                    agent_state_in, st.obs, step_j, jnp.asarray(True)
+                )
                 st = train_env.step(st, action)
+
+                # Eval is allowed to sync; it's infrequent.
                 R += float(st.reward)
-                done = bool(st.done > 0.5)
+                if bool(st.done > 0.5):
+                    break
                 steps += 1
 
             returns.append(R)
 
-        env_state = saved_env_state # Restore training env_state
+        env_state = saved_env_state
         return sum(returns) / max(1, len(returns))
 
-    # train / eval alternating 
+    # -------------------------
+    # Warmup (compile once)
+    # -------------------------
+    # Warmup act_jit
+    step0 = jnp.asarray(0, jnp.int32)
+    _a, _st, _sd = act_jit(agent_state, env_state.obs, step0, jnp.asarray(False))
+    if cfg.sync_timings:
+        sync_tree((_a, _st, _sd))
+
+    # Warmup env step (compiles renderer/custom call path)
+    dummy_action = jnp.zeros((act_dim,), dtype=jnp.float32)
+    st1 = train_env.step(env_state, dummy_action)
+    if cfg.sync_timings:
+        sync_tree(st1)
+
+    # -------------------------
+    # Train loop
+    # -------------------------
     for step in range(cfg.total_steps):
-        t = time.monotonic()
-        print(step, f"{t:.3f}s")
-        
-        step_j = jnp.asarray(step, jnp.int32)
+        step_stats: Dict[str, float] = {}
+        did_update = False
 
-        action, agent_state, stddev = act_jit(agent_state, env_state.obs, step_j, jnp.asarray(False)) # Take action
-        next_env_state = train_env.step(env_state, action)
+        if cfg.heartbeat_every_steps > 0 and (step % cfg.heartbeat_every_steps == 0):
+            # Heartbeat: prints without forcing extra device sync beyond Python itself.
+            print(f"progress step={step}")
 
-        # store transition
-        # replay expects obs: [B,H,W2,C], action: [B,A], reward/discount: [B,1], done: [B]
-        obs_b = env_state.obs  # already (1,H,W2,C)
-        act_b = action[None, ...]
-        rew_b = jnp.asarray(next_env_state.reward, jnp.float32).reshape(1, 1)
-        done_b = jnp.asarray(next_env_state.done > 0.5).reshape(1,)
-        disc_b = (1.0 - done_b.astype(jnp.float32)).reshape(1, 1)
-        rb = rb_add(rb, obs_b, act_b, rew_b, disc_b, done_b)
+        with timed("make_step_j", step_stats):
+            step_j = jnp.asarray(step, jnp.int32)
 
-        ep_return += float(next_env_state.reward)
-        ep_len += 1
+        # ACT
+        with timed(
+            "act_jit",
+            step_stats,
+            sync=(lambda: sync_tree(agent_state) if cfg.sync_timings else None),
+        ):
+            action, agent_state, stddev = act_jit(
+                agent_state, env_state.obs, step_j, jnp.asarray(False)
+            )
 
-        # update if past learning_starts
+        # ENV STEP
+        with timed(
+            "env_step",
+            step_stats,
+            sync=(lambda: sync_tree(env_state) if cfg.sync_timings else None),
+        ):
+            next_env_state = train_env.step(env_state, action)
+
+        # REPLAY ADD
+        with timed(
+            "rb_add",
+            step_stats,
+            sync=(lambda: sync_tree(rb) if cfg.sync_timings else None),
+        ):
+            obs_b = env_state.obs  # (1,H,W2,C)
+            act_b = action[None, ...]
+            rew_b = jnp.asarray(next_env_state.reward, jnp.float32).reshape(1, 1)
+            done_b = jnp.asarray(next_env_state.done > 0.5).reshape(1,)
+            disc_b = (1.0 - done_b.astype(jnp.float32)).reshape(1, 1)
+            rb = rb_add(rb, obs_b, act_b, rew_b, disc_b, done_b)
+
+        # Episode bookkeeping: stay on device
+        with timed("ep_bookkeeping", step_stats):
+            ep_return = ep_return + jnp.asarray(next_env_state.reward, jnp.float32)
+            ep_len += 1
+            done_dev = (next_env_state.done > 0.5)  # device bool
+
+        # UPDATE
         if step >= cfg.learning_starts:
-            rng, k = jax.random.split(rng)
-            batch = rb_sample_jit(rb, k, batch_size=cfg.batch_size, nstep=cfg.nstep, gamma=cfg.gamma)
-            agent_state, metrics = update_jit(agent_state, batch, step_j, stddev)
+            did_update = True
+            with timed("rng_split", step_stats):
+                rng, k = jax.random.split(rng)
 
-        # --- episode handling ---
-        if bool(next_env_state.done > 0.5) or ep_len >= cfg.episode_horizon:
+            with timed(
+                "rb_sample_jit",
+                step_stats,
+                sync=(lambda: None),
+            ):
+                batch = rb_sample_jit(
+                    rb, k, batch_size=cfg.batch_size, nstep=cfg.nstep, gamma=cfg.gamma
+                )
+                if cfg.sync_timings:
+                    sync_tree(batch)
+
+            with timed(
+                "update_jit",
+                step_stats,
+                sync=(lambda: sync_tree(agent_state) if cfg.sync_timings else None),
+            ):
+                agent_state, metrics = update_jit(agent_state, batch, step_j, stddev)
+
+        # EPISODE END CHECK
+        # Only one host sync here (bool()), unavoidable if you need Python control flow.
+        with timed("episode_check", step_stats):
+            done_host = bool(done_dev)
+
+        if done_host or (ep_len >= cfg.episode_horizon):
             episode += 1
-            print(f"[train] episode={episode} step={step} ep_len={ep_len} ep_return={ep_return:.3f}")
-            ep_return = 0.0
+            # Only sync ep_return when you print (infrequent).
+            ep_ret_host = float(ep_return)
+            print(
+                f"[train] episode={episode} step={step} ep_len={ep_len} ep_return={ep_ret_host:.3f}"
+            )
+            ep_return = jnp.asarray(0.0, jnp.float32)
             ep_len = 0
-            rng, reset_key = jax.random.split(rng)
-            next_env_state = train_env.reset(reset_key)
+            with timed("reset_rng", step_stats):
+                rng, reset_key = jax.random.split(rng)
+            with timed(
+                "env_reset",
+                step_stats,
+                sync=(lambda: sync_tree(env_state) if cfg.sync_timings else None),
+            ):
+                next_env_state = train_env.reset(reset_key)
 
         env_state = next_env_state
 
-        # eval chunk
+        # EVAL (infrequent)
         if (step + 1) >= next_eval_at:
-            avg_R = do_eval(agent_state)
-            elapsed = time.time() - t0
+            with timed("eval_total", step_stats):
+                avg_R = do_eval(agent_state)
+
+            elapsed = time.time() - wall_t0
             sps = (step + 1) / max(1e-9, elapsed)
             print(f"[eval] step={step+1} avg_return={avg_R:.3f} steps_per_sec={sps:.1f}")
             next_eval_at += cfg.eval_every_steps
 
+        # Print timing breakdown
+        if step >= cfg.warmup_steps and (cfg.print_every_steps > 0) and (step % cfg.print_every_steps == 0):
+            order = [
+                "make_step_j",
+                "act_jit",
+                "env_step",
+                "rb_add",
+                "ep_bookkeeping",
+                "rng_split",
+                "rb_sample_jit",
+                "update_jit",
+                "episode_check",
+                "reset_rng",
+                "env_reset",
+                "eval_total",
+            ]
+            parts = [f"{k}={step_stats[k]:.2f}ms" for k in order if k in step_stats]
+            total = sum(step_stats.values())
+            print("timing:", "  ".join(parts), f"  TOTAL={total:.2f}ms", f"  updated={did_update}")
+
     print("Done training")
+
 
 if __name__ == "__main__":
     main()

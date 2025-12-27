@@ -167,7 +167,7 @@ class StereoPickCube(pick.PandaPickCube):
                 num_worlds=self._config.vision_config.render_batch_size,
                 batch_render_view_width=self._config.vision_config.render_width,
                 batch_render_view_height=self._config.vision_config.render_height,
-                enabled_geom_groups=np.asarray(self._config.vision_config.enabled_geom_groups),
+                enabled_geom_groups=np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32),
                 enabled_cameras=None,  # use all cameras
                 add_cam_debug_geo=False,
                 use_rasterizer=self._config.vision_config.use_rasterizer,
