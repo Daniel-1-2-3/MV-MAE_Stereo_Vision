@@ -238,7 +238,7 @@ def main(argv):
         # Add to replay (B=1)
         rb2 = rb_add(
             rb,
-            obs_b=obs[None, ...],
+            obs_b=obs,
             action_b=action[None, ...],
             reward_b=rew[None, ...],
             discount_b=disc[None, ...],
