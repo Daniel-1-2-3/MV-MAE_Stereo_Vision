@@ -31,26 +31,22 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import pick
 from MAE_Model.prepare_input import Prepare
 
-def _add_assets_from_dir(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
-    """Adds every file under `root` into MuJoCo assets.
+def _add_assets_from_dir_unique_basename(
+    assets: dict[str, bytes], root: Path
+) -> dict[str, bytes]:
+    used_basenames = {Path(k).name for k in assets.keys()}
 
-    We register BOTH:
-      - the relative path key (e.g. 'assets/mesh.obj')
-      - the basename key (e.g. 'mesh.obj')
-    because different XMLs reference files differently.
-    """
-    root = root.resolve()
     for p in root.rglob("*"):
         if not p.is_file():
             continue
-        data = p.read_bytes()
+
+        base = p.name
+        if base in used_basenames:
+            continue
 
         rel_key = p.relative_to(root).as_posix()
-        base_key = p.name
-
-        # Prefer existing entries (don't clobber), but fill missing ones.
-        assets.setdefault(rel_key, data)
-        assets.setdefault(base_key, data)
+        assets[rel_key] = p.read_bytes()
+        used_basenames.add(base)
 
     return assets
 
@@ -131,7 +127,7 @@ class StereoPickCube(pick.PandaPickCube):
             / "franka_emika_panda"
         )
         # This is the missing include target directory
-        self._model_assets = _add_assets_from_dir(self._model_assets, menagerie_dir)
+        self._model_assets = _add_assets_from_dir_unique_basename(self._model_assets, menagerie_dir)
 
         mj_model = self.modify_model(
             mujoco.MjModel.from_xml_string(xml_path.read_text(), assets=self._model_assets)
