@@ -287,9 +287,9 @@ class DrQV2Agent:
         z_next = mvmae.apply(
             {"params": mvmae_params},
             next_obs,
-            deterministic=False,
+            deterministic=True,
             method=MAEModel.encoder_no_masking,
-            rngs={"dropout": rng_znext},
+            rngs={},
         )
         z_next = jax.lax.stop_gradient(z_next).reshape(z_next.shape[0], -1)
         
@@ -439,7 +439,7 @@ class DrQV2Agent:
             return state, metrics
 
         def do_update_fn():
-            rng = state.rng
+            _, rng = jax.random.split(state.rng) 
             
             def encode_obs_with_grads():
                 z = agent.mvmae.apply(
