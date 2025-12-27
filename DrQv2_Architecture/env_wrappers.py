@@ -7,7 +7,7 @@ import jax.numpy as jnp
 
 @struct.dataclass
 class FrameStackInfo:
-    frames: jax.Array  # (K, 1, H, W2, C)
+    frames: jax.Array  # (K,  H, W2, C)
     filled: jax.Array  # int32 scalar
 
 @struct.dataclass
@@ -27,17 +27,23 @@ class FrameStackWrapper:
         self._K = int(num_frames)
 
     def _init_fs(self, obs: jnp.ndarray) -> FrameStackInfo:
-        frames = jnp.broadcast_to(obs, (self._K,) + obs.shape)  # (K,1,H,W2,C)
+        # obs comes in as (1,H,W2,C); store frames without the leading batch dim
+        obs3 = obs[0]  # (H,W2,C)
+        frames = jnp.broadcast_to(obs3, (self._K,) + obs3.shape)  # (K,H,W2,C)
         return FrameStackInfo(frames=frames, filled=jnp.int32(1))
 
     def _push(self, fs: FrameStackInfo, obs: jnp.ndarray) -> FrameStackInfo:
+        # obs comes in as (1,H,W2,C); store without the leading batch dim
+        obs3 = obs[0]  # (H,W2,C)
         frames = jnp.roll(fs.frames, shift=1, axis=0)
-        frames = frames.at[0].set(obs)
+        frames = frames.at[0].set(obs3)
         filled = jnp.minimum(fs.filled + 1, jnp.int32(self._K))
         return FrameStackInfo(frames=frames, filled=filled)
 
     def _stack(self, fs: FrameStackInfo) -> jnp.ndarray:
-        return jnp.concatenate(tuple(fs.frames[i] for i in range(self._K)), axis=-1)
+        # fs.frames is (K,H,W2,C); output should stay (1,H,W2,K*C)
+        x = jnp.concatenate(tuple(fs.frames[i] for i in range(self._K)), axis=-1)  # (H,W2,K*C)
+        return x[None, ...]  # (1,H,W2,K*C)
 
     def reset(self, rng):
         st = self._env.reset(rng)
