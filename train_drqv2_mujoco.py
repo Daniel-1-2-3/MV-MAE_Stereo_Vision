@@ -49,12 +49,12 @@ _STD_DURATION = flags.DEFINE_integer("std_duration", 100_000, "Std schedule dura
 _STDDEV_CLIP = flags.DEFINE_float("stddev_clip", 0.3, "Pre-tanh clip")
 
 _UPDATE_EVERY = flags.DEFINE_integer("update_every_steps", 2, "Update every N steps")
-_UPDATE_MVMAE_EVERY = flags.DEFINE_integer("update_mvmae_every_steps", 4, "MV-MAE update cadence")
+_UPDATE_MVMAE_EVERY = flags.DEFINE_integer("update_mvmae_every_steps", 10, "MV-MAE update cadence")
 _COEF_MVMAE = flags.DEFINE_float("coef_mvmae", 1.0, "MV-MAE coefficient")
 _CRITIC_TAU = flags.DEFINE_float("critic_target_tau", 0.01, "Critic target tau")
 
 # The key “reference-like” knob: scan chunk length
-_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 32, "Steps per jitted scan chunk")
+_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 512, "Steps per jitted scan chunk")
 
 _DEBUG_TIMING = flags.DEFINE_boolean(
     "debug_timing",
@@ -332,7 +332,12 @@ def main(argv):
             break
 
         t0 = time.monotonic()
-        carry, _ = rollout_scan_jit(carry)
+        carry, traj = rollout_scan_jit(carry)
+        rew, done, stddev, metrics = traj
+        # one block-level sync so numbers are real (same sync you already do for timing)
+        rew = rew.block_until_ready()
+        mean_rew = float(jp.mean(rew))
+        print(f"[reward] steps={int(carry[4])} mean_rew={mean_rew:.4f}", flush=True)
 
         # One sync per block (required for meaningful timing / fps)
         carry[4].block_until_ready()

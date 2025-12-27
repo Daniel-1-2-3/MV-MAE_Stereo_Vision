@@ -274,28 +274,14 @@ class DrQV2Agent:
         *, mvmae, actor, critic, # modules (Flax Module objects, used with .apply)
         mvmae_params, actor_params, critic_params, critic_target_params, mvmae_opt_state, critic_opt_state, # params + opt states
         mvmae_tx: optax.GradientTransformation, critic_tx: optax.GradientTransformation, # optimizer related 
-        obs, action, reward, discount, next_obs, # batch (already on-device jnp arrays)
+        obs, z, action, reward, discount, next_obs, # batch (already on-device jnp arrays)
         rng: jax.Array, step: jnp.ndarray, update_mvmae: jnp.ndarray, coef_mvmae: float, critic_target_tau: float, stddev: jnp.ndarray, stddev_clip: float,  # flags/hparams
     ) -> tuple[tuple[Any, ...], dict]:
         """
             Returns:
                 (new_mvmae_params, new_critic_params, new_critic_target_params, new_mvmae_opt_state, new_critic_opt_state, new_rng), metrics dict (jnp arrays)
         """
-        rng, rng_z, rng_znext, rng_nextact, rng_mask, rng_drop = jax.random.split(rng, 6)
-        
-        def encode_obs_with_grads():
-            z = mvmae.apply(
-                {"params": mvmae_params}, # learned weights and biases
-                obs, deterministic=False, # arguments into the chosen method
-                method=MAEModel.encoder_no_masking, rngs={"dropout": rng_z}
-            )
-            return z
-        
-        def encode_obs_no_grads():
-            return jax.lax.stop_gradient(encode_obs_with_grads())
-    
-        z = jax.lax.cond(update_mvmae, encode_obs_with_grads, encode_obs_no_grads) # Only use grads on encoder when update_mvmae is true
-        z = z.reshape(z.shape[0], -1)
+        rng, rng_znext, rng_nextact, rng_mask, rng_drop = jax.random.split(rng, 5)
         
         # Calculate z_next always with no grads
         z_next = mvmae.apply(
@@ -454,7 +440,23 @@ class DrQV2Agent:
 
         def do_update_fn():
             rng = state.rng
-            (new_mvmae_params, new_critic_params, new_critic_target_params, new_mvmae_opt_state, new_critic_opt_state, rng), metrics_c = DrQV2Agent.update_critic(
+            
+            def encode_obs_with_grads():
+                z = agent.mvmae.apply(
+                    {"params": state.mvmae_params}, # learned weights and biases
+                    obs, deterministic=True, # arguments into the chosen method
+                    method=MAEModel.encoder_no_masking, rngs={}
+                )
+                return z
+            
+            def encode_obs_no_grads():
+                return jax.lax.stop_gradient(encode_obs_with_grads())
+        
+            z = jax.lax.cond(update_mvmae, encode_obs_with_grads, encode_obs_no_grads) # Only use grads on encoder when update_mvmae is true
+            z = z.reshape(z.shape[0], -1)
+
+            (new_mvmae_params, new_critic_params, new_critic_target_params, 
+             new_mvmae_opt_state, new_critic_opt_state, rng), metrics_c = DrQV2Agent.update_critic(
                 mvmae=agent.mvmae,
                 actor=agent.actor,
                 critic=agent.critic,
@@ -466,6 +468,7 @@ class DrQV2Agent:
                 critic_opt_state=state.critic_opt_state,
                 mvmae_tx=agent.mvmae_tx,
                 critic_tx=agent.critic_tx,
+                z=z,
                 obs=obs,
                 action=action,
                 reward=reward,
@@ -479,18 +482,8 @@ class DrQV2Agent:
                 stddev=stddev,
                 stddev_clip=stddev_clip,
             )
-
-            # Recompute z for actor update, using updated mvmae params, no gradients
-            z_for_actor = agent.mvmae.apply(
-                {"params": new_mvmae_params},
-                obs,
-                deterministic=True,
-                method=MAEModel.encoder_no_masking,
-                rngs={},
-            )
-
-            z_for_actor = jax.lax.stop_gradient(z_for_actor).reshape(z_for_actor.shape[0], -1)
-
+            
+            z_for_actor = jax.lax.stop_gradient(z)
             # Actor update (uses updated critic params)
             (new_actor_params, new_actor_opt_state, rng), metrics_a = DrQV2Agent.update_actor(
                 actor=agent.actor,
