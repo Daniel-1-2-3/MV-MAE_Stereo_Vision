@@ -266,8 +266,10 @@ class StereoPickCube(pick.PandaPickCube):
             render_token, rgb, _ = self.renderer.init(data, self._mjx_model)
             info.update({"render_token": render_token})
 
-            img_left = jp.asarray(rgb[0][..., :3], dtype=jp.float32) / 255.0
-            img_right = jp.asarray(rgb[1][..., :3], dtype=jp.float32) / 255.0
+            # rgb is (num_cams, num_worlds, H, W, 4) for batch renderer
+            img_left  = jp.asarray(rgb[0, 0, ..., :3], dtype=jp.float32) / 255.0
+            img_right = jp.asarray(rgb[1, 0, ..., :3], dtype=jp.float32) / 255.0
+
             obs = Prepare.fuse_normalize([img_left, img_right])  # (1, H, 2W, 3)
             obs = adjust_brightness(obs, brightness)
 
@@ -373,8 +375,9 @@ class StereoPickCube(pick.PandaPickCube):
 
         # Vision obs (always enabled per your guarantee)
         _, rgb, _ = self.renderer.render(state.info["render_token"], data, self._mjx_model)
-        img_left = jp.asarray(rgb[0][..., :3], dtype=jp.float32) / 255.0
-        img_right = jp.asarray(rgb[1][..., :3], dtype=jp.float32) / 255.0
+        # rgb is (num_cams, num_worlds, H, W, 4) for batch renderer
+        img_left  = jp.asarray(rgb[0, 0, ..., :3], dtype=jp.float32) / 255.0
+        img_right = jp.asarray(rgb[1, 0, ..., :3], dtype=jp.float32) / 255.0
         obs = Prepare.fuse_normalize([img_left, img_right])
         obs = adjust_brightness(obs, state.info["brightness"])
 
