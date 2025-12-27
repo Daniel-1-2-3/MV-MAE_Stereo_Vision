@@ -289,6 +289,8 @@ class StereoPickCube(pick.PandaPickCube):
             state.info["prev_action"],
         )
 
+        data = state.date
+
         # Motor-space control (PandaPickCube-style): ctrl += action * scale
         delta = action * self._config.action_scale
         ctrl = data.ctrl + delta
