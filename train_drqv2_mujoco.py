@@ -175,7 +175,9 @@ def main():
 
     # train / eval alternating 
     for step in range(cfg.total_steps):
-        print(step)
+        t = time.monotonic()
+        print(step, f"{t:.3f}s")
+        
         step_j = jnp.asarray(step, jnp.int32)
 
         action, agent_state, stddev = act_jit(agent_state, env_state.obs, step_j, jnp.asarray(False)) # Take action
