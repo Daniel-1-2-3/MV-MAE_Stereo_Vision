@@ -26,7 +26,9 @@ def rb_init(
     action_shape: Tuple[int, ...],       # (act_dim,)
     reward_shape: Tuple[int, ...] = (1,),
     discount_shape: Tuple[int, ...] = (1,),
-    obs_dtype=jnp.float32,
+    # Pixels should be stored compactly (DrQ-style). Keep as uint8 in the buffer
+    # and convert to float32 in [0,1] when sampling.
+    obs_dtype=jnp.uint8,
     action_dtype=jnp.float32,
     reward_dtype=jnp.float32,
     discount_dtype=jnp.float32,
@@ -42,6 +44,17 @@ def rb_init(
         size=jnp.array(0, jnp.int32),
         capacity=capacity,
     )
+
+
+def _float01_to_u8(x: jnp.ndarray) -> jnp.ndarray:
+    """Convert float image in [0,1] to uint8 [0,255] safely."""
+    x = jnp.clip(x * 255.0, 0.0, 255.0)
+    return x.astype(jnp.uint8)
+
+
+def _u8_to_float01(x: jnp.ndarray, dtype=jnp.float32) -> jnp.ndarray:
+    """Convert uint8 image [0,255] to float in [0,1]."""
+    return (x.astype(dtype)) * (1.0 / 255.0)
 
 def _ring_phys_index(rb: ReplayBufferState, t_logical: jnp.ndarray) -> jnp.ndarray:
     """
@@ -67,7 +80,9 @@ def rb_add(
     B = obs_b.shape[0]
     idxs = (rb.ptr + jnp.arange(B, dtype=jnp.int32)) % rb.capacity
 
-    new_obs = rb.obs.at[idxs].set(obs_b)
+    # Store pixels compactly. Expect obs_b float in [0,1].
+    obs_u8 = _float01_to_u8(obs_b)
+    new_obs = rb.obs.at[idxs].set(obs_u8)
     new_action = rb.action.at[idxs].set(action_b)
     new_reward = rb.reward.at[idxs].set(reward_b)
     new_discount = rb.discount.at[idxs].set(discount_b)
@@ -116,11 +131,11 @@ def rb_sample(rb: ReplayBufferState, key: jax.Array, batch_size: int, nstep: int
 
     def empty():
         # shape-correct zero batch
-        obs0 = jnp.zeros((batch_size,) + rb.obs.shape[1:], rb.obs.dtype)
+        obs0 = jnp.zeros((batch_size,) + rb.obs.shape[1:], jnp.float32)
         act0 = jnp.zeros((batch_size,) + rb.action.shape[1:], rb.action.dtype)
         rew0 = jnp.zeros((batch_size,) + rb.reward.shape[1:], rb.reward.dtype)
         disc0 = jnp.ones((batch_size,) + rb.discount.shape[1:], rb.discount.dtype)
-        nxt0 = jnp.zeros((batch_size,) + rb.obs.shape[1:], rb.obs.dtype)
+        nxt0 = jnp.zeros((batch_size,) + rb.obs.shape[1:], jnp.float32)
         return obs0, act0, rew0, disc0, nxt0
 
     def nonempty():
@@ -146,7 +161,7 @@ def rb_sample(rb: ReplayBufferState, key: jax.Array, batch_size: int, nstep: int
 
         # gather obs/action at start
         phys0 = jax.vmap(lambda t: _ring_phys_index(rb, t))(chosen)
-        obs = rb.obs[phys0]
+        obs = _u8_to_float01(rb.obs[phys0], dtype=jnp.float32)
         action = rb.action[phys0]
 
         # n-step accumulate reward/discount exactly like your loop:
@@ -176,7 +191,7 @@ def rb_sample(rb: ReplayBufferState, key: jax.Array, batch_size: int, nstep: int
 
         # next_obs at t+nstep
         phys_next = jax.vmap(lambda t: _ring_phys_index(rb, t + nstep))(chosen)
-        next_obs = rb.obs[phys_next]
+        next_obs = _u8_to_float01(rb.obs[phys_next], dtype=jnp.float32)
 
         return obs, action, reward_n, discount_n, next_obs
 
