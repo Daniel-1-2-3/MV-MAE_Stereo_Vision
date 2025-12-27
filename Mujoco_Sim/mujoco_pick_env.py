@@ -174,6 +174,10 @@ class StereoPickCube(pick.PandaPickCube):
                 viz_gpu_hdls=None,
             )
 
+            # JIT the render path once so XLA doesn’t recompile (and spam warnings) every step.
+            # We close over self._mjx_model so it is static in the compiled function.
+            self._render_jit = jax.jit(lambda token, data: self.renderer.render(token, data, self._mjx_model))
+
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
         self._guide_q = self._mj_model.keyframe("picked").qpos
@@ -364,7 +368,7 @@ class StereoPickCube(pick.PandaPickCube):
         )
 
         # Vision obs (always enabled per your guarantee)
-        _, rgb, _ = self.renderer.render(state.info["render_token"], data, self._mjx_model)
+        _, rgb, _ = self._render_jit(state.info["render_token"], data)
         # rgb is (num_cams, num_worlds, H, W, 4) for batch renderer
         img_left  = jp.asarray(rgb[0, 0, ..., :3], dtype=jp.float32) / 255.0
         img_right = jp.asarray(rgb[1, 0, ..., :3], dtype=jp.float32) / 255.0

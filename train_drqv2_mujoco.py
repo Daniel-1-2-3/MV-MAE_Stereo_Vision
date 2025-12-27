@@ -83,7 +83,7 @@ class TrainConfig:
     num_eval_episodes: int = 10
 
     # debugging / timing
-    print_every_steps: int = 10          # print timing breakdown every N steps
+    print_every_steps: int = 3          # print timing breakdown every N steps
     warmup_steps: int = 2               # do not print timing for first N steps
     sync_timings: bool = True           # True => accurate timings (forces device sync)
     heartbeat_every_steps: int = 50     # prints progress without syncing huge arrays
@@ -242,7 +242,7 @@ def main():
         with timed(
             "act_jit",
             step_stats,
-            sync=(lambda: sync_tree(agent_state) if cfg.sync_timings else None),
+            sync=(lambda: sync_tree((action, stddev)) if cfg.sync_timings else None),
         ):
             action, agent_state, stddev = act_jit(
                 agent_state, env_state.obs, step_j, jnp.asarray(False)
@@ -252,7 +252,7 @@ def main():
         with timed(
             "env_step",
             step_stats,
-            sync=(lambda: sync_tree(env_state) if cfg.sync_timings else None),
+            sync=(lambda: sync_tree(next_env_state) if cfg.sync_timings else None),
         ):
             next_env_state = train_env.step(env_state, action)
 
@@ -260,7 +260,7 @@ def main():
         with timed(
             "rb_add",
             step_stats,
-            sync=(lambda: sync_tree(rb) if cfg.sync_timings else None),
+            sync=(lambda: sync_tree((rb.ptr, rb.size)) if cfg.sync_timings else None),
         ):
             obs_b = env_state.obs  # (1,H,W2,C)
             act_b = action[None, ...]
@@ -295,7 +295,7 @@ def main():
             with timed(
                 "update_jit",
                 step_stats,
-                sync=(lambda: sync_tree(agent_state) if cfg.sync_timings else None),
+                sync=(lambda: sync_tree((action, stddev)) if cfg.sync_timings else None),
             ):
                 agent_state, metrics = update_jit(agent_state, batch, step_j, stddev)
 
@@ -318,7 +318,7 @@ def main():
             with timed(
                 "env_reset",
                 step_stats,
-                sync=(lambda: sync_tree(env_state) if cfg.sync_timings else None),
+                sync=(lambda: sync_tree(next_env_state) if cfg.sync_timings else None),
             ):
                 next_env_state = train_env.reset(reset_key)
 
