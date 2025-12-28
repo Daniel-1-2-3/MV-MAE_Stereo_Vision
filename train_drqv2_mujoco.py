@@ -44,7 +44,7 @@ _BATCH_SIZE = flags.DEFINE_integer("batch_size", 32, "Batch size")
 _NSTEP = flags.DEFINE_integer("nstep", 3, "N-step")
 _GAMMA = flags.DEFINE_float("gamma", 0.99, "Discount")
 
-_NUM_EXPL_STEPS = flags.DEFINE_integer("num_expl_steps", 2_000, "Random exploration steps")
+_NUM_EXPL_STEPS = flags.DEFINE_integer("num_expl_steps", 10_000, "Random exploration steps")
 _STD_START = flags.DEFINE_float("std_start", 1.0, "Std schedule start")
 _STD_END = flags.DEFINE_float("std_end", 0.1, "Std schedule end")
 _STD_DURATION = flags.DEFINE_integer("std_duration", 100_000, "Std schedule duration")
@@ -55,10 +55,10 @@ _UPDATE_MVMAE_EVERY = flags.DEFINE_integer("update_mvmae_every_steps", 10, "MV-M
 _COEF_MVMAE = flags.DEFINE_float("coef_mvmae", 1.0, "MV-MAE coefficient")
 _CRITIC_TAU = flags.DEFINE_float("critic_target_tau", 0.01, "Critic target tau")
 
-_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 1000, "Steps per jitted scan chunk")
+_UNROLL_LENGTH = flags.DEFINE_integer("unroll_length", 10_000, "Steps per jitted scan chunk")
 
 # eval runs AFTER EVERY training chunk
-_EVAL_STEPS = flags.DEFINE_integer("eval_steps", 1000, "Eval rollout length")
+_EVAL_STEPS = flags.DEFINE_integer("eval_steps", 200, "Eval rollout length, 1 episode")
 _EVAL_FPS = flags.DEFINE_integer("eval_fps", 20, "GIF fps")
 _EVAL_RENDER_SIZE = flags.DEFINE_integer("eval_render_size", 256, "GIF height (width is 2x)")
 

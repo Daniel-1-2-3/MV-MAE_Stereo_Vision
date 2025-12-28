@@ -283,11 +283,10 @@ class StereoPickCube(pick.PandaPickCube):
                 _, rgb, _ = self._render_jit(render_token, data)
 
             info = {**info, "render_token": render_token, "rng": rng}
-            img_left = jp.asarray(rgb[0, 0, ..., :3], dtype=jp.float32) / 255.0
-            img_right = jp.asarray(rgb[1, 0, ..., :3], dtype=jp.float32) / 255.0
+            img_left = adjust_brightness(jp.asarray(rgb[0, 0, ..., :3], dtype=jp.float32) / 255.0, brightness)
+            img_right = adjust_brightness(jp.asarray(rgb[1, 0, ..., :3], dtype=jp.float32) / 255.0, brightness)
 
             obs = Prepare.fuse_normalize([img_left, img_right])  # (1,H,2W,3)
-            obs = adjust_brightness(obs, brightness)
 
         assert obs is not None, "vision must be enabled to produce pixel observations"
         return mjx_env.State(data, obs, reward, done, metrics, info)
@@ -349,11 +348,10 @@ class StereoPickCube(pick.PandaPickCube):
 
         # Render obs
         _, rgb, _ = self._render_jit(info["render_token"], data)
-        img_left = jp.asarray(rgb[0, 0, ..., :3], dtype=jp.float32) / 255.0
-        img_right = jp.asarray(rgb[1, 0, ..., :3], dtype=jp.float32) / 255.0
+        img_left = adjust_brightness(jp.asarray(rgb[0, 0, ..., :3], dtype=jp.float32) / 255.0, info["brightness"])
+        img_right = adjust_brightness(jp.asarray(rgb[1, 0, ..., :3], dtype=jp.float32) / 255.0, info["brightness"])
         obs = Prepare.fuse_normalize([img_left, img_right])
-        obs = adjust_brightness(obs, info["brightness"])
-
+        
         # Metrics
         metrics = state.metrics
         metrics = {
