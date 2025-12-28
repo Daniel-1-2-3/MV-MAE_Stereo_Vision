@@ -181,10 +181,19 @@ class Joystick(berkeley_humanoid_base.BerkeleyHumanoidEnv):
     self._qpos_noise_scale = jp.array(qpos_noise_scale)
 
     # Contact sensor IDs.
+    """
     self._feet_floor_found_sensor = [
         self._mj_model.sensor(f"{geom}_floor_found").id
         for geom in consts.FEET_GEOMS
     ]
+    """
+    self._contact_eps = 0.005
+  
+  def _feet_contact_from_distance(self, data: mjx.Data) -> jax.Array:
+    # For flat ground: floor is z=0 in world frame.
+    foot_pos = data.site_xpos[self._feet_site_id]   # [2, 3]
+    foot_z = foot_pos[:, 2]                         # [2]
+    return foot_z <= self._contact_eps
 
   def reset(self, rng: jax.Array) -> mjx_env.State:
     qpos = self._init_q
@@ -265,10 +274,13 @@ class Joystick(berkeley_humanoid_base.BerkeleyHumanoidEnv):
       metrics[f"reward/{k}"] = jp.zeros(())
     metrics["swing_peak"] = jp.zeros(())
 
+    """
     contact = jp.array([
         data.sensordata[self._mj_model.sensor_adr[sensor_id]] > 0
         for sensor_id in self._feet_floor_found_sensor
     ])
+    """
+    contact = self._feet_contact_from_distance(data)
 
     obs = self._get_obs(data, info, contact)
     reward, done = jp.zeros(2)
@@ -301,10 +313,13 @@ class Joystick(berkeley_humanoid_base.BerkeleyHumanoidEnv):
     )
     state.info["motor_targets"] = motor_targets
 
+    """
     contact = jp.array([
         data.sensordata[self._mj_model.sensor_adr[sensor_id]] > 0
         for sensor_id in self._feet_floor_found_sensor
     ])
+    """
+    contact = self._feet_contact_from_distance(data)
     contact_filt = contact | state.info["last_contact"]
     first_contact = (state.info["feet_air_time"] > 0.0) * contact_filt
     state.info["feet_air_time"] += self.dt

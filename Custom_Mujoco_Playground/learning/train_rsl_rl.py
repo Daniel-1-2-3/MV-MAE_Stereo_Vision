@@ -207,10 +207,26 @@ def main(argv):
 
   if not _PLAY_ONLY.value:
     # Perform training
+    start_time = datetime.now()
     runner.learn(
         num_learning_iterations=train_cfg.max_iterations,
         init_at_random_ep_len=False,
     )
+    end_time = datetime.now()
+    elapsed_s = (end_time - start_time).total_seconds()
+
+    # Total environment steps processed
+    total_steps = (
+        train_cfg.max_iterations
+        * env_cfg.episode_length
+        * num_envs
+    )
+
+    fps = total_steps / elapsed_s
+
+    print(f"[FPS] {fps:.2f} env-steps/sec")
+    print(f"[Timing] {elapsed_s:.2f}s for {total_steps:,} steps")
+
     print("Done training.")
     return
 
