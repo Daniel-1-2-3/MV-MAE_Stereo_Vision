@@ -186,21 +186,21 @@ export PATH="${BIN_DIR}:${PATH}"
 
 # ---------------- Install TensorBoard (persistently) ----------------
 echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
-python - <<'"'"'PY'"'"'
-import importlib.util, sys
+
+if python - <<'PY'
+import importlib.util
 ok = importlib.util.find_spec("tensorboard") is not None
 print("tensorboard already importable:", ok)
-sys.exit(0 if ok else 1)
+raise SystemExit(0 if ok else 1)
 PY
-if [ $? -ne 0 ]; then
+then
+  echo "TensorBoard already installed."
+else
   echo "Installing tensorboard into persistent prefix..."
   python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
-else
-  echo "TensorBoard already installed."
 fi
 
-# Sanity print
-python - <<'"'"'PY'"'"'
+python - <<'PY'
 import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
