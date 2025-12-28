@@ -38,8 +38,8 @@
   <worldbody>
     <!-- Matching the Realsense D435 -->
     <!-- Stereo cameras -->
-    <camera fovy="42" name="front_left" pos="1.176165 0.028500 0.483" xyaxes="0.006 1.000 -0.000 -0.720 0.004 0.694"/>
-    <camera fovy="42" name="front_right" pos="1.175835 -0.026500 0.483" xyaxes="0.006 1.000 -0.000 -0.720 0.004 0.694"/>
+    <camera fovy="48" name="front_left" pos="1.176165 0.028500 0.483" xyaxes="0.006 1.000 -0.000 -0.720 0.004 0.694"/>
+    <camera fovy="48" name="front_right" pos="1.175835 -0.026500 0.483" xyaxes="0.006 1.000 -0.000 -0.720 0.004 0.694"/>
         
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" contype="1"/>
     <geom name="init_space" size="0.02 1 0.01" type="plane" pos="0.631 0 0.001" rgba="1 1 1 1" contype="0" conaffinity="0"/>
