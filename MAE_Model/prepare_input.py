@@ -1,24 +1,26 @@
-import jax.numpy as jp
+import torch
 
-class Prepare:
+class Prepare():
+    
     @staticmethod
-    def fuse_normalize(imgs):
+    def fuse_normalize(imgs: list[torch.Tensor]):
         """
+        Fuse images along their height and normalize
+
         Args:
-            imgs: [left, right], each strictly (H, W, 3), dtype uint8 or float32.
-                  If float32 in [0,1].
-
+            imgs (list[Tensor]):    Two images (stereo vision), both with 
+                                    shape (batch, channels, height, width)
         Returns:
-            x: (1, H, 2W, 3) float32 normalized
+            x (Tensor): A single tensor of shape (batch, height, width_total, channels)
         """
-        left, right = imgs
+        # Transpose to (b, h, w, c)
+        left = imgs[0].permute(0, 2, 3, 1)
+        right = imgs[1].permute(0, 2, 3, 1)
 
-        # Fuse along width: (H, 2W, 3)
-        x = jp.concatenate([left, right], axis=1).astype(jp.float32)
-
-        mean = jp.array([0.51905, 0.47986, 0.48809], dtype=jp.float32).reshape(1, 1, 3)
-        std  = jp.array([0.17454, 0.20183, 0.19598], dtype=jp.float32).reshape(1, 1, 3)
+        x = torch.cat([left, right], dim=2) # Fuse (b, h, w_total, c)
+        
+        # Normalize
+        mean = torch.tensor([0.51905, 0.47986, 0.48809], device=x.device).view(1, 1, 1, 3)
+        std = torch.tensor([0.17454, 0.20183, 0.19598], device=x.device).view(1, 1, 1, 3)
         x = (x - mean) / std
-
-        # Add batch dim: (1, H, 2W, 3)
-        return x[None, ...]
+        return x.to(imgs[0].device)
