@@ -19,7 +19,7 @@ from Mujoco_Sim.mujoco_pick_env import StereoPickCube, default_config  # from yo
 # === YOUR PIPELINE ===
 from DrQv2_Architecture.drqv2 import DrQV2Agent
 from DrQv2_Architecture.replay_buffer import rb_init, rb_add, rb_sample_jit
-from DrQv2_Architecture.env_wrappers import FrameStackWrapper, ActionRepeatWrapper
+from DrQv2_Architecture.env_wrappers import FrameStackWrapper
 
 
 # -------------------------
@@ -79,16 +79,13 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="jax")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="jax")
 warnings.filterwarnings("ignore", category=UserWarning, module="absl")
 
-
 def _maybe_block(x):
     if hasattr(x, "block_until_ready"):
         return x.block_until_ready()
     return x
 
-
 def _sync_tree(x):
     jax.tree_util.tree_map(_maybe_block, x)
-
 
 
 def _timeit(msg: str, fn, *args, block: bool = True, **kwargs):
@@ -145,7 +142,6 @@ def main(argv):
     env = StereoPickCube(config=cfg)
 
     # Wrap like your pipeline: repeat then stack
-    env = ActionRepeatWrapper(env, num_repeats=_ACTION_REPEAT.value)
     env = FrameStackWrapper(env, num_frames=_STACK_K.value)
 
     # -------------------------
