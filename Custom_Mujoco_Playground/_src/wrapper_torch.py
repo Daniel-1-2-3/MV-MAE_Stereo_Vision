@@ -94,6 +94,12 @@ class RSLRLBraxWrapper(VecEnv):
   ):
     import torch  # pytype: disable=import-error # pylint: disable=redefined-outer-name,unused-import,import-outside-toplevel
 
+    # Patches
+    cfg = getattr(env, "_config", None) or getattr(env, "cfg", None) or getattr(self.env, "cfg", None)
+    self.cfg = cfg if cfg is not None else {}
+    if not hasattr(self, "device"):
+      self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+      
     self.seed = seed
     self.batch_size = num_actors
     self.num_envs = num_actors
