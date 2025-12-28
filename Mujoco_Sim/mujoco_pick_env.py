@@ -308,6 +308,8 @@ class StereoPickCube(pick.PandaPickCube):
 
         # Dense reward components (unscaled)
         raw_rewards = self._get_reward(data, info)
+        new_reached_box = raw_rewards["_reached_box"]
+        raw_rewards = {k: v for k, v in raw_rewards.items() if k != "_reached_box"}
 
         # Apply declared reward_scales
         scaled = {
@@ -342,6 +344,7 @@ class StereoPickCube(pick.PandaPickCube):
             **info,
             "_steps": jp.where(done, jp.asarray(0, jp.int32), steps),
             "prev_action": action.astype(jp.float32),
+            "reached_box": jp.where(done, jp.asarray(0.0, jp.float32), new_reached_box),
         }
 
         # Render obs
@@ -442,6 +445,7 @@ class StereoPickCube(pick.PandaPickCube):
             "no_floor_collision": no_floor_collision,
             "no_box_collision": no_box_collision,
             "robot_target_qpos": robot_target_qpos,
+            "_reached_box": reached_box,   # add this
         }
 
     @property

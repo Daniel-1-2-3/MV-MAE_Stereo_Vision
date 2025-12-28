@@ -200,13 +200,17 @@ def main(argv):
             stddev_clip=float(_STDDEV_CLIP.value),
         )
     )
-
-    # ---- reset ----
+    
+    # ---- reset (prime render token cache BEFORE any JIT traces reset) ----
     rng = jax.random.PRNGKey(int(_SEED.value))
     rng, rk = jax.random.split(rng)
-    env_state = env.reset(rk)
-    step_j = jp.asarray(0, jp.int32)
 
+    # First reset on host: this will run renderer.init(...) exactly once and cache the token in env.
+    env_state = env.reset(rk)
+    # Now reset is traceable (it will take the cached-token path), so we can JIT it.
+    reset_jit = jax.jit(env.reset)
+    step_j = jp.asarray(0, jp.int32)
+    
     # ---- training scan ----
     def one_step(carry, _):
         env_state, agent_state, rb, rng, step = carry
@@ -245,9 +249,19 @@ def main(argv):
         def _do_reset(rng_reset):
             return env.reset(rng_reset)
 
+        # Proper reset-on-done inside JIT (requires reset_jit to be traceable)
         if _RESET_IN_JIT.value:
             rng3, rk_reset = jax.random.split(rng2)
-            st2 = jax.lax.cond(done, lambda: _do_reset(rk_reset), lambda: st1)
+
+            # Make sure pred is a scalar bool
+            pred = jp.asarray(done).reshape(())
+
+            st2 = jax.lax.cond(
+                pred,
+                lambda _unused: reset_jit(rk_reset),
+                lambda _unused: st1,
+                operand=None,
+            )
         else:
             rng3 = rng2
             st2 = st1
