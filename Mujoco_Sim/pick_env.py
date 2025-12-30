@@ -162,11 +162,20 @@ class StereoPickCube(panda.PandaBase):
             return x if (not hasattr(x, "ndim") or x.ndim == 0) else jp.broadcast_to(x, (self.render_batch_size,) + x.shape)
 
         data0_batched = jax.tree_util.tree_map(_batch, data0)
+
+        # Init
         token, _, _ = self.renderer.init(data0_batched, self._mjx_model)
-        jax.block_until_ready(token)  # force error to surface here (not later at PRNGKey)
+
+        # Force the raytracer custom-call to actually run now (many failures happen on first render, not init)
+        token, rgb, depth = self.renderer.render(token, data0_batched, self._mjx_model)
+
+        # Block on real device outputs produced by the custom call (token often isn’t enough)
+        jax.block_until_ready(rgb)
+        jax.block_until_ready(depth)
+
         self._render_token = token
         self._render_jit = jax.jit(lambda tok, d: self.renderer.render(tok, d, self._mjx_model))
-    
+
     def modify_model(self, mj_model: mujoco.MjModel):
         # Expand floor size to non-zero so Madrona can render it
         mj_model.geom_size[mj_model.geom('floor').id, :2] = [5.0, 5.0]
