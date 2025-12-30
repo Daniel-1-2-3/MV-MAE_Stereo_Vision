@@ -1,10 +1,8 @@
 import torch
+import jax.numpy as jnp
 import jax
 from datetime import datetime
 from pathlib import Path
-from Mujoco_Sim.pick_env import StereoPickCube
-from Mujoco_Sim.brax_wrapper import RSLRLBraxWrapper
-from DrQv2_Architecture.drqv2 import DrQv2Agent
 from DrQv2_Architecture.video import VideoRecorder
 
 def eval_and_record(env, agent, num_steps: int = 10_000, video_root: Path | None = None):
@@ -75,18 +73,23 @@ def main():
 
     device = "cuda:0"
     device_rank = int(device.split(":")[-1]) if "cuda" in device else 0
-
-    # Force JAX/PJRT to initialize GPU + load core modules first
-    print('fail 0')
+    
+    # JAX must be the first CUDA user
     _ = jax.devices("gpu")
     _ = jax.random.PRNGKey(0)
-    print('fail 1')
+    _ = jax.jit(lambda x: x + 1)(jnp.ones((1,), dtype=jnp.float32))
+
+    # Now initialize Madrona raytracer
+    from Mujoco_Sim.pick_env import StereoPickCube
     raw_env = StereoPickCube(render_batch_size=num_envs)
-    # probe: does JAX still work right after raytracer init?
-    print("fail 2")
-    _ = jax.random.PRNGKey(1)
-    _ = jax.jit(lambda x: x + 1)(jax.numpy.ones((1,), dtype=jax.numpy.float32))
-    print("fail 3")
+    print('fail1')
+    # 3) Probe: if this fails, raytracer init itself is breaking CUDA
+    _ = jax.jit(lambda x: x + 1)(jnp.ones((1,), dtype=jnp.float32))
+    print('fail2')
+    
+    from Mujoco_Sim.brax_wrapper import RSLRLBraxWrapper
+    from DrQv2_Architecture.drqv2 import DrQv2Agent
+    
     brax_env = RSLRLBraxWrapper(
         raw_env,
         num_envs,
