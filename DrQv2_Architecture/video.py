@@ -15,7 +15,7 @@ class VideoRecorder:
         self.frames = []
         self.enabled = False
 
-        # Normalization stats (from Prepare.fuse_normalize)
+        # Normalization stats (from Prepare.normalize)
         self.mean = np.array([0.51905, 0.47986, 0.48809], dtype=np.float32).reshape(1, 1, 3)
         self.std  = np.array([0.17454, 0.20183, 0.19598], dtype=np.float32).reshape(1, 1, 3)
 

@@ -1,187 +1,135 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-import datetime
-import io
-import random
-import traceback
-from collections import defaultdict
-from typing import Tuple
-from dm_env import specs
-from pathlib import Path
-
-import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import IterableDataset
-from DrQv2_Architecture.env_wrappers import ExtendedTimeStep
 
-def episode_len(episode):
-    # subtract -1 because the dummy first transition
-    return next(iter(episode.values())).shape[0] - 1
+class ReplayBuffer:
+    def __init__(
+        self,
+        capacity: int,
+        obs_shape: tuple,   # (C, H, W) or (H, W, C) - choose one and be consistent
+        act_dim: int,
+        device: torch.device,
+        *,
+        store_on_gpu: bool = False,
+        channels_last: bool = False,  # True if obs is HWC; False if CHW
+        pin_memory: bool = True,
+    ):
+        self.capacity = int(capacity)
+        self.device = device
+        self.channels_last = bool(channels_last)
 
-def save_episode(episode, fn):
-    with io.BytesIO() as bs:
-        np.savez_compressed(bs, **episode)
-        bs.seek(0)
-        with fn.open('wb') as f:
-            f.write(bs.read())
+        storage_device = device if store_on_gpu else torch.device("cpu")
 
-def load_episode(fn):
-    with fn.open('rb') as f:
-        episode = np.load(f)
-        episode = {k: episode[k] for k in episode.keys()}
-        return episode
+        # Images: uint8
+        self.obs = torch.empty((capacity, *obs_shape), dtype=torch.uint8, device=storage_device)
+        self.next_obs = torch.empty((capacity, *obs_shape), dtype=torch.uint8, device=storage_device)
 
-class ReplayBufferStorage:
-    def __init__(self, data_specs: Tuple[specs.Array, ...], replay_dir: Path):
-        self._data_specs = data_specs
-        self._replay_dir = replay_dir
-        replay_dir.mkdir(exist_ok=True)
-        self._current_episode = defaultdict(list)
-        self._preload()
+        # Scalar/vector fields
+        self.action = torch.empty((capacity, act_dim), dtype=torch.float32, device=storage_device)
+        self.reward = torch.empty((capacity,), dtype=torch.float32, device=storage_device)
+        self.discount = torch.empty((capacity,), dtype=torch.float32, device=storage_device)
+        self.done = torch.empty((capacity,), dtype=torch.bool, device=storage_device)
 
-    def __len__(self):
-        return self._num_transitions
+        # Optional pinning for faster H2D copies
+        self._pin = (pin_memory and storage_device.type == "cpu")
+        if self._pin:
+            self.obs = self.obs.pin_memory()
+            self.next_obs = self.next_obs.pin_memory()
+            self.action = self.action.pin_memory()
+            self.reward = self.reward.pin_memory()
+            self.discount = self.discount.pin_memory()
+            self.done = self.done.pin_memory()
 
-    def add(self, time_step: ExtendedTimeStep):
-        for spec in self._data_specs:
-            value = time_step[spec.name]
-            if np.isscalar(value):
-                value = np.full(spec.shape, value, spec.dtype)
-            assert spec.shape == value.shape and spec.dtype == value.dtype
-            self._current_episode[spec.name].append(value)
-        if time_step.last():
-            episode = dict()
-            for spec in self._data_specs:
-                value = self._current_episode[spec.name]
-                episode[spec.name] = np.array(value, spec.dtype)
-            self._current_episode = defaultdict(list)
-            self._store_episode(episode)
+        self.ptr = 0
+        self.size = 0
 
-    def _preload(self):
-        self._num_episodes = 0
-        self._num_transitions = 0
-        for fn in self._replay_dir.glob('*.npz'):
-            _, _, eps_len = fn.stem.split('_')
-            self._num_episodes += 1
-            self._num_transitions += int(eps_len)
+    @torch.no_grad()
+    def add_batch(self, obs_u8, action, reward, discount, next_obs_u8, done):
+        """
+        Insert a batch of transitions.
+        Shapes:
+          obs_u8:      [B, *obs_shape] uint8
+          action:      [B, act_dim] float32
+          reward:      [B] float32
+          discount:    [B] float32
+          next_obs_u8: [B, *obs_shape] uint8
+          done:        [B] bool
+        """
+        B = obs_u8.shape[0]
+        assert B > 0
 
-    def _store_episode(self, episode):
-        eps_idx = self._num_episodes
-        eps_len = episode_len(episode)
-        self._num_episodes += 1
-        self._num_transitions += eps_len
-        ts = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
-        eps_fn = f'{ts}_{eps_idx}_{eps_len}.npz'
-        save_episode(episode, self._replay_dir / eps_fn)
+        # Ensure types (avoid accidental float images)
+        if obs_u8.dtype != torch.uint8:
+            obs_u8 = obs_u8.to(torch.uint8)
+        if next_obs_u8.dtype != torch.uint8:
+            next_obs_u8 = next_obs_u8.to(torch.uint8)
 
-class ReplayBuffer(IterableDataset):
-    def __init__(self, replay_dir, max_size, num_workers, nstep, discount,
-                 fetch_every, save_snapshot):
-        self._replay_dir = replay_dir
-        self._size = 0
-        self._max_size = max_size
-        self._num_workers = max(1, num_workers)
-        self._episode_fns = []
-        self._episodes = dict()
-        self._nstep = nstep
-        self._discount = discount
-        self._fetch_every = fetch_every
-        self._samples_since_last_fetch = fetch_every
-        self._save_snapshot = save_snapshot
+        # Move to storage device if needed
+        storage_dev = self.obs.device
+        if obs_u8.device != storage_dev:
+            obs_u8 = obs_u8.to(storage_dev, non_blocking=True)
+            next_obs_u8 = next_obs_u8.to(storage_dev, non_blocking=True)
+            action = action.to(storage_dev, non_blocking=True)
+            reward = reward.to(storage_dev, non_blocking=True)
+            discount = discount.to(storage_dev, non_blocking=True)
+            done = done.to(storage_dev, non_blocking=True)
 
-    def _sample_episode(self):
-        eps_fn = random.choice(self._episode_fns)
-        return self._episodes[eps_fn]
+        end = self.ptr + B
+        if end <= self.capacity:
+            sl = slice(self.ptr, end)
+            self.obs[sl].copy_(obs_u8)
+            self.next_obs[sl].copy_(next_obs_u8)
+            self.action[sl].copy_(action)
+            self.reward[sl].copy_(reward)
+            self.discount[sl].copy_(discount)
+            self.done[sl].copy_(done)
+        else:
+            first = self.capacity - self.ptr
+            second = B - first
 
-    def _store_episode(self, eps_fn):
-        try:
-            episode = load_episode(eps_fn)
-        except:
-            return False
-        eps_len = episode_len(episode)
-        while eps_len + self._size > self._max_size:
-            early_eps_fn = self._episode_fns.pop(0)
-            early_eps = self._episodes.pop(early_eps_fn)
-            self._size -= episode_len(early_eps)
-            early_eps_fn.unlink(missing_ok=True)
-        self._episode_fns.append(eps_fn)
-        self._episode_fns.sort()
-        self._episodes[eps_fn] = episode
-        self._size += eps_len
+            sl1 = slice(self.ptr, self.capacity)
+            sl2 = slice(0, second)
 
-        if not self._save_snapshot:
-            eps_fn.unlink(missing_ok=True)
-        return True
+            self.obs[sl1].copy_(obs_u8[:first])
+            self.next_obs[sl1].copy_(next_obs_u8[:first])
+            self.action[sl1].copy_(action[:first])
+            self.reward[sl1].copy_(reward[:first])
+            self.discount[sl1].copy_(discount[:first])
+            self.done[sl1].copy_(done[:first])
 
-    def _try_fetch(self):
-        if self._samples_since_last_fetch < self._fetch_every:
-            return
-        self._samples_since_last_fetch = 0
-        try:
-            worker_id = torch.utils.data.get_worker_info().id
-        except:
-            worker_id = 0
-        eps_fns = sorted(self._replay_dir.glob('*.npz'), reverse=True)
-        fetched_size = 0
-        for eps_fn in eps_fns:
-            eps_idx, eps_len = [int(x) for x in eps_fn.stem.split('_')[1:]]
-            if eps_idx % self._num_workers != worker_id:
-                continue
-            if eps_fn in self._episodes.keys():
-                break
-            if fetched_size + eps_len > self._max_size:
-                break
-            fetched_size += eps_len
-            if not self._store_episode(eps_fn):
-                break
-            
-    def _sample(self):
-        # Resample if it is an very short episode (ie only 2 steps long). Prevents crash.
-        while True:
-            try:
-                self._try_fetch()
-            except:
-                traceback.print_exc()
-            self._samples_since_last_fetch += 1
+            self.obs[sl2].copy_(obs_u8[first:])
+            self.next_obs[sl2].copy_(next_obs_u8[first:])
+            self.action[sl2].copy_(action[first:])
+            self.reward[sl2].copy_(reward[first:])
+            self.discount[sl2].copy_(discount[first:])
+            self.done[sl2].copy_(done[first:])
 
-            episode = self._sample_episode()
-            T = episode_len(episode)
-            max_start = T - self._nstep + 1
+        self.ptr = (self.ptr + B) % self.capacity
+        self.size = min(self.capacity, self.size + B)
 
-            # If the episode is too short for n-step, skip it and try another one
-            if max_start <= 0:
-                continue
+    @torch.no_grad()
+    def sample(self, batch_size: int):
+        """
+        Returns batch on self.device for training.
+        obs/next_obs returned as uint8 with shape [B, H, 2W, 3] (channels-last),
+        matching pick_env_v4.render_pixels().
+        """
+        assert self.size > 0, "Replay is empty"
+        idx = torch.randint(0, self.size, (batch_size,), device=self.obs.device)
 
-            # add +1 for the first dummy transition (keeps original indexing)
-            idx = np.random.randint(0, max_start) + 1
+        obs_u8 = self.obs[idx]
+        next_obs_u8 = self.next_obs[idx]
 
-            obs = episode['observation'][idx - 1]
-            action = episode['action'][idx]
-            next_obs = episode['observation'][idx + self._nstep - 1]
-            reward = np.zeros_like(episode['reward'][idx])
-            discount = np.ones_like(episode['discount'][idx])
+        action = self.action[idx]
+        reward = self.reward[idx]
+        discount = self.discount[idx]
+        done = self.done[idx]
 
-            for i in range(self._nstep):
-                step_reward = episode['reward'][idx + i]
-                reward += discount * step_reward
-                discount *= episode['discount'][idx + i] * self._discount
+        # If storage is CPU, push to GPU non-blocking
+        if obs_u8.device != self.device:
+            obs_u8 = obs_u8.to(self.device, non_blocking=True)
+            next_obs_u8 = next_obs_u8.to(self.device, non_blocking=True)
+            action = action.to(self.device, non_blocking=True)
+            reward = reward.to(self.device, non_blocking=True)
+            discount = discount.to(self.device, non_blocking=True)
+            done = done.to(self.device, non_blocking=True)
 
-            return (obs, action, reward, discount, next_obs)
-
-    def __iter__(self):
-        while True:
-            yield self._sample()
-    
-def _worker_init_fn(worker_id):
-    seed = np.random.get_state()[1][0] + worker_id
-    np.random.seed(int(seed))
-    random.seed(int(seed))
-
-def make_replay_loader(replay_dir, max_size, batch_size, num_workers, save_snapshot, nstep, discount):
-    max_size_per_worker = max_size // max(1, num_workers)
-    iterable = ReplayBuffer(replay_dir, max_size_per_worker, num_workers, nstep, discount, fetch_every=1000, save_snapshot=save_snapshot)
-    loader = torch.utils.data.DataLoader(iterable, batch_size=batch_size, num_workers=num_workers, pin_memory=True, worker_init_fn=_worker_init_fn)
-    return loader
+        return obs_u8, action, reward, discount, next_obs_u8, done

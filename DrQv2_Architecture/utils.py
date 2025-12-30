@@ -58,7 +58,6 @@ def weight_init(m):
         if hasattr(m.bias, 'data'):
             m.bias.data.fill_(0.0)
 
-
 class Until:
     def __init__(self, until, action_repeat=1):
         self._until = until
@@ -69,7 +68,6 @@ class Until:
             return True
         until = self._until // self._action_repeat
         return step < until
-
 
 class Every:
     def __init__(self, every, action_repeat=1):
@@ -84,7 +82,6 @@ class Every:
             return True
         return False
 
-
 class Timer:
     def __init__(self):
         self._start_time = time.time()
@@ -98,7 +95,6 @@ class Timer:
 
     def total_time(self):
         return time.time() - self._start_time
-
 
 class TruncatedNormal(pyd.Normal):
     def __init__(self, loc, scale, low=-1.0, high=1.0, eps=1e-6):
@@ -123,25 +119,36 @@ class TruncatedNormal(pyd.Normal):
         x = self.loc + eps
         return self._clamp(x)
 
-
 def schedule(schdl, step):
+    # force step to python int without touching jax device arrays
+    if hasattr(step, "item"):
+        step = int(step.item())
+    else:
+        step = int(step)
+
     try:
         return float(schdl)
     except ValueError:
         match = re.match(r'linear\((.+),(.+),(.+)\)', schdl)
         if match:
             init, final, duration = [float(g) for g in match.groups()]
-            mix = np.clip(step / duration, 0.0, 1.0)
+            mix = step / duration
+            if mix < 0.0: mix = 0.0
+            if mix > 1.0: mix = 1.0
             return (1.0 - mix) * init + mix * final
+
         match = re.match(r'step_linear\((.+),(.+),(.+),(.+),(.+)\)', schdl)
         if match:
-            init, final1, duration1, final2, duration2 = [
-                float(g) for g in match.groups()
-            ]
+            init, final1, duration1, final2, duration2 = [float(g) for g in match.groups()]
             if step <= duration1:
-                mix = np.clip(step / duration1, 0.0, 1.0)
+                mix = step / duration1
+                if mix < 0.0: mix = 0.0
+                if mix > 1.0: mix = 1.0
                 return (1.0 - mix) * init + mix * final1
             else:
-                mix = np.clip((step - duration1) / duration2, 0.0, 1.0)
+                mix = (step - duration1) / duration2
+                if mix < 0.0: mix = 0.0
+                if mix > 1.0: mix = 1.0
                 return (1.0 - mix) * final1 + mix * final2
+
     raise NotImplementedError(schdl)
