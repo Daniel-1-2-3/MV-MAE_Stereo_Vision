@@ -157,11 +157,12 @@ git submodule update --init --recursive
 
 rm -rf build
 mkdir -p build && cd build
-cmake .. -G Ninja -DLOAD_VULKAN=OFF -DCMAKE_INSTALL_PREFIX=\"\$DEPS_PREFIX\"
-ninja -j\"\$(nproc)\"
+cmake .. -G Ninja -DLOAD_VULKAN=OFF
+ninja -j"$(nproc)"
 
-# IMPORTANT: non-editable install into prefix (avoids _madrona_mjx.pth into /opt)
-python -m pip install . --no-deps --prefix \"\$DEPS_PREFIX\"
+# Install from the REPO ROOT (build/ has no setup.py / pyproject.toml)
+cd ..
+python -m pip install . --no-deps --prefix "$DEPS_PREFIX"
 
 python - <<'PY'
 import madrona_mjx, inspect, sys
