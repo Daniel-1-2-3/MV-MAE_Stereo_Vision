@@ -75,7 +75,7 @@ def main():
     device = "cuda:0"
     device_rank = int(device.split(":")[-1]) if "cuda" in device else 0
 
-    raw_env = StereoPickCube()
+    raw_env = StereoPickCube(render_batch_size=num_envs)
     brax_env = RSLRLBraxWrapper(
         raw_env,
         num_envs,

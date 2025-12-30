@@ -49,9 +49,6 @@ def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
 def default_vision_config() -> config_dict.ConfigDict:
     return config_dict.create(
         gpu_id=0,
-        render_batch_size=512,
-        render_width=64,
-        render_height=64,
         use_rasterizer=False,
         enabled_geom_groups=[0, 1, 2],
     )
@@ -87,6 +84,9 @@ class StereoPickCube(panda.PandaBase):
         self,
         config: config_dict.ConfigDict = default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+        render_batch_size: int = 64,
+        render_width: int = 64,
+        render_height: int = 64,
     ):
         mjx_env.MjxEnv.__init__(self, config, config_overrides)
         xml_path = (
@@ -122,9 +122,9 @@ class StereoPickCube(panda.PandaBase):
         self.renderer = BatchRenderer(
             m=self._mjx_model,
             gpu_id=self._config.vision_config.gpu_id,
-            num_worlds=self._config.vision_config.render_batch_size,
-            batch_render_view_width=self._config.vision_config.render_width,
-            batch_render_view_height=self._config.vision_config.render_height,
+            num_worlds=render_batch_size,
+            batch_render_view_width=render_width,
+            batch_render_view_height=render_height,
             enabled_geom_groups=np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32),
             enabled_cameras=None, # render all cameras
             add_cam_debug_geo=False,
