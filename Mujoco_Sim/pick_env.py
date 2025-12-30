@@ -176,6 +176,20 @@ class StereoPickCube(panda.PandaBase):
         token, _, _ = self.renderer.init(data0_batched, self._mjx_model)
         self._render_token = token
         self._render_jit = jax.jit(lambda tok, d: self.renderer.render(tok, d, self._mjx_model))
+    
+    def modify_model(self, mj_model: mujoco.MjModel):
+        # Expand floor size to non-zero so Madrona can render it
+        mj_model.geom_size[mj_model.geom('floor').id, :2] = [5.0, 5.0]
+
+        # Make the finger pads white for increased visibility
+        mesh_id = mj_model.mesh('finger_1').id
+        geoms = [
+            idx
+            for idx, data_id in enumerate(mj_model.geom_dataid)
+            if data_id == mesh_id
+        ]
+        mj_model.geom_matid[geoms] = mj_model.mat('off_white').id
+        return mj_model
 
     def _has_contact_with_floor(self, data: mjx.Data, geom_id: int) -> jax.Array:
         g1 = data.contact.geom1          # [B, nconmax]
