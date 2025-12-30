@@ -1,4 +1,5 @@
 import torch
+import jax
 from datetime import datetime
 from pathlib import Path
 from Mujoco_Sim.pick_env import StereoPickCube
@@ -72,8 +73,9 @@ def main():
     def render_callback(_, state):
         render_trajectory.append(state)
 
-    device = "cuda:0"
-    device_rank = int(device.split(":")[-1]) if "cuda" in device else 0
+    has_gpu = any(d.platform == "gpu" for d in jax.devices())
+    device = "cuda:0" if has_gpu else "cpu"
+    device_rank = 0 if has_gpu else None
 
     raw_env = StereoPickCube(render_batch_size=num_envs)
     brax_env = RSLRLBraxWrapper(

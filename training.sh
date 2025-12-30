@@ -206,6 +206,10 @@ print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
 echo "============================================"
 
+python -c "import jax, jaxlib; print('jax', jax.__version__, 'jaxlib', jaxlib.__version__)"
+python -c "import jax; print(jax.devices())"
+
+
 # ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py 2>&1
 
