@@ -13,9 +13,6 @@ if not hasattr(jax.sharding, "AxisType"):
 
 from pathlib import Path
 from absl import app
-# from train_drqv2_mujoco_old import Workshop, get_args, save_agent
-#from Custom_Mujoco_Playground.learning import train_jax_ppo
-from Custom_Mujoco_Playground.learning import train_rsl_rl
-
+import train_drqv2_mujoco
 def main():
-    app.run(train_rsl_rl.main)
+    train_drqv2_mujoco.main()
