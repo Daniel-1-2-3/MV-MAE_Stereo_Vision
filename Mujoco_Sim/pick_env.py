@@ -84,10 +84,13 @@ class StereoPickCube(panda.PandaBase):
         self,
         config: config_dict.ConfigDict = default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
-        render_batch_size: int = 64,
+        render_batch_size: int = 128,
         render_width: int = 64,
         render_height: int = 64,
     ):
+        self.render_batch_size = render_batch_size
+        self.render_width = render_width
+        self.render_height = render_height
         mjx_env.MjxEnv.__init__(self, config, config_overrides)
         xml_path = (
             mjx_env.ROOT_PATH
@@ -143,7 +146,7 @@ class StereoPickCube(panda.PandaBase):
         self._start_tip_transform = panda_kinematics.compute_franka_fk(self._init_ctrl[:7])
     
     def _init_renderer(self):
-        B = int(self._config.vision_config.render_batch_size)
+        B = int(self.render_batch_size)
 
         self.renderer = BatchRenderer(
             m=self._mjx_model,
