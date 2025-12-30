@@ -159,7 +159,14 @@ class StereoPickCube(panda.PandaBase):
         )
 
         def _batch(x):
-            return x if (not hasattr(x, "ndim") or x.ndim == 0) else jp.broadcast_to(x, (self.render_batch_size,) + x.shape)
+            # Leave non-arrays alone (static metadata).
+            if not isinstance(x, jax.Array):
+                return x
+            # 0-D scalar arrays -> [B]
+            if x.ndim == 0:
+                return jp.broadcast_to(x, (self.render_batch_size,))
+            # Everything else -> [, ...]
+            return jp.broadcast_to(x, (self.render_batch_size,) + x.shape)
 
         data0_batched = jax.tree_util.tree_map(_batch, data0)
         token, _, _ = self.renderer.init(data0_batched, self._mjx_model)
