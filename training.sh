@@ -27,8 +27,7 @@ HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
 
 if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
-  echo "FATAL: execute.py not found at:"
-  echo "  $HOST_PROJECT_ROOT/execute.py"
+  echo "FATAL: execute.py not found at: $HOST_PROJECT_ROOT/execute.py"
   exit 10
 fi
 
@@ -101,88 +100,93 @@ apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
-  bash -lc '
+  bash -lc "
 set -euo pipefail
-
-echo "=== MuJoCo version ==="
-python - <<'"'"'PY'"'"'
-import mujoco
-print("MuJoCo version:", mujoco.__version__)
-PY
-echo "======================"
-
 export PYTHONUNBUFFERED=1
 
-# JAX / XLA tuning
+echo '=== MuJoCo version ==='
+python - <<'PY'
+import mujoco
+print('MuJoCo version:', mujoco.__version__)
+PY
+echo '======================'
+
+# ---------------- Persistent python prefix (host-backed) ----------------
+DEPS_PREFIX='$SLURM_SUBMIT_DIR/.pydeps_prefix'
+PY_MM=\$(python - <<'PY'
+import sys
+print(f\"{sys.version_info.major}.{sys.version_info.minor}\")
+PY
+)
+SITE_PKGS=\"\$DEPS_PREFIX/lib/python\${PY_MM}/site-packages\"
+BIN_DIR=\"\$DEPS_PREFIX/bin\"
+mkdir -p \"\$DEPS_PREFIX\"
+
+export PYTHONPATH=\"/workspace:\$SITE_PKGS:\${PYTHONPATH:-}\"
+export PATH=\"\$BIN_DIR:\$PATH\"
+
+# ---------------- Working cmake (avoids missing librhash.so.0) ----------------
+echo '=== Ensuring working cmake + ninja in prefix ==='
+python -m pip install --upgrade --no-cache-dir --prefix \"\$DEPS_PREFIX\" cmake ninja
+hash -r
+cmake --version
+
+# ---------------- JAX / XLA tuning ----------------
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_enable_triton_gemm=false"
+export XLA_FLAGS='--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_enable_triton_gemm=false'
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 export NVIDIA_TF32_OVERRIDE=0
 
-echo "=== Driver + visibility ==="
-nvidia-smi
-echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo '=== Driver + visibility ==='
+nvidia-smi || true
+echo \"CUDA_VISIBLE_DEVICES=\$CUDA_VISIBLE_DEVICES\"
 
-echo "=== JAX backend probe ==="
-python - <<'"'"'PY'"'"'
+echo '=== JAX backend probe ==='
+python - <<'PY'
 import jax, jaxlib
-print("jax", jax.__version__, "jaxlib", jaxlib.__version__)
-print("devices()", jax.devices())
-print("default_backend()", jax.default_backend())
+print('jax', jax.__version__, 'jaxlib', jaxlib.__version__)
+print('devices()', jax.devices())
+print('default_backend()', jax.default_backend())
 PY
-
-# ---------------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------------
-DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
-PY_MM=$(python - <<'"'"'PY'"'"'
-import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}")
-PY
-)
-SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
-BIN_DIR="${DEPS_PREFIX}/bin"
-mkdir -p "$DEPS_PREFIX"
-
-export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
-export PATH="${BIN_DIR}:${PATH}"
 
 # ---------------- Ensure tensorboard (optional) ----------------
-if ! python - <<'"'"'PY'"'"'
+if ! python - <<'PY'
 import importlib.util
-raise SystemExit(0 if importlib.util.find_spec("tensorboard") else 1)
+raise SystemExit(0 if importlib.util.find_spec('tensorboard') else 1)
 PY
 then
-  python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
+  python -m pip install --upgrade --no-cache-dir --prefix \"\$DEPS_PREFIX\" tensorboard
 fi
 
 # ---------------- Madrona cache dir (per GPU model) ----------------
-ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
-GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
-GPU_MODEL=${GPU_MODEL:-unknown}
-GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
-ENV_CONFIG="default"
+ACTUAL_GPU=\$(nvidia-smi -L 2>/dev/null | head -1 || true)
+GPU_MODEL=\$(echo \"\$ACTUAL_GPU\" | grep -o 'H100\\|L40S\\|A100\\|V100\\|RTX' | head -1 || true)
+GPU_MODEL=\${GPU_MODEL:-unknown}
+GPU_MODEL_LOWER=\$(echo \"\$GPU_MODEL\" | tr '[:upper:]' '[:lower:]')
+ENV_CONFIG='default'
 
-CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
-mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
-export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
-export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
+CACHE_BUILD_DIR='$SLURM_SUBMIT_DIR/build_'\${GPU_MODEL_LOWER}'_'\${ENV_CONFIG}
+mkdir -p \"\$CACHE_BUILD_DIR/kernel_cache\" \"\$CACHE_BUILD_DIR/bvh_cache\"
+export MADRONA_MWGPU_KERNEL_CACHE=\"\$CACHE_BUILD_DIR/kernel_cache/kernel.cache\"
+export MADRONA_BVH_KERNEL_CACHE=\"\$CACHE_BUILD_DIR/bvh_cache/bvh.cache\"
 
-echo "=== Madrona caches ==="
-echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
-echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
-echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
+echo '=== Madrona caches ==='
+echo \"  GPU_MODEL_LOWER=\$GPU_MODEL_LOWER\"
+echo \"  MADRONA_MWGPU_KERNEL_CACHE=\$MADRONA_MWGPU_KERNEL_CACHE\"
+echo \"  MADRONA_BVH_KERNEL_CACHE=\$MADRONA_BVH_KERNEL_CACHE\"
 
 # ---------------- HARD RESET caches (raytracer stability) ----------------
-echo "=== Clearing JAX + CUDA + Madrona caches (raytracer) ==="
+echo '=== Clearing JAX + CUDA + Madrona caches (raytracer) ==='
 rm -rf ~/.cache/jax || true
 rm -rf ~/.nv/ComputeCache || true
-rm -f "$MADRONA_MWGPU_KERNEL_CACHE" "$MADRONA_BVH_KERNEL_CACHE" || true
+rm -f \"\$MADRONA_MWGPU_KERNEL_CACHE\" \"\$MADRONA_BVH_KERNEL_CACHE\" || true
 
-# ---------------- Rebuild madrona_mjx into user prefix (overrides /opt/madrona_mjx) ----------------
-echo "=== Rebuilding madrona_mjx into ${DEPS_PREFIX} (no SIF changes) ==="
-cd "'"$SLURM_SUBMIT_DIR"'"
+# ---------------- Rebuild madrona_mjx into prefix (overrides /opt/madrona_mjx) ----------------
+echo '=== Rebuilding madrona_mjx into prefix (no SIF changes) ==='
+cd '$SLURM_SUBMIT_DIR'
 if [[ ! -d madrona_mjx_user ]]; then
   git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx_user
 fi
@@ -190,21 +194,21 @@ cd madrona_mjx_user
 git submodule update --init --recursive
 rm -rf build
 mkdir -p build && cd build
-cmake .. -DLOAD_VULKAN=OFF
-make -j"$(nproc)"
+cmake .. -G Ninja -DLOAD_VULKAN=OFF
+ninja -j\"\$(nproc)\"
 cd ..
-python -m pip install -e . --prefix "$DEPS_PREFIX"
+python -m pip install -e . --prefix \"\$DEPS_PREFIX\"
 
-python - <<'"'"'PY'"'"'
+python - <<'PY'
 import madrona_mjx, inspect
-print("madrona_mjx imported from:", inspect.getfile(madrona_mjx))
+print('madrona_mjx imported from:', inspect.getfile(madrona_mjx))
 PY
 
 # ---------------- Run training ----------------
 cd /workspace
+echo '=== Starting training ==='
 stdbuf -oL -eL python -u execute.py 2>&1
-
-echo "Training completed."
-'
+echo 'Training completed.'
+"
 
 echo "Finished at $(date)"
