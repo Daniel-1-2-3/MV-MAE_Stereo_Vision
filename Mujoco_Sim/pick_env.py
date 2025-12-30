@@ -122,18 +122,6 @@ class StereoPickCube(panda.PandaBase):
         ]
         self._floor_geom_id = self._mj_model.geom("floor").id
         
-        self.renderer = BatchRenderer(
-            m=self._mjx_model,
-            gpu_id=self._config.vision_config.gpu_id,
-            num_worlds=render_batch_size,
-            batch_render_view_width=render_width,
-            batch_render_view_height=render_height,
-            enabled_geom_groups=np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32),
-            enabled_cameras=None, # render all cameras
-            add_cam_debug_geo=False,
-            use_rasterizer=self._config.vision_config.use_rasterizer,
-            viz_gpu_hdls=None,
-        )
         # Cache render token to not re-run renderer.init on every reset.
         self._render_jit = jax.jit(lambda token, data: self.renderer.render(token, data, self._mjx_model))
         self._render_token_host = None
@@ -171,7 +159,7 @@ class StereoPickCube(panda.PandaBase):
         )
 
         def _batch(x):
-            return x if (not hasattr(x, "ndim") or x.ndim == 0) else jp.broadcast_to(x, (B,) + x.shape)
+            return x if (not hasattr(x, "ndim") or x.ndim == 0) else jp.broadcast_to(x, (self.render_batch_size,) + x.shape)
 
         data0_batched = jax.tree_util.tree_map(_batch, data0)
         token, _, _ = self.renderer.init(data0_batched, self._mjx_model)
