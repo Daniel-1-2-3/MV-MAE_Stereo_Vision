@@ -110,7 +110,7 @@ class StereoPickCube(panda.PandaBase):
 
         self._mj_model = mj_model
         self._mjx_model = mjx.put_model(mj_model, impl=self._config.impl)
-        self._post_init(obj_name="box", keyframe="home")
+        self._post_init(obj_name="box", keyframe="low_home")
 
         # Geom ids for parts of the robot that must not hit the floor.
         self._floor_hand_geom_ids = [
