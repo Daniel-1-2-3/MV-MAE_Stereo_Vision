@@ -146,14 +146,12 @@ class StereoPickCube(panda.PandaBase):
         self._start_tip_transform = panda_kinematics.compute_franka_fk(self._init_ctrl[:7])
     
     def _init_renderer(self):
-        B = int(self.render_batch_size)
-
         self.renderer = BatchRenderer(
             m=self._mjx_model,
             gpu_id=self._config.vision_config.gpu_id,
-            num_worlds=B,
-            batch_render_view_width=self._config.vision_config.render_width,
-            batch_render_view_height=self._config.vision_config.render_height,
+            num_worlds=self.render_batch_size,
+            batch_render_view_width=self.render_width,
+            batch_render_view_height=self.render_height,
             enabled_geom_groups=np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32),
             enabled_cameras=None,
             add_cam_debug_geo=False,
