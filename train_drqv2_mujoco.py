@@ -77,9 +77,16 @@ def main():
     device_rank = int(device.split(":")[-1]) if "cuda" in device else 0
 
     # Force JAX/PJRT to initialize GPU + load core modules first
+    print('fail 0')
     _ = jax.devices("gpu")
     _ = jax.random.PRNGKey(0)
+    print('fail 1')
     raw_env = StereoPickCube(render_batch_size=num_envs)
+    # probe: does JAX still work right after raytracer init?
+    print("fail 2")
+    _ = jax.random.PRNGKey(1)
+    _ = jax.jit(lambda x: x + 1)(jax.numpy.ones((1,), dtype=jax.numpy.float32))
+    print("fail 3")
     brax_env = RSLRLBraxWrapper(
         raw_env,
         num_envs,
