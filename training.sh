@@ -26,7 +26,6 @@ fi
 HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
 
-# execute.py must exist at the project root
 if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
   echo "FATAL: execute.py not found at:"
   echo "  $HOST_PROJECT_ROOT/execute.py"
@@ -34,7 +33,6 @@ if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
 fi
 
 # ---------------- Python path inside container ----------------
-# Prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
 export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # ---------------- EGL / MuJoCo GL setup ----------------
@@ -70,7 +68,6 @@ GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
 # ---------------- Binds ----------------
-# ---- mujoco_playground external_deps fix (site-packages is read-only) ----
 HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
 mkdir -p "$HOST_MJP_DEPS"
 MJP_DEPS_IN_CONTAINER="/opt/mvmae_venv/lib/python3.12/site-packages/mujoco_playground/external_deps"
@@ -80,8 +77,6 @@ BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
-
-# Critical bind: mount the entire project to /workspace
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
 # ---------------- Quick EGL + GPU probe ----------------
@@ -101,13 +96,13 @@ ctx.free()
 PY
 '
 
-# ---------------- Training with Madrona cache integration ----------------
+# ---------------- Training ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
   bash -lc '
-set -e
+set -euo pipefail
 
 echo "=== MuJoCo version ==="
 python - <<'"'"'PY'"'"'
@@ -118,120 +113,95 @@ echo "======================"
 
 export PYTHONUNBUFFERED=1
 
-# JAX / XLA tuning (optional)
+# JAX / XLA tuning
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_enable_triton_gemm=false"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
+export NVIDIA_TF32_OVERRIDE=0
 
-echo "=== Madrona + GPU detection (inside container) ==="
-if command -v nvidia-smi >/dev/null 2>&1; then
-  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
-  echo "Actual GPU: $ACTUAL_GPU"
-  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1)
-  if [ -z "$GPU_MODEL" ]; then
-    GPU_MODEL="unknown"
-  fi
-else
-  echo "WARNING: nvidia-smi not found in container; using generic GPU tag"
-  GPU_MODEL="unknown"
-fi
-GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
+echo "=== Driver + visibility ==="
+nvidia-smi
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-ENV_CONFIG="default"
-
-# Cache build dir lives in your submit directory, shared host<->container
-CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
-mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
-
-export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
-export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
-
-echo "Madrona cache configuration:"
-echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
-echo "  ENV_CONFIG      = $ENV_CONFIG"
-echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
-echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
-if [ -f "$MADRONA_MWGPU_KERNEL_CACHE" ] && [ -f "$MADRONA_BVH_KERNEL_CACHE" ]; then
-  echo "  Cache files found (no recompile expected)."
-else
-  echo "  No cache files yet; first run will compile and populate them."
-fi
-echo
-
-echo "========================================="
-echo "Starting MV-MAE training with MJX + Madrona"
-echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
-echo "========================================="
+echo "=== JAX backend probe ==="
+python - <<'"'"'PY'"'"'
+import jax, jaxlib
+print("jax", jax.__version__, "jaxlib", jaxlib.__version__)
+print("devices()", jax.devices())
+print("default_backend()", jax.default_backend())
+PY
 
 # ---------------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------------
 DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
-
 PY_MM=$(python - <<'"'"'PY'"'"'
 import sys
 print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
 )
-
 SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
 BIN_DIR="${DEPS_PREFIX}/bin"
-
 mkdir -p "$DEPS_PREFIX"
 
-# Make prefix visible for imports + CLI entrypoints (keep /workspace first)
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 
-# ---------------- Install TensorBoard (persistently) ----------------
-echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
-
-if python - <<'PY'
+# ---------------- Ensure tensorboard (optional) ----------------
+if ! python - <<'"'"'PY'"'"'
 import importlib.util
-ok = importlib.util.find_spec("tensorboard") is not None
-print("tensorboard already importable:", ok)
-raise SystemExit(0 if ok else 1)
+raise SystemExit(0 if importlib.util.find_spec("tensorboard") else 1)
 PY
 then
-  echo "TensorBoard already installed."
-else
-  echo "Installing tensorboard into persistent prefix..."
   python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
 fi
 
-python - <<'PY'
-import tensorboard
-print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
+# ---------------- Madrona cache dir (per GPU model) ----------------
+ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
+GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
+GPU_MODEL=${GPU_MODEL:-unknown}
+GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
+ENV_CONFIG="default"
+
+CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
+mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
+export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
+export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
+
+echo "=== Madrona caches ==="
+echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
+echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
+echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
+
+# ---------------- HARD RESET caches (raytracer stability) ----------------
+echo "=== Clearing JAX + CUDA + Madrona caches (raytracer) ==="
+rm -rf ~/.cache/jax || true
+rm -rf ~/.nv/ComputeCache || true
+rm -f "$MADRONA_MWGPU_KERNEL_CACHE" "$MADRONA_BVH_KERNEL_CACHE" || true
+
+# ---------------- Rebuild madrona_mjx into user prefix (overrides /opt/madrona_mjx) ----------------
+echo "=== Rebuilding madrona_mjx into ${DEPS_PREFIX} (no SIF changes) ==="
+cd "'"$SLURM_SUBMIT_DIR"'"
+if [[ ! -d madrona_mjx_user ]]; then
+  git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx_user
+fi
+cd madrona_mjx_user
+git submodule update --init --recursive
+rm -rf build
+mkdir -p build && cd build
+cmake .. -DLOAD_VULKAN=OFF
+make -j"$(nproc)"
+cd ..
+python -m pip install -e . --prefix "$DEPS_PREFIX"
+
+python - <<'"'"'PY'"'"'
+import madrona_mjx, inspect
+print("madrona_mjx imported from:", inspect.getfile(madrona_mjx))
 PY
-echo "============================================"
-
-echo "=== Driver + visibility ==="
-nvidia-smi
-echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-echo "APPTAINERENV_CUDA_VISIBLE_DEVICES=$APPTAINERENV_CUDA_VISIBLE_DEVICES"
-
-echo "=== JAX backend probe ==="
-python - <<'PY'
-import jax, jaxlib, os
-print("jax", jax.__version__, "jaxlib", jaxlib.__version__)
-print("JAX_PLATFORMS", os.environ.get("JAX_PLATFORMS"))
-print("devices()", jax.devices())
-print("default_backend()", jax.default_backend())
-PY
-
-echo "=== JAX plugin probe ==="
-python - <<'PY'
-import pkgutil
-mods = sorted([m.name for m in pkgutil.iter_modules() if "jax" in m.name and ("cuda" in m.name or "pjrt" in m.name)])
-print("cuda-related modules:", mods)
-PY
-
-python -c "import jax, jaxlib; print('jax', jax.__version__, 'jaxlib', jaxlib.__version__)"
-python -c "import jax; print(jax.devices())"
-
 
 # ---------------- Run training ----------------
+cd /workspace
 stdbuf -oL -eL python -u execute.py 2>&1
 
 echo "Training completed."
