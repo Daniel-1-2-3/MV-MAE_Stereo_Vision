@@ -163,6 +163,7 @@ class StereoPickCube(panda.PandaBase):
 
         data0_batched = jax.tree_util.tree_map(_batch, data0)
         token, _, _ = self.renderer.init(data0_batched, self._mjx_model)
+        jax.block_until_ready(token)  # force error to surface here (not later at PRNGKey)
         self._render_token = token
         self._render_jit = jax.jit(lambda tok, d: self.renderer.render(tok, d, self._mjx_model))
     

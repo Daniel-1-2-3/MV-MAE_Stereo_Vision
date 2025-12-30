@@ -44,7 +44,7 @@ export APPTAINERENV_MUJOCO_PLATFORM=egl
 export APPTAINERENV_DISPLAY=
 export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
 export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
-export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
 export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
 # NVIDIA EGL vendor JSON on the HOST
@@ -205,6 +205,27 @@ import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
 echo "============================================"
+
+echo "=== Driver + visibility ==="
+nvidia-smi
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo "APPTAINERENV_CUDA_VISIBLE_DEVICES=$APPTAINERENV_CUDA_VISIBLE_DEVICES"
+
+echo "=== JAX backend probe ==="
+python - <<'PY'
+import jax, jaxlib, os
+print("jax", jax.__version__, "jaxlib", jaxlib.__version__)
+print("JAX_PLATFORMS", os.environ.get("JAX_PLATFORMS"))
+print("devices()", jax.devices())
+print("default_backend()", jax.default_backend())
+PY
+
+echo "=== JAX plugin probe ==="
+python - <<'PY'
+import pkgutil
+mods = sorted([m.name for m in pkgutil.iter_modules() if "jax" in m.name and ("cuda" in m.name or "pjrt" in m.name)])
+print("cuda-related modules:", mods)
+PY
 
 python -c "import jax, jaxlib; print('jax', jax.__version__, 'jaxlib', jaxlib.__version__)"
 python -c "import jax; print(jax.devices())"
