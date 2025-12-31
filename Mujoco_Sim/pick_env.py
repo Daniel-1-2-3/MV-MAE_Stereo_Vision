@@ -229,11 +229,13 @@ class StereoPickCube(panda.PandaBase):
         if mocap_quat.ndim == 2:
             mocap_quat = jp.broadcast_to(mocap_quat[None, ...], (B,) + mocap_quat.shape)
 
-        mocap_pos = mocap_pos.at[:, self._mocap_target, :].set(target_pos[:, None, :])
-        mocap_quat = mocap_quat.at[:, self._mocap_target, :].set(target_quat[:, None, :])
+        mocap_pos = mocap_pos.at[:, self._mocap_target, :].set(target_pos)
+        mocap_quat = mocap_quat.at[:, self._mocap_target, :].set(target_quat)
         data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
         
-        render_token, _, _ = self.renderer.init(data, self._mjx_model)
+        if self._render_token is None:
+            self._render_token, _, _ = self.renderer.init(data, self._mjx_model)
+        render_token = self._render_token
         
         # Initialize env state and info
         metrics = {

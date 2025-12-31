@@ -200,6 +200,9 @@ else
   python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
 fi
 
+python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__)"
+python -c "import madrona_mjx; import inspect; print('madrona_mjx', madrona_mjx.__file__)"
+
 python - <<'PY'
 import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
