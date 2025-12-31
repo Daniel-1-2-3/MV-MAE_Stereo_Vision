@@ -270,6 +270,9 @@ class StereoPickCube(panda.PandaBase):
             m = self._mjx_model
             B = rng.shape[0]
 
+            # Ensure mocap index is a scalar, not shape-(1,) array / list.
+            mocap_id = int(np.asarray(self._mocap_target).reshape(()))
+
             keys = jax.vmap(lambda k: jax.random.split(k, 3))(rng)
             rng_main = keys[:, 0, :]
             rng_box = keys[:, 1, :]
@@ -320,8 +323,8 @@ class StereoPickCube(panda.PandaBase):
             )
 
             data = data.replace(
-                mocap_pos=data.mocap_pos.at[:, self._mocap_target, :].set(target_pos),
-                mocap_quat=data.mocap_quat.at[:, self._mocap_target, :].set(target_quat),
+                mocap_pos=data.mocap_pos.at[:, mocap_id, :].set(target_pos),
+                mocap_quat=data.mocap_quat.at[:, mocap_id, :].set(target_quat),
             )
 
             data = mjx.forward(m, data)
