@@ -44,6 +44,12 @@ def _jax_to_torch(tensor):
         tensor.block_until_ready()
     return tpack.from_dlpack(tensor)
 
+def _torch_to_jax(tensor):
+    from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
+
+    tensor = from_dlpack(tensor)
+    return tensor
+
 def get_load_path(root, load_run=-1, checkpoint=-1):
     try:
         runs = os.listdir(root)
