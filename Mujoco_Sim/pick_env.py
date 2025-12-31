@@ -34,6 +34,69 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_
 from Custom_Mujoco_Playground._src.mjx_env import State  # pylint: disable=g-importing-member
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
 
+# =========================
+# Debug / diagnostics helpers
+# =========================
+_PICK_ENV_DEBUG = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
+_PICK_ENV_DEBUG_LEVEL = int(os.environ.get("PICK_ENV_DEBUG_LEVEL", "2"))  # 0=off, 1=key, 2=verbose, 3=very verbose
+_PICK_ENV_DEBUG_JAXPRINT = os.environ.get("PICK_ENV_DEBUG_JAXPRINT", "1") == "1"
+
+def _dbg(msg: str, level: int = 1) -> None:
+    if _PICK_ENV_DEBUG and _PICK_ENV_DEBUG_LEVEL >= level:
+        print(f"[pick_env DEBUG] {msg}", flush=True)
+
+def _arr_info(name: str, x: Any, level: int = 2) -> None:
+    if not (_PICK_ENV_DEBUG and _PICK_ENV_DEBUG_LEVEL >= level):
+        return
+    try:
+        shape = getattr(x, "shape", None)
+        dtype = getattr(x, "dtype", None)
+        ndim = getattr(x, "ndim", None)
+        # Device info
+        dev = None
+        if hasattr(x, "device"):
+            try:
+                dev = x.device()
+            except Exception:
+                dev = None
+        if dev is None and hasattr(x, "devices"):
+            try:
+                ds = x.devices()
+                dev = next(iter(ds)) if ds else None
+            except Exception:
+                dev = None
+        _dbg(f"{name}: type={type(x)} ndim={ndim} shape={shape} dtype={dtype} device={dev}", level=level)
+    except Exception as e:
+        _dbg(f"{name}: <arr_info failed: {e}>", level=level)
+
+def _tree_summary(name: str, tree: Any, max_leaves: int = 25, level: int = 3) -> None:
+    if not (_PICK_ENV_DEBUG and _PICK_ENV_DEBUG_LEVEL >= level):
+        return
+    try:
+        leaves = jax.tree_util.tree_leaves(tree)
+        _dbg(f"{name}: pytree leaves={len(leaves)} (showing up to {max_leaves})", level=level)
+        for i, leaf in enumerate(leaves[:max_leaves]):
+            _arr_info(f"{name}.leaf[{i}]", leaf, level=level)
+    except Exception as e:
+        _dbg(f"{name}: <tree_summary failed: {e}>", level=level)
+
+def _check_leading_batch(name: str, tree: Any, B: int, level: int = 2) -> None:
+    if not (_PICK_ENV_DEBUG and _PICK_ENV_DEBUG_LEVEL >= level):
+        return
+    bad = []
+    try:
+        leaves, treedef = jax.tree_util.tree_flatten(tree)
+        for i, leaf in enumerate(leaves):
+            if hasattr(leaf, "shape") and hasattr(leaf, "ndim") and leaf.ndim > 0:
+                if leaf.shape[0] != B:
+                    bad.append((i, leaf.shape))
+        if bad:
+            _dbg(f"{name}: WARNING {len(bad)} leaves have leading dim != B={B}. First few: {bad[:10]}", level=level)
+        else:
+            _dbg(f"{name}: leading batch check OK (all array leaves have shape[0]=={B}).", level=level)
+    except Exception as e:
+        _dbg(f"{name}: <check_leading_batch failed: {e}>", level=level)
+
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
@@ -99,6 +162,10 @@ class StereoPickCube(panda.PandaBase):
         self.render_width = render_width
         self.render_height = render_height
 
+        _dbg(f"running from: {__file__}", level=1)
+        _dbg(f"__init__: render_batch_size={render_batch_size} render_width={render_width} render_height={render_height}", level=1)
+        _dbg(f"__init__: config.impl={getattr(config, 'impl', None)}", level=2)
+
         mjx_env.MjxEnv.__init__(self, config, config_overrides)
 
         xml_path = (
@@ -154,6 +221,8 @@ class StereoPickCube(panda.PandaBase):
         self._start_tip_transform = panda_kinematics.compute_franka_fk(self._init_ctrl[:7])
 
     def _init_renderer(self):
+        _dbg(f"_init_renderer: gpu_id={self._config.vision_config.gpu_id} num_worlds={self.render_batch_size} rasterizer={self._config.vision_config.use_rasterizer}", level=1)
+        _dbg(f"_init_renderer: enabled_geom_groups={self._config.vision_config.enabled_geom_groups}", level=2)
         self.renderer = BatchRenderer(
             m=self._mjx_model,
             gpu_id=self._config.vision_config.gpu_id,
@@ -196,23 +265,41 @@ class StereoPickCube(panda.PandaBase):
         return jp.any(pair & valid, axis=-1)
 
     def reset(self, rng: jax.Array) -> State:
+        _dbg("reset: entered", level=1)
+        _arr_info("reset.rng(in)", rng, level=1)
+        if _PICK_ENV_DEBUG_JAXPRINT:
+            try:
+                jax.debug.print("[pick_env jaxprint] reset entered: rng.shape={}", rng.shape)
+            except Exception:
+                pass
         if rng.ndim == 1:
+            _dbg(f"reset: rng.ndim==1, expanding to (1,2) from {rng.shape}", level=1)
             rng = rng[None, :]  # -> (1, 2)
         if rng.shape[0] != self.render_batch_size:
+            _dbg(f"reset: rng batch {rng.shape[0]} != render_batch_size {self.render_batch_size}. Splitting rng[0] to match.", level=1)
+            _arr_info("reset.rng(before_split)", rng, level=2)
             rng = jax.random.split(rng[0], self.render_batch_size)
+            _arr_info("reset.rng(after_split)", rng, level=1)
 
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
+        _dbg(f"reset: inferred device from rng: {dev}", level=1)
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
             if os.environ.get("PICK_ENV_DEBUG", "0") == "1":
                 print(f"[pick_env] running from: {__file__}")
 
             m = self._mjx_model
             B = rng.shape[0]
+            _dbg(f"reset: B={B} render_batch_size={self.render_batch_size}", level=1)
+            if B != self.render_batch_size:
+                _dbg("reset: !!! B != render_batch_size (world-count mismatch risk for renderer) !!!", level=1)
 
             keys = jax.vmap(lambda k: jax.random.split(k, 3))(rng)
             rng_main = keys[:, 0, :]
             rng_box = keys[:, 1, :]
             rng_target = keys[:, 2, :]
+            _arr_info("reset.rng_main", rng_main, level=2)
+            _arr_info("reset.rng_box", rng_box, level=2)
+            _arr_info("reset.rng_target", rng_target, level=2)
 
             min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
             max_box = jp.array([0.2, 0.2, 0.0], dtype=jp.float32)
@@ -225,9 +312,19 @@ class StereoPickCube(panda.PandaBase):
 
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)  # (B, 3)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)  # (B, 3)
+            _arr_info("reset.box_pos", box_pos, level=1)
+            _arr_info("reset.target_pos", target_pos, level=1)
+            if _PICK_ENV_DEBUG_JAXPRINT:
+                try:
+                    jax.debug.print("[pick_env jaxprint] box_pos[0]={} target_pos[0]={}", box_pos[0], target_pos[0])
+                except Exception:
+                    pass
 
             # ---- Create a FULLY-BATCHED MJX Data pytree ----
             data0 = mjx.make_data(m)
+            _dbg("reset: created data0 = mjx.make_data(m)", level=1)
+            _tree_summary("reset.data0", data0, level=3)
+            _arr_info("reset.data0.qpos", getattr(data0, 'qpos', None), level=2)
 
             def _batch_leaf(x):
                 # Scalars stay scalar; everything else gets a leading batch axis [B, ...]
@@ -236,6 +333,10 @@ class StereoPickCube(panda.PandaBase):
                 return jp.broadcast_to(x, (B,) + x.shape)
 
             data = jax.tree_util.tree_map(_batch_leaf, data0)
+            _dbg("reset: batched data pytree via broadcast_to", level=1)
+            _tree_summary("reset.data(batched)", data, level=3)
+            _check_leading_batch("reset.data(batched)", data, B, level=2)
+            _arr_info("reset.data.qpos(batched)", data.qpos, level=1)
 
             # ---- Overwrite qpos/qvel/ctrl with the actual reset state ----
             nq = m.nq
@@ -251,6 +352,10 @@ class StereoPickCube(panda.PandaBase):
             ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
 
             data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
+            _dbg("reset: wrote qpos/qvel/ctrl into data", level=1)
+            _arr_info("reset.qpos", qpos, level=1)
+            _arr_info("reset.qvel", qvel, level=2)
+            _arr_info("reset.ctrl", ctrl, level=2)
 
             # ---- Set target mocap (already batched thanks to _batch_leaf) ----
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
@@ -259,20 +364,78 @@ class StereoPickCube(panda.PandaBase):
             mocap_pos = data.mocap_pos.at[:, self._mocap_target, :].set(target_pos[:, None, :])
             mocap_quat = data.mocap_quat.at[:, self._mocap_target, :].set(target_quat[:, None, :])
             data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
+            _dbg(f"reset: set mocap target index={self._mocap_target}", level=1)
+            _arr_info("reset.mocap_pos", data.mocap_pos, level=2)
+            _arr_info("reset.mocap_quat", data.mocap_quat, level=2)
 
             # ---- Forward per-world (MJX forward is single-world in your build) ----
             in_axes = jax.tree_util.tree_map(
                 lambda x: None if (not hasattr(x, "ndim") or x.ndim == 0) else 0,
                 data,
             )
+            _dbg("reset: calling mjx.forward (vmapped)", level=1)
             data = jax.vmap(lambda d: mjx.forward(m, d), in_axes=(in_axes,), out_axes=0)(data)
-            print("data done")
+            try:
+                jax.tree_util.tree_map(jax.block_until_ready, data)
+            except Exception as e:
+                _dbg(f"reset: block_until_ready(data) failed: {e}", level=1)
+            _dbg("reset: mjx.forward done (data ready)", level=1)
+            _arr_info("reset.data.qpos(after_forward)", data.qpos, level=1)
+            _arr_info("reset.data.ctrl(after_forward)", data.ctrl, level=2)
+            _arr_info("reset.data.mocap_pos(after_forward)", data.mocap_pos, level=2)
+            if _PICK_ENV_DEBUG_JAXPRINT:
+                try:
+                    jax.debug.print("[pick_env jaxprint] after_forward: qpos[0,0:3]={}", data.qpos[0, 0:3])
+                except Exception:
+                    pass
+            print("data done", flush=True)
 
+# ---- Renderer init once ----
             # ---- Renderer init once ----
             if self._render_token is None:
+                _dbg("reset: _render_token is None -> calling renderer.init(data, m)", level=1)
+                _dbg(f"reset: renderer expects num_worlds={self.render_batch_size}; data batch B={B}", level=1)
+
+                # Quick sanity scan of devices on a subset of leaves.
+                try:
+                    leaf_devs = []
+                    for leaf in jax.tree_util.tree_leaves(data)[:50]:
+                        if hasattr(leaf, "device"):
+                            try:
+                                leaf_devs.append(str(leaf.device()))
+                            except Exception:
+                                pass
+                        elif hasattr(leaf, "devices"):
+                            try:
+                                ds = leaf.devices()
+                                if ds:
+                                    leaf_devs.append(str(next(iter(ds))))
+                            except Exception:
+                                pass
+                    _dbg(f"reset: sample leaf devices={leaf_devs[:10]}", level=2)
+                except Exception as e:
+                    _dbg(f"reset: leaf device scan failed: {e}", level=1)
+
+                _arr_info("reset.data.qpos(pre_init)", data.qpos, level=1)
+                _arr_info("reset.data.ctrl(pre_init)", data.ctrl, level=2)
+                _arr_info("reset.data.mocap_pos(pre_init)", data.mocap_pos, level=2)
+                _dbg("reset: calling self.renderer.init NOW", level=1)
+
                 self._render_token, _, _ = self.renderer.init(data, m)
-                jax.block_until_ready(self._render_token)
-            print("rendered")
+
+                # Block until ready on token (token may be a pytree).
+                try:
+                    jax.tree_util.tree_map(jax.block_until_ready, self._render_token)
+                except Exception:
+                    try:
+                        jax.block_until_ready(self._render_token)
+                    except Exception:
+                        pass
+
+                _dbg("reset: renderer.init returned token", level=1)
+                _tree_summary("reset.render_token", self._render_token, level=3)
+
+            print("rendered", flush=True)
 
             render_token = self._render_token
 
