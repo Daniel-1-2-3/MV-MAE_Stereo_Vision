@@ -382,7 +382,16 @@ class StereoPickCube(panda.PandaBase):
             print("data done", flush=True)
 
             # ---- Renderer init once ----
-            # ---- Renderer init once ----
+            _dbg("reset: performing 1-world renderer warmup", level=1)
+            warm_data = mjx.make_data(m)
+            try:
+                tok1, _, _ = self.renderer.init(warm_data, m)
+                jax.block_until_ready(tok1)
+                del tok1
+                _dbg("reset: warmup init succeeded", level=1)
+            except Exception as e:
+                _dbg(f"reset: warmup init failed (expected first-time compile): {e}", level=1)
+                
             if self._render_token is None:
                 _dbg("reset: _render_token is None -> calling renderer.init(data, m)", level=1)
                 _dbg(f"reset: renderer expects num_worlds={self.render_batch_size}; data batch B={B}", level=1)
@@ -414,6 +423,9 @@ class StereoPickCube(panda.PandaBase):
                 
                 data = jax.tree_util.tree_map(lambda x: x + jp.zeros_like(x) if hasattr(x, "ndim") and x.ndim > 0 else x, data)
                 jax.tree_util.tree_map(jax.block_until_ready, data)
+                assert data.contact.geom1.shape[-1] <= self._mjx_model.nconmax, (
+                    f"contact buffer {data.contact.geom1.shape[-1]} > model.nconmax {self._mjx_model.nconmax}"
+                )
                 self._render_token, _, _ = self.renderer.init(data, m)
 
                 # Block until ready on token (token may be a pytree).
