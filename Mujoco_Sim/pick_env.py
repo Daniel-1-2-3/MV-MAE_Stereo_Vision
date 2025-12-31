@@ -271,7 +271,7 @@ class StereoPickCube(panda.PandaBase):
                 )
 
             in_axes = _data_in_axes(data)
-            data = jax.vmap(lambda d: mjx.forward(m, d), in_axes=in_axes, out_axes=0)(data)
+            data = jax.vmap(lambda d: mjx.forward(m, d), in_axes=(in_axes,), out_axes=0)(data)
 
             if self._render_token is None:
                 self._render_token, _, _ = self.renderer.init(data, m)
