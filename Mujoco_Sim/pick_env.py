@@ -37,8 +37,6 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
 import jaxlib
 import madrona_mjx # type: ignore
-import pathlib
-import os
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
@@ -325,9 +323,8 @@ class StereoPickCube(panda.PandaBase):
                         print("[diag] madrona .so mtime:", str(so0), os.path.getmtime(so0))
 
                     # Also log the dtype you pass into the renderer config (int64 here is a common footgun)
-                    eg = np.asarray(self._config.vision_config.enabled_geom_groups)
+                    eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
                     print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype)
-
                     print("[diag] calling renderer.init ...")
 
                 # Call init + do a tiny smoke render to force the custom call to actually execute here
