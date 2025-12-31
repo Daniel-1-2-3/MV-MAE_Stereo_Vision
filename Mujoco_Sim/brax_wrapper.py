@@ -38,11 +38,10 @@ except ImportError:
     TensorDict = None
 
 def _jax_to_torch(tensor):
-    import torch.utils.dlpack as tpack
-    if hasattr(tensor, "block_until_ready"):
-        tensor.block_until_ready()
-    t = tpack.from_dlpack(tensor)
-    return t.contiguous().clone()
+    import torch.utils.dlpack as tpack  # pytype: disable=import-error # pylint: disable=import-outside-toplevel
+
+    tensor = tpack.from_dlpack(tensor)
+    return tensor
 
 def _torch_to_jax(tensor):
     from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
@@ -122,14 +121,9 @@ class RSLRLBraxWrapper(VecEnv):
             )
         else:
             v_randomization_fn = None
-
-        self.env = wrapper.wrap_for_brax_training(
-            env,
-            episode_length=episode_length,
-            action_repeat=action_repeat,
-            randomization_fn=v_randomization_fn,
-        )
-        raw = self.env.env.env.unwrapped  # this matches how render() accesses it
+        
+        self.env = env
+        raw = env
         self._raw_env = raw
         self._render_pixels_fn = jax.jit(raw.render_pixels)
         self.render_callback = render_callback
@@ -146,7 +140,7 @@ class RSLRLBraxWrapper(VecEnv):
         self.num_obs = H * (2 * W) * C  # metadata only; actual tensor stays [B, H, 2W, 3]
         print(f"obs (from env_state.obs) expected shape: [B, {H}, {2*W}, {C}]")
 
-        self.num_actions = self.env.env.unwrapped.action_size
+        self.num_actions = raw.action_size
 
         self.max_episode_length = episode_length
 

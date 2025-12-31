@@ -80,7 +80,7 @@ class DrQv2Agent:
         mvmae_encoder_embed_dim: int = 256, 
         mvmae_decoder_embed_dim: int = 128,
         mvmae_encoder_heads: int = 16,
-        in_channels: int = 9,
+        in_channels: int = 3,
         img_h_size: int = 64,
         img_w_size: int = 64,
         mvmae_decoder_heads: int = 16,
