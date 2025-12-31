@@ -95,7 +95,6 @@ def adjust_brightness(img: jax.Array, scale: jax.Array) -> jax.Array:
     """Scales pixel values by per-world brightness and clamps to [0, 1]."""
     return jp.clip(img * scale, 0.0, 1.0)
 
-
 class StereoPickCube(panda.PandaBase):
     """Bring a box to a target."""
     def __init__(
@@ -106,12 +105,15 @@ class StereoPickCube(panda.PandaBase):
         render_width: int = 64,
         render_height: int = 64,
     ):
-        # ---- Store render params early (used by renderer init) ----
+        # ---- Render params ----
         self.render_batch_size = int(render_batch_size)
         self.render_width = int(render_width)
         self.render_height = int(render_height)
 
-        # ---- Resolve XML path ----
+        # ---- Base MJX env init (DO NOT call super()) ----
+        mjx_env.MjxEnv.__init__(self, config, config_overrides)
+
+        # ---- XML path (same as your reference) ----
         xml_path = (
             mjx_env.ROOT_PATH
             / "manipulation"
@@ -121,18 +123,9 @@ class StereoPickCube(panda.PandaBase):
         )
         self._xml_path = xml_path.as_posix()
 
-        # ---- Correct base init call (PandaBase expects xml_path first) ----
-        super().__init__(
-            xml_path=xml_path,
-            config=config,
-            config_overrides=config_overrides,
-        )
-
-        # ---- Load model assets EXACTLY like your original menagerie-merge version ----
-        # Start with panda.get_assets()
+        # ---- Assets: start from panda.get_assets(), then merge Menagerie dir ----
         self._model_assets = dict(panda.get_assets())
 
-        # Merge in Menagerie assets from the external deps path
         menagerie_dir = (
             Path.cwd()
             / "mujoco_playground_external_deps"
@@ -141,29 +134,34 @@ class StereoPickCube(panda.PandaBase):
         )
         self._model_assets = _add_assets(self._model_assets, menagerie_dir)
 
-        # ---- Rebuild mj_model using the merged assets (overriding whatever PandaBase loaded) ----
+        # ---- Build mujoco model using merged assets, apply modify_model ----
         mj_model = self.modify_model(
-            mujoco.MjModel.from_xml_string(xml_path.read_text(), assets=self._model_assets)
+            mujoco.MjModel.from_xml_string(
+                xml_path.read_text(),
+                assets=self._model_assets,
+            )
         )
         mj_model.opt.timestep = self._config.sim_dt
 
+        # ---- Upload to MJX ----
         self._mj_model = mj_model
         self._mjx_model = mjx.put_model(mj_model, impl=self._config.impl)
 
-        # ---- Base per-task init (same as your original) ----
+        # ---- Task post init ----
         self._post_init(obj_name="box", keyframe="low_home")
 
-        # ---- Floor collision geoms (match your original pick_env, NOT sensor ids) ----
+        # ---- Floor collision geom ids (same as your reference) ----
         self._floor_hand_geom_ids = [
             self._mj_model.geom(geom).id
             for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
         ]
         self._floor_geom_id = self._mj_model.geom("floor").id
 
-        # ---- Renderer (lazy token init on first reset) ----
+        # ---- Renderer: create BatchRenderer now, init token lazily in reset() ----
         self._render_token = None
-        self._init_renderer()  # constructs BatchRenderer (no init/render here)
+        self._init_renderer()
         self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
+
 
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
