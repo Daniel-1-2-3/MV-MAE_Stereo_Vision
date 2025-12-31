@@ -123,9 +123,10 @@ class StereoPickCube(panda.PandaBase):
         self._floor_geom_id = self._mj_model.geom("floor").id
         
         # Cache render token to not re-run renderer.init on every reset.
+        # Renderer + token are initialized lazily on first reset() with real data
+        self._render_token = None
+        self._init_renderer()  # now ONLY constructs BatchRenderer (no init/render here)
         self._render_jit = jax.jit(lambda token, data: self.renderer.render(token, data, self._mjx_model))
-        self._render_token_host = None
-        self._init_renderer()
     
     def _post_init(self, obj_name="box", keyframe="low_home"):
         super()._post_init(obj_name, keyframe)
@@ -146,37 +147,6 @@ class StereoPickCube(panda.PandaBase):
             use_rasterizer=self._config.vision_config.use_rasterizer,
             viz_gpu_hdls=None,
         )
-
-                # Make a dummy mjx.Data batched to shape [B, ...] so renderer.init matches num_worlds.
-        # IMPORTANT: do NOT broadcast every leaf of mjx.Data (unsafe for renderer custom-call).
-        B = int(self.render_batch_size)
-
-        init_q0 = jp.asarray(self._init_q, dtype=jp.float32) # [nq]
-        qpos0 = jp.broadcast_to(init_q0[None, :], (B, init_q0.shape[0])) # [B, nq]
-        qvel0 = jp.zeros((B, self._mjx_model.nv), dtype=jp.float32) # [B, nv]
-
-        init_ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32) # [nu]
-        ctrl0 = jp.broadcast_to(init_ctrl0[None, :], (B, init_ctrl0.shape[0])) # [B, nu]
-
-        data0_batched = mjx_env.make_data(
-            self._mj_model,
-            qpos=qpos0,
-            qvel=qvel0,
-            ctrl=ctrl0,
-            impl=self._mjx_model.impl.value,
-            nconmax=self._config.nconmax,
-            njmax=self._config.njmax,
-        )
-        token, _, _ = self.renderer.init(data0_batched, self._mjx_model)
-        # Force the raytracer custom-call to actually run now (many failures happen on first render, not init)
-        token, rgb, depth = self.renderer.render(token, data0_batched, self._mjx_model)
-
-        # Block on real device outputs produced by the custom call
-        jax.block_until_ready(rgb)
-        jax.block_until_ready(depth)
-
-        self._render_token = token
-        self._render_jit = jax.jit(lambda tok, d: self.renderer.render(tok, d, self._mjx_model))
 
     def modify_model(self, mj_model: mujoco.MjModel):
         # Expand floor size to non-zero so Madrona can render it
@@ -258,6 +228,14 @@ class StereoPickCube(panda.PandaBase):
             mocap_pos=data.mocap_pos.at[:, self._mocap_target, :].set(target_pos),
             mocap_quat=data.mocap_quat.at[:, self._mocap_target, :].set(target_quat),
         )
+        
+        if self._render_token is None:
+            token, _, _ = self.renderer.init(data, self._mjx_model)
+            # Force first render here so any kernel compilation happens in a valid state
+            token, rgb, depth = self.renderer.render(token, data, self._mjx_model)
+            jax.block_until_ready(rgb)
+            jax.block_until_ready(depth)
+            self._render_token = token
         
         # Initialize env state and info
         metrics = {
