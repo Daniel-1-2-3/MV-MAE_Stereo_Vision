@@ -269,8 +269,10 @@ class StereoPickCube(panda.PandaBase):
             # Set target mocap (batched).
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
             target_quat = jp.broadcast_to(target_quat0, (B, 4))
-            mocap_pos = data.mocap_pos.at[:, self._mocap_target, :].set(target_pos)
-            mocap_quat = data.mocap_quat.at[:, self._mocap_target, :].set(target_quat)
+            print("mocap_pos shape:", data.mocap_pos.shape)
+            print("mocap_quat shape:", data.mocap_quat.shape)
+            mocap_pos = data.mocap_pos.at[:].set(target_pos)
+            mocap_quat = data.mocap_quat.at[:].set(target_quat)
             data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
 
             # Forward so x* fields exist for rendering/rewards on the first step.
@@ -278,12 +280,14 @@ class StereoPickCube(panda.PandaBase):
                 data = mjx.forward(m, data)
             except Exception:
                 data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+            print('data')
 
             # Sample per-world brightness once per episode (shape [B, 1, 1, 1] for broadcasting).
             bmin, bmax = self._config.obs_noise.brightness
             brightness = jax.vmap(
                 lambda k: jax.random.uniform(k, (1,), minval=bmin, maxval=bmax)
             )(rng_brightness).reshape((B, 1, 1, 1))
+            print('brightness')
 
             # ---- Renderer init once (token cached across resets) ----
             if self._render_token is None:
@@ -293,7 +297,8 @@ class StereoPickCube(panda.PandaBase):
                 jax.block_until_ready(self._render_token)
                 if debug:
                     print(f"[pick_env] render_token dtype={self._render_token.dtype} shape={self._render_token.shape}")
-
+            print('rendered')
+            
             render_token = self._render_token
 
             if debug:
