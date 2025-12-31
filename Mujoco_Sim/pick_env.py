@@ -232,9 +232,7 @@ class StereoPickCube(panda.PandaBase):
             nq = self._mjx_model.nq
             nv = self._mjx_model.nv
 
-            init_q0 = jp.asarray(self._init_q, dtype=jp.float32)
-            # JIT-safe shape check: reshape hard-fails if sizes differ.
-            init_q0 = jp.reshape(init_q0, (nq,))
+            init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
 
             init_q = jp.broadcast_to(init_q0, (B, nq))
             init_q = init_q.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
