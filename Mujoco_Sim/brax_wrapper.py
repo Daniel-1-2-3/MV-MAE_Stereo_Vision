@@ -154,7 +154,7 @@ class RSLRLBraxWrapper(VecEnv):
         self.success_queue = deque(maxlen=100)
 
         print("JITing reset and step")
-        self.reset_fn = jax.jit(self.env.reset)
+        self.reset_fn = self.env.reset 
         self.step_fn = jax.jit(self.env.step)
         print("Done JITing reset and step")
         self.env_state = None
