@@ -198,6 +198,8 @@ class StereoPickCube(panda.PandaBase):
     def reset(self, rng: jax.Array) -> State:
         if rng.ndim == 1:
             rng = rng[None, :]  # -> (1, 2)
+        if rng.shape[0] != self.render_batch_size:
+            rng = jax.random.split(rng[0], self.render_batch_size)
 
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
@@ -264,11 +266,13 @@ class StereoPickCube(panda.PandaBase):
                 data,
             )
             data = jax.vmap(lambda d: mjx.forward(m, d), in_axes=(in_axes,), out_axes=0)(data)
+            print("data done")
 
             # ---- Renderer init once ----
             if self._render_token is None:
                 self._render_token, _, _ = self.renderer.init(data, m)
                 jax.block_until_ready(self._render_token)
+            print("rendered")
 
             render_token = self._render_token
 
