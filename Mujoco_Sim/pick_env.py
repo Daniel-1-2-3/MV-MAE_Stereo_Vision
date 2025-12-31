@@ -47,7 +47,6 @@ def default_vision_config() -> config_dict.ConfigDict:
         enabled_geom_groups=[0, 1, 2],
     )
 
-
 def default_config():
     config = config_dict.create(
         ctrl_dt=0.05,
@@ -88,7 +87,7 @@ class StereoPickCube(panda.PandaBase):
 
     def __init__(
         self,
-        render_batch_size: int,
+        render_batch_size: int = 32,
         render_height: int = 64,
         render_width: int = 64,
         config=default_config(),
