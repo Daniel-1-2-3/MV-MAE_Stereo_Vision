@@ -94,35 +94,45 @@ class RSLRLBraxWrapper(VecEnv):
   ):
     import torch  # pytype: disable=import-error # pylint: disable=redefined-outer-name,unused-import,import-outside-toplevel
 
-    # Patches
-    cfg = getattr(env, "_config", None) or getattr(env, "cfg", None) or getattr(self.env, "cfg", None)
+    # Patches: try common config attributes without touching self.env (not set yet)
+    cfg = getattr(env, "_config", None) or getattr(env, "cfg", None) or getattr(env, "config", None)
     self.cfg = cfg if cfg is not None else {}
     if not hasattr(self, "device"):
       self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
       
-    self.seed = seed
+    # Keep seed as a plain Python int (avoid device-side seed generation issues).
+    self.seed = int(seed)
     self.batch_size = num_actors
     self.num_envs = num_actors
 
-    self.key = jax.random.PRNGKey(self.seed)
+    # Create PRNG keys on CPU first. If something (e.g. a renderer custom-call)
+    # has left the CUDA context in a bad state, this prevents the *seed creation*
+    # from being the first thing to crash and helps surface the real failing call.
+    cpu_dev = jax.devices("cpu")[0]
+    with jax.default_device(cpu_dev):
+      self.key = jax.random.PRNGKey(self.seed)
+      # split key into two for reset and randomization
+      key_reset, key_randomization = jax.random.split(self.key)
+      self.key_reset = jax.random.split(key_reset, self.batch_size)
 
+      randomization_rng = None
+      if randomization_fn is not None:
+        randomization_rng = jax.random.split(key_randomization, self.batch_size)
+
+    # Move keys to the requested GPU after creation.
     if device_rank is not None:
       gpu_devices = jax.devices("gpu")
-      self.key = jax.device_put(self.key, gpu_devices[device_rank])
+      dev = gpu_devices[device_rank]
+      self.key = jax.device_put(self.key, dev)
+      self.key_reset = jax.device_put(self.key_reset, dev)
+      if randomization_rng is not None:
+        randomization_rng = jax.device_put(randomization_rng, dev)
       self.device = f"cuda:{device_rank}"
-      print(f"Device -- {gpu_devices[device_rank]}")
+      print(f"Device -- {dev}")
       print(f"Key device -- {self.key.devices()}")
 
-    # split key into two for reset and randomization
-    key_reset, key_randomization = jax.random.split(self.key)
-
-    self.key_reset = jax.random.split(key_reset, self.batch_size)
-
     if randomization_fn is not None:
-      randomization_rng = jax.random.split(key_randomization, self.batch_size)
-      v_randomization_fn = functools.partial(
-          randomization_fn, rng=randomization_rng
-      )
+      v_randomization_fn = functools.partial(randomization_fn, rng=randomization_rng)
     else:
       v_randomization_fn = None
 
