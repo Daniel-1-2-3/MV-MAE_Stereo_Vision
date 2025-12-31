@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional, Union
 
 import jax
 import jax.numpy as jp
+import contextlib
 from ml_collections import config_dict
 import mujoco
 from mujoco import mjx
@@ -177,80 +178,88 @@ class StereoPickCube(panda.PandaBase):
     def reset(self, rng: jax.Array) -> State:
         if rng.ndim == 1:
             rng = rng[None, :]  # -> (1, 2)
+            
+        # Force allocations in reset onto the same device as rng (important for GPU custom calls)
+        dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
+        with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
+            B = rng.shape[0]
+            keys = jax.vmap(lambda k: jax.random.split(k, 3))(rng)
+            rng_main = keys[:, 0, :]
+            rng_box = keys[:, 1, :]
+            rng_target = keys[:, 2, :]
 
-        B = rng.shape[0]
 
-        # Split per-env (must vmap because split/uniform expect single keys)
-        keys = jax.vmap(lambda k: jax.random.split(k, 3))(rng)  # (B, 3, 2)
-        rng_main = keys[:, 0, :]
-        rng_box = keys[:, 1, :]
-        rng_target = keys[:, 2, :]
+            min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
+            max_box = jp.array([ 0.2,  0.2, 0.0], dtype=jp.float32)
+            min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
+            max_tgt = jp.array([ 0.2,  0.2, 0.4], dtype=jp.float32)
+            base = jp.asarray(self._init_obj_pos, dtype=jp.float32)  # (3,)
 
-        min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
-        max_box = jp.array([ 0.2,  0.2, 0.0], dtype=jp.float32)
-        min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
-        max_tgt = jp.array([ 0.2,  0.2, 0.4], dtype=jp.float32)
-        base = jp.asarray(self._init_obj_pos, dtype=jp.float32)  # (3,)
+            def _sample_pos(key, mn, mx):
+                return jax.random.uniform(key, (3,), minval=mn, maxval=mx) + base
 
-        def _sample_pos(key, mn, mx):
-            return jax.random.uniform(key, (3,), minval=mn, maxval=mx) + base
-
-        box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)      # (B, 3)
-        target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt) # (B, 3)
+            box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)      # (B, 3)
+            target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt) # (B, 3)
    
-        # Initialize data
-        init_q0 = jp.array(self._init_q, dtype=jp.float32)
-        B = rng.shape[0]
+            # Initialize data
+            init_q0 = jp.array(self._init_q, dtype=jp.float32)
+            B = rng.shape[0]
+            
+            init_q = jp.broadcast_to(init_q0, (B,) + init_q0.shape)
+            init_q = init_q.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
+            qvel = jp.zeros((B, self._mjx_model.nv), dtype=jp.float32)
+            ctrl0 = jp.array(self._init_ctrl, dtype=jp.float32)
+            ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
+            
+            data = mjx_env.make_data(
+                self._mj_model,
+                qpos=init_q,
+                qvel=qvel,
+                ctrl=ctrl,
+                impl=self._mjx_model.impl.value,
+                nconmax=self._config.nconmax,
+                njmax=self._config.njmax,
+            )
         
-        init_q = jp.broadcast_to(init_q0, (B,) + init_q0.shape)
-        init_q = init_q.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
-        qvel = jp.zeros((B, self._mjx_model.nv), dtype=jp.float32)
-        ctrl0 = jp.array(self._init_ctrl, dtype=jp.float32)
-        ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
-        
-        data = mjx_env.make_data(
-            self._mj_model,
-            qpos=init_q,
-            qvel=qvel,
-            ctrl=ctrl,
-            impl=self._mjx_model.impl.value,
-            nconmax=self._config.nconmax,
-            njmax=self._config.njmax,
-        )
-        
-        # Set target mocap position
-        target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
-        target_quat = jp.broadcast_to(target_quat0, (B, 4))
-        mocap_pos = data.mocap_pos
-        mocap_quat = data.mocap_quat
+            # Set target mocap position
+            target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
+            target_quat = jp.broadcast_to(target_quat0, (B, 4))
+            mocap_pos = data.mocap_pos
+            mocap_quat = data.mocap_quat
 
-        if mocap_pos.ndim == 2:
-            mocap_pos = jp.broadcast_to(mocap_pos[None, ...], (B,) + mocap_pos.shape)
-        if mocap_quat.ndim == 2:
-            mocap_quat = jp.broadcast_to(mocap_quat[None, ...], (B,) + mocap_quat.shape)
+            if mocap_pos.ndim == 2:
+                mocap_pos = jp.broadcast_to(mocap_pos[None, ...], (B,) + mocap_pos.shape)
+            if mocap_quat.ndim == 2:
+                mocap_quat = jp.broadcast_to(mocap_quat[None, ...], (B,) + mocap_quat.shape)
 
-        mocap_pos = mocap_pos.at[:, self._mocap_target, :].set(target_pos[:, None, :])
-        mocap_quat = mocap_quat.at[:, self._mocap_target, :].set(target_quat[:, None, :])
-        data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
-        
-        if self._render_token is None:
-            self._render_token, _, _ = self.renderer.init(data, self._mjx_model)
-        render_token = self._render_token
-        
-        # Initialize env state and info
-        metrics = {
-            "out_of_bounds": jp.array(0.0, dtype=float), 
-            **{k: 0.0 for k in self._config.reward_config.scales.keys()}
-        }
-        info = {
-            "rng": rng_main,
-            "target_pos": target_pos,
-            "reached_box": jp.zeros((B,), dtype=jp.float32),
-            "render_token": render_token,
-        }
-        info, obs = self._get_obs(data, info)
-        reward, done = jp.zeros(2)
-        return State(data, obs, reward, done, metrics, info)
+            mocap_pos = mocap_pos.at[:, self._mocap_target, :].set(target_pos[:, None, :])
+            mocap_quat = mocap_quat.at[:, self._mocap_target, :].set(target_quat[:, None, :])
+            data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
+            # IMPORTANT: make derived quantities valid before any rendering
+            data = mjx.forward(self._mjx_model, data)
+            if self._render_token is None:
+                self._render_token, _, _ = self.renderer.init(data, self._mjx_model)
+                # Force the failure to appear *here* if init/render is the culprit
+                jax.block_until_ready(self._render_token)
+            render_token = self._render_token
+            metrics = {
+                "out_of_bounds": jp.zeros((B,), dtype=jp.float32),
+                **{k: jp.zeros((B,), dtype=jp.float32) for k in self._config.reward_config.scales.keys()},
+            }
+            info = {
+                "rng": rng_main,
+                "target_pos": target_pos,
+                "reached_box": jp.zeros((B,), dtype=jp.float32),
+                "render_token": render_token,
+            }
+
+            info, obs = self._get_obs(data, info)
+
+            # These must be batch-shaped, not scalar length-2
+            reward = jp.zeros((B,), dtype=jp.float32)
+            done = jp.zeros((B,), dtype=jp.float32)
+
+            return State(data, obs, reward, done, metrics, info)
 
     def step(self, state: State, action: jax.Array) -> State:
         delta = action * self._config.action_scale
@@ -331,9 +340,20 @@ class StereoPickCube(panda.PandaBase):
     
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
         _, rgb, _ = self._render_jit(render_token, data_batched)
-        left  = rgb[0, ..., :3].astype(jp.float32) / 255.0
-        right = rgb[1, ..., :3].astype(jp.float32) / 255.0
-        return jp.concatenate([left, right], axis=2)
+
+        # Support either [2, B, H, W, 4] or [B, 2, H, W, 4]
+        if rgb.shape[0] == 2:
+            left  = rgb[0, ..., :3]
+            right = rgb[1, ..., :3]
+        elif rgb.shape[1] == 2:
+            left  = rgb[:, 0, ..., :3]
+            right = rgb[:, 1, ..., :3]
+        else:
+            raise ValueError(f"Unexpected rgb shape: {rgb.shape}")
+
+        left  = left.astype(jp.float32) / 255.0
+        right = right.astype(jp.float32) / 255.0
+        return jp.concatenate([left, right], axis=2)  # [B, H, 2W, 3]
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
         # data is batched in MJX (leading dim B), so this returns [B, H, 2W, 3] uint8.
