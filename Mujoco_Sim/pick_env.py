@@ -162,7 +162,6 @@ class StereoPickCube(panda.PandaBase):
         self._init_renderer()
         self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
 
-
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
         self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
@@ -417,6 +416,20 @@ class StereoPickCube(panda.PandaBase):
         if "brightness" in info:
             pixels = adjust_brightness(pixels, info["brightness"])
         return info, pixels
+    
+    def modify_model(self, mj_model: mujoco.MjModel):
+        # Expand floor size to non-zero so Madrona can render it
+        mj_model.geom_size[mj_model.geom("floor").id, :2] = [5.0, 5.0]
+
+        # Make the finger pads white for increased visibility
+        mesh_id = mj_model.mesh("finger_1").id
+        geoms = [
+            idx
+            for idx, data_id in enumerate(mj_model.geom_dataid)
+            if data_id == mesh_id
+        ]
+        mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
+        return mj_model
 
     @property
     def xml_path(self) -> str:
