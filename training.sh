@@ -33,15 +33,14 @@ if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
   exit 10
 fi
 
-# Silence Apptainer PYTHONPATH forwarding warnings:
-# (we explicitly set APPTAINERENV_PYTHONPATH below)
+# Silence Apptainer PYTHONPATH forwarding warnings (we set it explicitly below)
 unset PYTHONPATH || true
 
 # Prefer host-mounted code under /workspace so edits require no SIF rebuild.
 export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation"
 
 # ============================================================
-# 1) EGL / MuJoCo GL setup (working settings)
+# 1) EGL / MuJoCo GL setup (same as your working setup)
 # ============================================================
 export APPTAINERENV_MUJOCO_GL=egl
 export APPTAINERENV_PYOPENGL_PLATFORM=egl
@@ -75,7 +74,7 @@ GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
 # ============================================================
-# 2) Bind mounts (working layout)
+# 2) Bind mounts (same as your working setup)
 # ============================================================
 # mujoco_playground external_deps fix (site-packages is read-only)
 HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
@@ -92,7 +91,7 @@ BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
 # ============================================================
-# 3) Host snapshot (useful when debugging)
+# 3) Host snapshot
 # ============================================================
 echo "================ HOST SNAPSHOT ================"
 date
@@ -146,10 +145,7 @@ echo "================================================"
 '
 
 # ============================================================
-# 5) Run training inside container
-#    - Madrona caches: JOB-LOCAL + UNIQUE filenames
-#    - Keep your existing JAX flags (from working script)
-#    - Add a minimal smoke test (B=1) before full training
+# 5) Training block: temp/cache forcing + Madrona mini init + env smoke + training
 # ============================================================
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
@@ -159,10 +155,30 @@ apptainer exec --nv \
 set -euo pipefail
 export PYTHONUNBUFFERED=1
 
-# ---------- JAX / XLA tuning (keep from your working script) ----------
+# ---------------- Force writable temp + caches (HIGH IMPACT on cluster hangs) ----------------
+export TMPDIR="${SLURM_TMPDIR:-/tmp}"
+export TEMP="$TMPDIR"
+export TMP="$TMPDIR"
+export XDG_CACHE_HOME="$TMPDIR/xdg_cache"
+export CUDA_CACHE_PATH="$TMPDIR/cuda_cache"
+export CUDA_CACHE_MAXSIZE=$((2*1024*1024*1024))  # 2GB
+mkdir -p "$XDG_CACHE_HOME" "$CUDA_CACHE_PATH"
+
+# Reduce compilation parallelism (helps avoid deadlocks during toolchain init)
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+echo "=== TEMP/CACHE PATHS ==="
+echo "TMPDIR=$TMPDIR"
+echo "XDG_CACHE_HOME=$XDG_CACHE_HOME"
+echo "CUDA_CACHE_PATH=$CUDA_CACHE_PATH"
+echo "CUDA_CACHE_MAXSIZE=$CUDA_CACHE_MAXSIZE"
+echo
+
+# ---------------- JAX / XLA tuning (keep close to your working script) ----------------
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_force_compilation_parallelism=1"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
@@ -175,7 +191,7 @@ PY
 echo "======================"
 echo
 
-# ---------- Madrona cache: node-local + unique files to avoid deadlocks ----------
+# ---------------- Madrona cache: node-local + unique files (avoid shared-cache contention) ----------------
 echo "=== Madrona + GPU detection (inside container) ==="
 ACTUAL_GPU="$(nvidia-smi -L 2>/dev/null | head -1 || true)"
 echo "Actual GPU: $ACTUAL_GPU"
@@ -200,12 +216,29 @@ echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
 ls -lah "$CACHE_BUILD_DIR" || true
 echo
 
+echo "---- Versions (inside container) ----"
+python - <<'"'"'PY'"'"'
+import jax, jaxlib, mujoco, madrona_mjx, torch
+print("torch.cuda.is_available()", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("torch device", torch.cuda.get_device_name(0), "torch.version.cuda", torch.version.cuda)
+print("jax", jax.__version__)
+print("jaxlib", jaxlib.__version__)
+print("mujoco", mujoco.__version__)
+print("madrona_mjx", madrona_mjx.__file__)
+print("jax.devices()", jax.devices())
+print("jax.default_backend()", jax.default_backend())
+PY
+echo "====================================="
+echo
+
 echo "========================================="
 echo "Starting MV-MAE training with MJX + Madrona"
-echo "Raytracer is expected; first run will compile."
+echo "If this hangs at GPU engine compile, it is NVRTC/driver toolchain, not your env code."
 echo "========================================="
+echo
 
-# ---------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------
+# ---------------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------------
 DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
 PY_MM=$(python - <<'"'"'PY'"'"'
 import sys
@@ -215,8 +248,6 @@ PY
 SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
 BIN_DIR="${DEPS_PREFIX}/bin"
 mkdir -p "$DEPS_PREFIX"
-
-# Make prefix visible for imports + CLI entrypoints (keep /workspace first)
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 
@@ -234,14 +265,49 @@ else
   python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
 fi
 
-python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__)"
-python -c "import madrona_mjx; print('madrona_mjx', madrona_mjx.__file__)"
-echo "============================================"
+echo
+echo "=========== MADRONA MINI INIT ==========="
+# Use CUDA_LAUNCH_BLOCKING only for this tiny init to surface true failure point
+CUDA_LAUNCH_BLOCKING=1 stdbuf -oL -eL python -u - <<'"'"'PY'"'"'
+import jax, jax.numpy as jnp
+import mujoco
+from mujoco import mjx
+from madrona_mjx.renderer import BatchRenderer
+
+xml = """
+<mujoco>
+  <worldbody>
+    <geom type="plane" size="5 5 0.1" rgba="0.2 0.2 0.2 1"/>
+  </worldbody>
+</mujoco>
+"""
+m = mujoco.MjModel.from_xml_string(xml)
+mx = mjx.put_model(m, impl="jax")
+d = mjx.make_data(mx)
+
+print("Creating BatchRenderer (raytracer)...")
+r = BatchRenderer(
+    m=mx,
+    gpu_id=0,
+    num_worlds=1,
+    batch_render_view_width=64,
+    batch_render_view_height=64,
+    enabled_geom_groups=jnp.array([0], dtype=jnp.int32),
+    enabled_cameras=None,
+    add_cam_debug_geo=False,
+    use_rasterizer=False,
+    viz_gpu_hdls=None,
+)
+
+print("Calling renderer.init...")
+tok, rgb, depth = r.init(d, mx)
+jax.block_until_ready(rgb)
+print("Init OK, rgb shape:", rgb.shape, "dtype:", rgb.dtype)
+PY
+echo "=========== MADRONA MINI INIT DONE ==========="
 echo
 
-# ---------- Minimal env smoke test (B=1) to ensure Madrona init does not wedge ----------
-# Only enable CUDA_LAUNCH_BLOCKING for this tiny smoke step (better tracebacks without wedging init)
-echo "=========== SMOKE TEST (B=1) ==========="
+echo "=========== ENV SMOKE TEST (B=1) ==========="
 SMOKE_B=1 CUDA_LAUNCH_BLOCKING=1 stdbuf -oL -eL python -u - <<'"'"'PY'"'"'
 import os
 import jax
@@ -252,7 +318,7 @@ print("SMOKE_B =", B)
 
 env = StereoPickCube(config_overrides={
     "vision_config.gpu_id": 0,
-    "vision_config.use_rasterizer": False,  # raytracer
+    "vision_config.use_rasterizer": False,
     "vision_config.enabled_geom_groups": [0, 1, 2],
 })
 
@@ -261,8 +327,6 @@ keys = jax.random.split(key, B)
 
 print("Calling env.reset(keys)...")
 st = env.reset(keys)
-
-# Force sync so any GPU init error surfaces at the true op
 jax.block_until_ready(st)
 
 print("Reset OK.")
@@ -275,12 +339,11 @@ print("render_token present; type:", type(st.info["render_token"]))
 jax.block_until_ready(st.info["render_token"])
 print("render_token sync OK")
 PY
-echo "=========== SMOKE TEST PASSED ==========="
+echo "=========== ENV SMOKE TEST PASSED ==========="
 echo
 
-# ---------- Run the real training ----------
+echo "================ TRAINING RUN ================"
 stdbuf -oL -eL python -u execute.py 2>&1
-
 echo "Training completed."
 '
 
