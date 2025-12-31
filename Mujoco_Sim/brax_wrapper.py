@@ -147,10 +147,10 @@ class RSLRLBraxWrapper(VecEnv):
         # todo -- specific to leap environment
         self.success_queue = deque(maxlen=100)
 
-        print("JITing reset and step")
+        print("JITing step")
         self.reset_fn = self.env.reset 
         self.step_fn = jax.jit(self.env.step)
-        print("Done JITing reset and step")
+        print("Done JITing step")
         self.env_state = None
 
     def step(self, action):

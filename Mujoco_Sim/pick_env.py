@@ -321,18 +321,9 @@ class StereoPickCube(panda.PandaBase):
                     pass
 
             # ---- Create a FULLY-BATCHED MJX Data pytree ----
-            data0 = mjx.make_data(m)
+            data = jax.vmap(lambda _: mjx.make_data(m))(jp.arange(B, dtype=jp.int32))
             _dbg("reset: created data0 = mjx.make_data(m)", level=1)
-            _tree_summary("reset.data0", data0, level=3)
-            _arr_info("reset.data0.qpos", getattr(data0, 'qpos', None), level=2)
 
-            def _batch_leaf(x):
-                # Scalars stay scalar; everything else gets a leading batch axis [B, ...]
-                if not hasattr(x, "ndim") or x.ndim == 0:
-                    return x
-                return jp.broadcast_to(x, (B,) + x.shape)
-
-            data = jax.tree_util.tree_map(_batch_leaf, data0)
             _dbg("reset: batched data pytree via broadcast_to", level=1)
             _tree_summary("reset.data(batched)", data, level=3)
             _check_leading_batch("reset.data(batched)", data, B, level=2)
@@ -390,7 +381,7 @@ class StereoPickCube(panda.PandaBase):
                     pass
             print("data done", flush=True)
 
-# ---- Renderer init once ----
+            # ---- Renderer init once ----
             # ---- Renderer init once ----
             if self._render_token is None:
                 _dbg("reset: _render_token is None -> calling renderer.init(data, m)", level=1)
@@ -420,7 +411,9 @@ class StereoPickCube(panda.PandaBase):
                 _arr_info("reset.data.ctrl(pre_init)", data.ctrl, level=2)
                 _arr_info("reset.data.mocap_pos(pre_init)", data.mocap_pos, level=2)
                 _dbg("reset: calling self.renderer.init NOW", level=1)
-
+                
+                data = jax.tree_util.tree_map(lambda x: x + jp.zeros_like(x) if hasattr(x, "ndim") and x.ndim > 0 else x, data)
+                jax.tree_util.tree_map(jax.block_until_ready, data)
                 self._render_token, _, _ = self.renderer.init(data, m)
 
                 # Block until ready on token (token may be a pytree).
