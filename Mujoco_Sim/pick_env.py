@@ -89,8 +89,8 @@ class StereoPickCube(panda.PandaBase):
     def __init__(
         self,
         render_batch_size: int,
-        render_height: int,
-        render_width: int,
+        render_height: int = 64,
+        render_width: int = 64,
         config=default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
     ):
