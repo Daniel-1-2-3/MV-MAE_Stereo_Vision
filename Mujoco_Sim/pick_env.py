@@ -207,6 +207,18 @@ class StereoPickCube(panda.PandaBase):
         # Renderer + token are initialized lazily on first reset() with real data
         self._render_token = None
         self._init_renderer()  # constructs BatchRenderer (no init/render here)
+        # Create a correctly batched data and init renderer token once.
+        B = self.render_batch_size
+        d0 = mjx.make_data(self._mjx_model)
+        init_data = jax.tree_util.tree_map(
+            lambda x: jp.stack([x] * B, axis=0) if hasattr(x, "ndim") and x.ndim > 0 else x,
+            d0,
+        )
+        init_data = jax.vmap(lambda d: mjx.forward(self._mjx_model, d))(init_data)
+        jax.tree_util.tree_map(jax.block_until_ready, init_data)
+        self._render_token, _, _ = self.renderer.init(init_data, self._mjx_model)
+        jax.tree_util.tree_map(jax.block_until_ready, self._render_token)
+
         self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
 
     def _post_init(self, obj_name="box", keyframe="low_home"):
@@ -322,9 +334,7 @@ class StereoPickCube(panda.PandaBase):
 
             # ---- Create a FULLY-BATCHED MJX Data pytree ----
             data = jax.vmap(lambda _: mjx.make_data(m))(jp.arange(B, dtype=jp.int32))
-            _dbg("reset: created data0 = mjx.make_data(m)", level=1)
-
-            _dbg("reset: batched data pytree via broadcast_to", level=1)
+            _dbg("reset: created batched data via vmap(mjx.make_data)", level=1)
             _tree_summary("reset.data(batched)", data, level=3)
             _check_leading_batch("reset.data(batched)", data, B, level=2)
             _arr_info("reset.data.qpos(batched)", data.qpos, level=1)
@@ -383,7 +393,7 @@ class StereoPickCube(panda.PandaBase):
 
             # ---- Renderer init once ----
             _dbg("reset: performing 1-world renderer warmup", level=1)
-            warm_data = mjx.make_data(m)
+            warm_data = jax.vmap(lambda _: mjx.make_data(m))(jp.arange(self.render_batch_size, dtype=jp.int32))
             try:
                 tok1, _, _ = self.renderer.init(warm_data, m)
                 jax.block_until_ready(tok1)
@@ -392,53 +402,7 @@ class StereoPickCube(panda.PandaBase):
             except Exception as e:
                 _dbg(f"reset: warmup init failed (expected first-time compile): {e}", level=1)
                 
-            if self._render_token is None:
-                _dbg("reset: _render_token is None -> calling renderer.init(data, m)", level=1)
-                _dbg(f"reset: renderer expects num_worlds={self.render_batch_size}; data batch B={B}", level=1)
-
-                # Quick sanity scan of devices on a subset of leaves.
-                try:
-                    leaf_devs = []
-                    for leaf in jax.tree_util.tree_leaves(data)[:50]:
-                        if hasattr(leaf, "device"):
-                            try:
-                                leaf_devs.append(str(leaf.device()))
-                            except Exception:
-                                pass
-                        elif hasattr(leaf, "devices"):
-                            try:
-                                ds = leaf.devices()
-                                if ds:
-                                    leaf_devs.append(str(next(iter(ds))))
-                            except Exception:
-                                pass
-                    _dbg(f"reset: sample leaf devices={leaf_devs[:10]}", level=2)
-                except Exception as e:
-                    _dbg(f"reset: leaf device scan failed: {e}", level=1)
-
-                _arr_info("reset.data.qpos(pre_init)", data.qpos, level=1)
-                _arr_info("reset.data.ctrl(pre_init)", data.ctrl, level=2)
-                _arr_info("reset.data.mocap_pos(pre_init)", data.mocap_pos, level=2)
-                _dbg("reset: calling self.renderer.init NOW", level=1)
-                
-                data = jax.tree_util.tree_map(lambda x: x + jp.zeros_like(x) if hasattr(x, "ndim") and x.ndim > 0 else x, data)
-                jax.tree_util.tree_map(jax.block_until_ready, data)
-                assert data.contact.geom1.shape[-1] <= self._mjx_model.nconmax, (
-                    f"contact buffer {data.contact.geom1.shape[-1]} > model.nconmax {self._mjx_model.nconmax}"
-                )
-                self._render_token, _, _ = self.renderer.init(data, m)
-
-                # Block until ready on token (token may be a pytree).
-                try:
-                    jax.tree_util.tree_map(jax.block_until_ready, self._render_token)
-                except Exception:
-                    try:
-                        jax.block_until_ready(self._render_token)
-                    except Exception:
-                        pass
-
-                _dbg("reset: renderer.init returned token", level=1)
-                _tree_summary("reset.render_token", self._render_token, level=3)
+            assert self._render_token is not None
 
             print("rendered", flush=True)
 

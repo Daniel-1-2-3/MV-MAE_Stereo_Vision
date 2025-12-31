@@ -125,7 +125,7 @@ class RSLRLBraxWrapper(VecEnv):
         self.env = env
         raw = env
         self._raw_env = raw
-        self._render_pixels_fn = jax.jit(raw.render_pixels)
+        self._render_pixels_fn = raw.render_pixels
         self.render_callback = render_callback
 
         # OBS SHAPE: use env_state.obs directly; never call observation_size (it eval_shape()'s reset) ----
