@@ -82,7 +82,7 @@ BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
 # ============================================================
-# 0) HOST-SIDE SNAPSHOT (proves which node/driver you landed on)
+# 0) HOST SNAPSHOT (node, GPU, driver)
 # ============================================================
 echo "================ HOST SNAPSHOT ================"
 date
@@ -97,7 +97,7 @@ nvidia-smi -L || true
 nvidia-smi || true
 echo
 
-echo "---- Host GL / EGL vendor json ----"
+echo "---- Host EGL bits ----"
 echo "VENDOR_JSON=$VENDOR_JSON"
 echo "NV_EGL_DIR=$NV_EGL_DIR"
 echo "GLVND_DIR=$GLVND_DIR"
@@ -105,7 +105,7 @@ echo "================================================"
 echo
 
 # ============================================================
-# 1) QUICK CONTAINER PROBE (GPU + EGL + basic imports)
+# 1) CONTAINER PROBE (GPU, EGL, Python imports, JAX backend)
 # ============================================================
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
@@ -132,41 +132,47 @@ which g++ || true
 g++ --version | head -n 2 || true
 echo
 
-echo "---- Python + key packages ----"
+echo "---- Python + imports (paths only) ----"
 python -V
 python - << "PY"
 import sys, platform
 print("python:", sys.version)
 print("platform:", platform.platform())
 
-def show(mod):
+def imp(name):
     try:
-        m = __import__(mod)
-        print(f"{mod}: OK  version={getattr(m, '__version__', 'unknown')}  file={getattr(m, '__file__', None)}")
+        m = __import__(name)
+        print(f"{name}: OK  file={getattr(m, '__file__', None)}")
         return m
     except Exception as e:
-        print(f"{mod}: FAIL {e!r}")
+        print(f"{name}: FAIL {e!r}")
         return None
 
-torch = show("torch")
-jax   = show("jax")
-jaxlib= show("jaxlib")
-muj   = show("mujoco")
-mm    = show("madrona_mjx")
+torch = imp("torch")
+jax   = imp("jax")
+jaxlib= imp("jaxlib")
+muj   = imp("mujoco")
+mm    = imp("madrona_mjx")
 
-if torch and torch.cuda.is_available():
-    print("torch.cuda:", True, torch.cuda.get_device_name(0))
-else:
-    print("torch.cuda:", False)
+if torch:
+    try:
+        import torch as T
+        print("torch.cuda.is_available():", T.cuda.is_available())
+        if T.cuda.is_available():
+            print("torch GPU:", T.cuda.get_device_name(0))
+            print("torch.version.cuda:", T.version.cuda)
+    except Exception as e:
+        print("torch cuda query FAIL:", e)
 
 if jax:
     try:
-        print("jax.devices():", jax.devices())
-        print("jax.default_backend():", jax.default_backend())
+        import jax as J
+        print("jax.__version__:", J.__version__)
+        print("jax.devices():", J.devices())
+        print("jax.default_backend():", J.default_backend())
     except Exception as e:
         print("jax backend query FAIL:", e)
 
-# Show where XLA extension comes from (helps spot wrong wheel)
 if jaxlib:
     try:
         from jaxlib import xla_extension
@@ -191,11 +197,9 @@ echo "================================================"
 '
 
 # ============================================================
-# 2) DEEP DIVE: SHARED LIB / ABI CHECKS FOR madrona_mjx + JAX
-#    This is the #1 way to catch "scary cuda errors" culprits:
-#    - missing libs (NOT FOUND)
-#    - libstdc++ / GLIBCXX mismatches
-#    - linking against unexpected libcuda/libcudart
+# 2) ABI / LDD CHECKS
+#    - checks jaxlib xla_extension.so
+#    - finds and checks ANY madrona-related .so on disk
 # ============================================================
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
@@ -205,28 +209,8 @@ apptainer exec --nv \
 set -euo pipefail
 
 echo "================ ABI / LDD CHECKS ================"
-MADDIR="$(python - <<'"'"'PY'"'"'
-import os, madrona_mjx
-print(os.path.dirname(madrona_mjx.__file__))
-PY
-)"
-echo "madrona_mjx dir: $MADDIR"
-echo
 
-echo "---- List madrona_mjx *.so ----"
-ls -lah "$MADDIR" || true
-find "$MADDIR" -maxdepth 2 -name "*.so" -print || true
-echo
-
-echo "---- ldd on madrona_mjx shared libs (look for NOT FOUND) ----"
-shopt -s nullglob
-for so in "$MADDIR"/*.so "$MADDIR"/*/*.so; do
-  echo "----- $so -----"
-  ldd "$so" | egrep -i "not found|libcuda|libcudart|libnvrtc|libnvidia|libstdc\+\+|libgcc_s|GLIBC|GLIBCXX|CXXABI" || true
-done
-echo
-
-echo "---- ldd on jaxlib xla_extension ----"
+echo "---- jaxlib xla_extension ----"
 python - <<'"'"'PY'"'"'
 from jaxlib import xla_extension
 print(xla_extension.__file__)
@@ -240,21 +224,61 @@ echo "xla_extension: $XLA_SO"
 ldd "$XLA_SO" | egrep -i "not found|libcuda|libcudart|libnvrtc|libnvidia|libstdc\+\+|libgcc_s|GLIBC|GLIBCXX|CXXABI" || true
 echo
 
-echo "---- CUDA library resolution (where are libs coming from?) ----"
+echo "---- Find madrona-related shared libs ----"
+# 1) under /opt/madrona_mjx (common for your setup)
+find /opt/madrona_mjx -maxdepth 6 -name "*.so" -print 2>/dev/null || true
+echo
+
+# 2) under site-packages (if installed as wheels/egg)
+python - <<'"'"'PY'"'"'
+import site, glob
+paths = site.getsitepackages() + [site.getusersitepackages()]
+cands = []
+for p in paths:
+    cands += glob.glob(p + "/**/*madrona*.so", recursive=True)
+    cands += glob.glob(p + "/**/*mjx*.so", recursive=True)
+print("\n".join(sorted(set(cands))) if cands else "No madrona*.so or *mjx*.so found under site-packages")
+PY
+echo
+
+echo "---- ldd on ALL discovered madrona/mjx .so ----"
+# Collect candidates (keep it simple)
+CANDS=$( (find /opt/madrona_mjx -maxdepth 6 -name "*.so" -print 2>/dev/null || true) ; \
+         (python - <<'"'"'PY'"'"'
+import site, glob
+paths = site.getsitepackages() + [site.getusersitepackages()]
+cands = []
+for p in paths:
+    cands += glob.glob(p + "/**/*madrona*.so", recursive=True)
+    cands += glob.glob(p + "/**/*mjx*.so", recursive=True)
+print("\n".join(sorted(set(cands))))
+PY
+) | awk "NF" | sort -u )
+
+if [ -z "$CANDS" ]; then
+  echo "WARNING: no madrona/mjx .so candidates found to ldd."
+else
+  while IFS= read -r so; do
+    echo "----- $so -----"
+    ldd "$so" | egrep -i "not found|libcuda|libcudart|libnvrtc|libnvidia|libstdc\+\+|libgcc_s|GLIBC|GLIBCXX|CXXABI" || true
+  done <<< "$CANDS"
+fi
+echo
+
+echo "---- CUDA library resolution (ctypes) ----"
 python - <<'"'"'PY'"'"'
 import ctypes.util
 for name in ["cuda", "cudart", "nvrtc"]:
     print(name, "->", ctypes.util.find_library(name))
 PY
+
 echo "=================================================="
 '
 
 # ============================================================
-# 3) MADRONA CACHE SETUP + JAX FLAGS + MINIMAL REPRO
-#    This tries to fail FAST at the exact culprit:
-#    - first env reset
-#    - renderer.init
-#    - one render call
+# 3) MADRONA CACHE + JAX FLAGS + MINIMAL REPRO
+#    - forces sync to surface the real failing op
+#    - verifies renderer actually ran (render_token in info)
 # ============================================================
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
@@ -265,12 +289,9 @@ set -euo pipefail
 
 echo "================ MADRONA / JAX SETUP ================"
 export PYTHONUNBUFFERED=1
-
-# Make JAX print real stack traces
 export JAX_TRACEBACK_FILTERING=off
 
-# Reduce async confusion during debugging:
-# (set to 1 only while diagnosing; it will slow you down)
+# Make GPU failures surface at the correct line (debug only; slows down)
 export CUDA_LAUNCH_BLOCKING=1
 
 # Optional allocator tweaks
@@ -321,53 +342,66 @@ PY
 echo "======================================================"
 echo
 
-# ============================================================
-# 3a) MINIMAL SMOKE TEST: import env + do one reset
-#     If this fails, it isolates to env reset / renderer.init.
-# ============================================================
 echo "================ MINIMAL ENV SMOKE TEST ================"
 python - <<'"'"'PY'"'"'
 import os
 import jax
-import jax.numpy as jnp
 
-# Make failures happen where they occur (not later)
-from jax import config
-config.update("jax_debug_nans", False)
-
-# Import your env
 from Mujoco_Sim.pick_env import StereoPickCube
 
-# IMPORTANT: match your training batch size here (or start with 1 then 128)
 B = int(os.environ.get("SMOKE_B", "128"))
+print("SMOKE_B =", B)
 
+# Only override keys that exist in your schema
 env = StereoPickCube(config_overrides={
-    "vision": True,
-    "vision_config.render_batch_size": B,
-    # keep your resolution the same as training
-    "vision_config.render_width": 64,
-    "vision_config.render_height": 64,
+    "vision_config.gpu_id": 0,
     "vision_config.use_rasterizer": False,
+    "vision_config.enabled_geom_groups": [0, 1, 2],
 })
 
 key = jax.random.PRNGKey(0)
 keys = jax.random.split(key, B)
 
-print("Resetting...")
+print("Calling env.reset(keys)...")
 st = env.reset(keys)
 
-# Force sync immediately so errors point to the real op
-jax.block_until_ready(st.obs)
+# Force sync so any GPU error surfaces at the true op
+jax.block_until_ready(st)
 
-print("Reset OK. obs shape:", getattr(st.obs, "shape", None))
+print("Reset OK.")
+print("obs shape:", getattr(st.obs, "shape", None), "dtype:", getattr(st.obs, "dtype", None))
+print("info keys:", sorted(list(st.info.keys())))
+
+# Make sure renderer actually ran; adjust key if your env uses a different name
+if "render_token" not in st.info:
+    raise RuntimeError("Renderer did not run during reset: no 'render_token' in state.info")
+
+print("render_token type:", type(st.info["render_token"]))
+print("render_token ready sync...")
+jax.block_until_ready(st.info["render_token"])
+print("render_token sync OK")
 PY
 echo "========================================================"
 echo
+'
 
 # ============================================================
-# 4) RUN TRAINING
+# 4) RUN TRAINING (unchanged from your original, but keep it after smoke test)
 # ============================================================
-echo "================ TRAINING RUN ================"
+apptainer exec --nv \
+  "${BIND_FLAGS[@]}" \
+  --pwd "$WORKDIR_IN_CONTAINER" \
+  "$IMG" \
+  bash -lc '
+set -euo pipefail
+export PYTHONUNBUFFERED=1
+
+# Keep helpful traceback + allocator behavior in real run too
+export JAX_TRACEBACK_FILTERING=off
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 
 # Runtime deps prefix (persist on host)
 DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
