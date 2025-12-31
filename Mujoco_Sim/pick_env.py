@@ -140,8 +140,7 @@ class StereoPickCube(panda.PandaBase):
         # Renderer + token are initialized lazily on first reset() with real data
         self._render_token = None
         self._init_renderer()  # constructs BatchRenderer (no init/render here)
-        self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
-
+        
     def _post_init(self, obj_name="box", keyframe="low_home"):
         super()._post_init(obj_name, keyframe)
 
@@ -153,9 +152,57 @@ class StereoPickCube(panda.PandaBase):
         self._guide_ctrl = self._mj_model.keyframe("picked").ctrl
         self._start_tip_transform = panda_kinematics.compute_franka_fk(self._init_ctrl[:7])
 
+    def _validate_render_model(self, m_render: mjx.Model, num_worlds: int) -> None:
+        """Fail fast if the renderer model isn't batched as [num_worlds, ...]."""
+        bad = []
+
+        def _check(x):
+            nonlocal bad
+            if len(bad) >= 5:
+                return
+            if isinstance(x, (jax.Array, np.ndarray)) and getattr(x, "ndim", 0) > 0:
+                if x.shape[0] != num_worlds:
+                    bad.append((tuple(x.shape), str(getattr(x, "dtype", ""))))
+
+        jax.tree_util.tree_map(_check, m_render)
+        if bad:
+            raise ValueError(
+                "Madrona render model is not batched for num_worlds="
+                f"{num_worlds}. Example leaf shapes/dtypes: {bad}"
+            )
+
+    def _make_render_model(self, m: mjx.Model) -> mjx.Model:
+        """Tiles the MJX model so every array leaf is [num_worlds, ...] for Madrona."""
+        num_worlds = self.render_batch_size
+
+        # Put everything on the same GPU Madrona is targeting.
+        dev = None
+        try:
+            gpu_id = int(self._config.vision_config.gpu_id)
+            dev = jax.devices("gpu")[gpu_id]
+        except Exception:
+            dev = None
+
+        with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
+            def _tile_leaf(x):
+                if isinstance(x, (jax.Array, np.ndarray)) and getattr(x, "ndim", 0) > 0:
+                    if x.shape[0] == num_worlds:
+                        return x
+                    xj = jp.asarray(x)
+                    return jp.repeat(xj[None, ...], num_worlds, axis=0)
+                return x
+
+            m_render = jax.tree_util.tree_map(_tile_leaf, m)
+
+        self._validate_render_model(m_render, num_worlds)
+        return m_render
+
     def _init_renderer(self):
+        # Madrona requires a *batched* MJX model: every array leaf must be [num_worlds, ...].
+        self._render_mjx_model = self._make_render_model(self._mjx_model)
+
         self.renderer = BatchRenderer(
-            m=self._mjx_model,
+            m=self._render_mjx_model,
             gpu_id=self._config.vision_config.gpu_id,
             num_worlds=self.render_batch_size,
             batch_render_view_width=self.render_width,
@@ -167,6 +214,10 @@ class StereoPickCube(panda.PandaBase):
             add_cam_debug_geo=False,
             use_rasterizer=self._config.vision_config.use_rasterizer,
             viz_gpu_hdls=None,
+        )
+
+        self._render_jit = lambda token, data: self.renderer.render(
+            token, data, self._render_mjx_model
         )
 
     def modify_model(self, mj_model: mujoco.MjModel):
@@ -208,7 +259,8 @@ class StereoPickCube(panda.PandaBase):
             if os.environ.get("PICK_ENV_DEBUG", "0") == "1":
                 print(f"[pick_env] running from: {__file__}")
 
-            m = self._mjx_model
+            m_phys = self._mjx_model
+            m_render = self._render_mjx_model
             B = rng.shape[0]
 
             keys = jax.vmap(lambda k: jax.random.split(k, 3))(rng)
@@ -228,8 +280,8 @@ class StereoPickCube(panda.PandaBase):
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)  # (B, 3)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)  # (B, 3)
 
-            nq = m.nq
-            nv = m.nv
+            nq = m_phys.nq
+            nv = m_phys.nv
 
             init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]  # (nq,)
             qpos = jp.broadcast_to(init_q0, (B, nq))  # (B, nq)
@@ -243,7 +295,7 @@ class StereoPickCube(panda.PandaBase):
 
             # Build per-world Data, forward per-world, then stack. (Madrona-safe)
             def _make_one(qpos_i, ctrl_i, tgt_pos_i, tgt_quat_i):
-                d = mjx.make_data(m)
+                d = mjx.make_data(m_phys)
                 d = d.replace(
                     qpos=qpos_i,
                     qvel=jp.zeros((nv,), dtype=jp.float32),
@@ -253,14 +305,14 @@ class StereoPickCube(panda.PandaBase):
                     mocap_pos=d.mocap_pos.at[self._mocap_target, :].set(tgt_pos_i),
                     mocap_quat=d.mocap_quat.at[self._mocap_target, :].set(tgt_quat_i),
                 )
-                return mjx.forward(m, d)
+                return mjx.forward(m_phys, d)
 
             data = jax.vmap(_make_one)(qpos, ctrl, target_pos, target_quat)
             print("data done")
 
             # ---- Renderer init once ----
             if self._render_token is None:
-                token, _, _ = self.renderer.init(data, m)
+                token, _, _ = self.renderer.init(data, m_render)
                 jax.tree_util.tree_map(jax.block_until_ready, token)
                 self._render_token = token
             print("rendered")
