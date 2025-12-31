@@ -61,7 +61,7 @@ def default_vision_config() -> config_dict.ConfigDict:
 
     return config_dict.create(
         gpu_id=gpu_id,
-        use_rasterizer=use_rasterizer,
+        use_rasterizer="false",
         enabled_geom_groups=[0, 1, 2],
     )
 
