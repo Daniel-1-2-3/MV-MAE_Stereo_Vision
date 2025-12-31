@@ -141,7 +141,7 @@ def default_config() -> config_dict.ConfigDict:
         vision_config=default_vision_config(),
         obs_noise=config_dict.create(brightness=[1.0, 1.0]),
         impl="jax",
-        nconmax=24 * 2048,
+        nconmax=24 * 512,
         njmax=128,
     )
     return config
