@@ -131,6 +131,7 @@ class StereoPickCube(panda.PandaBase):
     
     def _post_init(self, obj_name="box", keyframe="low_home"):
         super()._post_init(obj_name, keyframe)
+        self._init_q = jp.asarray(self._mj_model.keyframe(keyframe).qpos, dtype=jp.float32)
         self._guide_q = self._mj_model.keyframe("picked").qpos
         self._guide_ctrl = self._mj_model.keyframe("picked").ctrl
         self._start_tip_transform = panda_kinematics.compute_franka_fk(self._init_ctrl[:7])

@@ -197,7 +197,11 @@ class RSLRLBraxWrapper(VecEnv):
         return obs, reward, done, info_ret
 
     def reset(self):
-        # todo add random init like in collab examples?
+        # Make a fresh batch of per-env keys every reset.
+        # (Otherwise every episode starts identically.)
+        self.key, key_reset = jax.random.split(self.key)
+        self.key_reset = jax.random.split(key_reset, self.batch_size)
+
         self.env_state = self.reset_fn(self.key_reset)
 
         if self.asymmetric_obs:
