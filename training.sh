@@ -26,15 +26,16 @@ fi
 HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
 
+# execute.py must exist at the project root
 if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
   echo "FATAL: execute.py not found at:"
   echo "  $HOST_PROJECT_ROOT/execute.py"
   exit 10
 fi
 
-# Silence Apptainer PYTHONPATH forwarding warnings; we set it explicitly
-unset PYTHONPATH || true
-export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation"
+# ---------------- Python path inside container ----------------
+# Prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
+export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # ---------------- EGL / MuJoCo GL setup ----------------
 export APPTAINERENV_MUJOCO_GL=egl
@@ -69,6 +70,7 @@ GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
 # ---------------- Binds ----------------
+# ---- mujoco_playground external_deps fix (site-packages is read-only) ----
 HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
 mkdir -p "$HOST_MJP_DEPS"
 MJP_DEPS_IN_CONTAINER="/opt/mvmae_venv/lib/python3.12/site-packages/mujoco_playground/external_deps"
@@ -78,65 +80,34 @@ BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
+
+# Critical bind: mount the entire project to /workspace
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
-# ============================================================
-# HOST SNAPSHOT
-# ============================================================
-echo "================ HOST SNAPSHOT ================"
-date
-hostname
-echo "SLURM_JOB_ID=$SLURM_JOB_ID"
-echo "SLURM_NODELIST=$SLURM_NODELIST"
-echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
-echo
-echo "---- nvidia-smi (host) ----"
-nvidia-smi -L || true
-nvidia-smi || true
-echo
-echo "---- Host EGL bits ----"
-echo "VENDOR_JSON=$VENDOR_JSON"
-echo "NV_EGL_DIR=$NV_EGL_DIR"
-echo "GLVND_DIR=$GLVND_DIR"
-echo "================================================"
-echo
-
-# ============================================================
-# SINGLE apptainer exec for EVERYTHING (prevents teardown hangs)
-# ============================================================
-echo "[HOST] launching single apptainer exec..."
+# ---------------- Quick EGL + GPU probe ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
   bash -lc '
-set -euo pipefail
-export PYTHONUNBUFFERED=1
-
-echo "================ CONTAINER START ================"
-date
-hostname
-echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
-echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
-echo
-
-echo "---- nvidia-smi (container) ----"
-nvidia-smi -L || true
-nvidia-smi || true
-echo
-
-# IMPORTANT: no MuJoCo GLContext probe here (it can hang on teardown)
-echo "---- Basic GPU + imports (no EGL context) ----"
 python - << "PY"
-import torch, jax
-print("torch.cuda.is_available():", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("torch device:", torch.cuda.get_device_name(0), "torch.version.cuda:", torch.version.cuda)
-print("jax.default_backend():", jax.default_backend())
-print("jax.devices():", jax.devices())
+import torch, mujoco, OpenGL.GL as gl
+print("torch cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+ctx = mujoco.GLContext(64, 64); ctx.make_current()
+to_s = lambda b: b.decode("utf-8","ignore") if b else None
+print("OpenGL vendor  :", to_s(gl.glGetString(gl.GL_VENDOR)))
+print("OpenGL renderer:", to_s(gl.glGetString(gl.GL_RENDERER)))
+ctx.free()
 PY
-echo "================================================"
-echo
+'
+
+# ---------------- Training with Madrona cache integration ----------------
+apptainer exec --nv \
+  "${BIND_FLAGS[@]}" \
+  --pwd "$WORKDIR_IN_CONTAINER" \
+  "$IMG" \
+  bash -lc '
+set -e
 
 echo "=== MuJoCo version ==="
 python - <<'"'"'PY'"'"'
@@ -144,88 +115,79 @@ import mujoco
 print("MuJoCo version:", mujoco.__version__)
 PY
 echo "======================"
-echo
 
-# ---------------- JAX / XLA tuning ----------------
+export PYTHONUNBUFFERED=1
+
+# JAX / XLA tuning (optional)
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_force_compilation_parallelism=1"
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 
-# Reduce toolchain parallelism (avoid toolchain deadlocks)
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
+echo "=== Madrona + GPU detection (inside container) ==="
+if command -v nvidia-smi >/dev/null 2>&1; then
+  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
+  echo "Actual GPU: $ACTUAL_GPU"
+  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1)
+  if [ -z "$GPU_MODEL" ]; then
+    GPU_MODEL="unknown"
+  fi
+else
+  echo "WARNING: nvidia-smi not found in container; using generic GPU tag"
+  GPU_MODEL="unknown"
+fi
+GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
 
-# ---------------- Determine GPU tag ----------------
-ACTUAL_GPU="$(nvidia-smi -L 2>/dev/null | head -1 || true)"
-GPU_MODEL="$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)"
-GPU_MODEL="${GPU_MODEL:-unknown}"
-GPU_MODEL_LOWER="$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")"
 ENV_CONFIG="default"
 
-# ---------------- Persistent cache root on /scratch ----------------
+# Cache build dir lives in your submit directory, shared host<->container
 CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
 mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
 
 export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
 export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
 
-# ---------------- Force ALL caches/temp to same writable area ----------------
-export TMPDIR="$CACHE_BUILD_DIR/tmp"
-export TEMP="$TMPDIR"
-export TMP="$TMPDIR"
-export XDG_CACHE_HOME="$CACHE_BUILD_DIR/xdg_cache"
-export CUDA_CACHE_PATH="$CACHE_BUILD_DIR/cuda_cache"
-export CUDA_CACHE_MAXSIZE=$((2*1024*1024*1024))
-export HOME="$CACHE_BUILD_DIR/home"
-mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$CUDA_CACHE_PATH" "$HOME"
-
-# Flip to 1 only if you suspect driver JIT cache locking causes the hang
-export CUDA_CACHE_DISABLE=${CUDA_CACHE_DISABLE:-0}
-
-echo "=== CACHE CONFIG ==="
-echo "CACHE_BUILD_DIR=$CACHE_BUILD_DIR"
-echo "MADRONA_MWGPU_KERNEL_CACHE=$MADRONA_MWGPU_KERNEL_CACHE"
-echo "MADRONA_BVH_KERNEL_CACHE=$MADRONA_BVH_KERNEL_CACHE"
-echo "TMPDIR=$TMPDIR"
-echo "XDG_CACHE_HOME=$XDG_CACHE_HOME"
-echo "CUDA_CACHE_PATH=$CUDA_CACHE_PATH"
-echo "CUDA_CACHE_DISABLE=$CUDA_CACHE_DISABLE"
-echo "HOME=$HOME"
+echo "Madrona cache configuration:"
+echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
+echo "  ENV_CONFIG      = $ENV_CONFIG"
+echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
+echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
+if [ -f "$MADRONA_MWGPU_KERNEL_CACHE" ] && [ -f "$MADRONA_BVH_KERNEL_CACHE" ]; then
+  echo "  Cache files found (no recompile expected)."
+else
+  echo "  No cache files yet; first run will compile and populate them."
+fi
 echo
 
-echo "---- Versions ----"
-python - <<'"'"'PY'"'"'
-import jax, jaxlib, mujoco, madrona_mjx, torch
-print("torch.cuda.is_available()", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("torch device", torch.cuda.get_device_name(0), "torch.version.cuda", torch.version.cuda)
-print("jax", jax.__version__)
-print("jaxlib", jaxlib.__version__)
-print("mujoco", mujoco.__version__)
-print("madrona_mjx", madrona_mjx.__file__)
-print("jax.devices()", jax.devices())
-print("jax.default_backend()", jax.default_backend())
-PY
-echo
+echo "========================================="
+echo "Starting MV-MAE training with MJX + Madrona"
+echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
+echo "========================================="
 
-# ---------------- Runtime deps prefix (tensorboard) ----------------
+# ---------------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------------
 DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
+
 PY_MM=$(python - <<'"'"'PY'"'"'
 import sys
 print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
 )
+
 SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
 BIN_DIR="${DEPS_PREFIX}/bin"
+
 mkdir -p "$DEPS_PREFIX"
+
+# Make prefix visible for imports + CLI entrypoints (keep /workspace first)
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 
+# ---------------- Install TensorBoard (persistently) ----------------
 echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
-if python - <<'"'"'PY'"'"'
+
+if python - <<'PY'
 import importlib.util
 ok = importlib.util.find_spec("tensorboard") is not None
 print("tensorboard already importable:", ok)
@@ -237,96 +199,17 @@ else
   echo "Installing tensorboard into persistent prefix..."
   python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
 fi
-echo
 
-echo "========================================="
-echo "Starting MV-MAE training with MJX + Madrona"
-echo "========================================="
-echo
-
-# ---------------- LOCKED Madrona mini init + timeout ----------------
-echo "=========== MADRONA MINI INIT (LOCKED) ==========="
-LOCKFILE="$CACHE_BUILD_DIR/madrona_compile.lock"
-COMPILE_TIMEOUT_SEC="${MADRONA_COMPILE_TIMEOUT_SEC:-1800}"  # 30 min
-
-need_compile=0
-if [[ ! -f "$MADRONA_MWGPU_KERNEL_CACHE" || ! -f "$MADRONA_BVH_KERNEL_CACHE" ]]; then
-  need_compile=1
-fi
-echo "need_compile=$need_compile  lockfile=$LOCKFILE  timeout=${COMPILE_TIMEOUT_SEC}s"
-echo
-
-if [[ "$need_compile" -eq 1 ]]; then
-  echo "Caches missing -> acquire lock and compile once..."
-  flock -x "$LOCKFILE" bash -lc "
-    set -euo pipefail
-    echo '[LOCK ACQUIRED] compiling via mini init...'
-    timeout ${COMPILE_TIMEOUT_SEC}s stdbuf -oL -eL python -u - <<'PY'
-import faulthandler, signal, threading, time
-faulthandler.enable()
-faulthandler.register(signal.SIGUSR1)
-
-def heartbeat():
-    t0 = time.time()
-    while True:
-        dt = int(time.time() - t0)
-        print(f'[heartbeat] still alive... t={dt}s', flush=True)
-        time.sleep(10)
-
-threading.Thread(target=heartbeat, daemon=True).start()
-
-import jax, jax.numpy as jnp
-import mujoco
-from mujoco import mjx
-from madrona_mjx.renderer import BatchRenderer
-
-xml = \"\"\"
-<mujoco>
-  <worldbody>
-    <geom type='plane' size='5 5 0.1' rgba='0.2 0.2 0.2 1'/>
-  </worldbody>
-</mujoco>
-\"\"\"
-
-m = mujoco.MjModel.from_xml_string(xml)
-mx = mjx.put_model(m, impl='jax')
-d = mjx.make_data(mx)
-
-print('Creating BatchRenderer (raytracer)...', flush=True)
-r = BatchRenderer(
-    m=mx,
-    gpu_id=0,
-    num_worlds=1,
-    batch_render_view_width=64,
-    batch_render_view_height=64,
-    enabled_geom_groups=jnp.array([0], dtype=jnp.int32),
-    enabled_cameras=None,
-    add_cam_debug_geo=False,
-    use_rasterizer=False,
-    viz_gpu_hdls=None,
-)
-
-print('Calling renderer.init...', flush=True)
-tok, rgb, depth = r.init(d, mx)
-jax.block_until_ready(rgb)
-print('Init OK, rgb shape:', rgb.shape, 'dtype:', rgb.dtype, flush=True)
+python - <<'PY'
+import tensorboard
+print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
-    echo '[LOCK HELD] mini init completed.'
-  "
-else
-  echo "Caches present -> skipping mini init."
-fi
-
-echo "Cache dir listing:"
-ls -lah "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache" || true
-echo "=========== MADRONA MINI INIT DONE ==========="
-echo
+echo "============================================"
 
 # ---------------- Run training ----------------
-echo "================ TRAINING RUN ================"
 stdbuf -oL -eL python -u execute.py 2>&1
+
 echo "Training completed."
-echo "================ DONE ================"
 '
-echo "[HOST] apptainer exec returned."
+
 echo "Finished at $(date)"
