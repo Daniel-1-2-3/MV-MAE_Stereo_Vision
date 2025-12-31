@@ -178,29 +178,25 @@ class StereoPickCube(panda.PandaBase):
         if rng.ndim == 1:
             rng = rng[None, :]  # -> (1, 2)
 
-        rng, rng_box, rng_target = jax.random.split(rng, 3)
         B = rng.shape[0]
-        shape = (B, 3)
-        box_pos = (
-            jax.random.uniform(
-                rng_box,
-                shape,
-                minval=jp.array([-0.2, -0.2, 0.0]),
-                maxval=jp.array([0.2, 0.2, 0.0]),
-            )
-            + self._init_obj_pos
-        )
 
-        # Initialize target position
-        target_pos = (
-            jax.random.uniform(
-                rng_target,
-                shape,
-                minval=jp.array([-0.2, -0.2, 0.2]),
-                maxval=jp.array([0.2, 0.2, 0.4]),
-            )
-            + self._init_obj_pos
-        )
+        # Split per-env (must vmap because split/uniform expect single keys)
+        keys = jax.vmap(lambda k: jax.random.split(k, 3))(rng)  # (B, 3, 2)
+        rng_main = keys[:, 0, :]
+        rng_box = keys[:, 1, :]
+        rng_target = keys[:, 2, :]
+
+        min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
+        max_box = jp.array([ 0.2,  0.2, 0.0], dtype=jp.float32)
+        min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
+        max_tgt = jp.array([ 0.2,  0.2, 0.4], dtype=jp.float32)
+        base = jp.asarray(self._init_obj_pos, dtype=jp.float32)  # (3,)
+
+        def _sample_pos(key, mn, mx):
+            return jax.random.uniform(key, (3,), minval=mn, maxval=mx) + base
+
+        box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)      # (B, 3)
+        target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt) # (B, 3)
    
         # Initialize data
         init_q0 = jp.array(self._init_q, dtype=jp.float32)
@@ -251,7 +247,7 @@ class StereoPickCube(panda.PandaBase):
             **{k: 0.0 for k in self._config.reward_config.scales.keys()}
         }
         info = {
-            "rng": rng, 
+            "rng": rng_main, 
             "target_pos": target_pos, 
             "reached_box": jp.asarray(0.0, jp.float32), 
         }
