@@ -198,27 +198,35 @@ class StereoPickCube(panda.PandaBase):
         return m_render
 
     def _init_renderer(self):
-        # Madrona requires a *batched* MJX model: every array leaf must be [num_worlds, ...].
-        self._render_mjx_model = self._make_render_model(self._mjx_model)
+        # Madrona pybind is strict about scalar types + numpy dtypes for static buffers.
+        gpu_id = int(self._config.vision_config.gpu_id)
+        use_rasterizer = bool(self._config.vision_config.use_rasterizer)
+
+        enabled_geom_groups = np.asarray(
+            self._config.vision_config.enabled_geom_groups, dtype=np.int32
+        )
+        # Many pybind signatures require non-writable buffers.
+        enabled_geom_groups.setflags(write=False)
 
         self.renderer = BatchRenderer(
-            m=self._render_mjx_model,
-            gpu_id=self._config.vision_config.gpu_id,
-            num_worlds=self.render_batch_size,
-            batch_render_view_width=self.render_width,
-            batch_render_view_height=self.render_height,
-            enabled_geom_groups=np.asarray(
-                self._config.vision_config.enabled_geom_groups, dtype=np.int32
-            ),
+            # IMPORTANT: keep the model unbatched (renderer expects unbatched mesh buffers).
+            m=self._mjx_model,
+            gpu_id=gpu_id,
+            num_worlds=int(self.render_batch_size),
+            batch_render_view_width=int(self.render_width),
+            batch_render_view_height=int(self.render_height),
+            enabled_geom_groups=enabled_geom_groups,
             enabled_cameras=None,
             add_cam_debug_geo=False,
-            use_rasterizer=self._config.vision_config.use_rasterizer,
+            use_rasterizer=use_rasterizer,
             viz_gpu_hdls=None,
         )
 
-        self._render_jit = lambda token, data: self.renderer.render(
-            token, data, self._render_mjx_model
-        )
+        # Called from inside jitted reset/step; keep as a pure function wrapper.
+        def _render(token, data):
+            return self.renderer.render(token, data, self._mjx_model)
+
+        self._render_jit = _render
 
     def modify_model(self, mj_model: mujoco.MjModel):
         # Expand floor size to non-zero so Madrona can render it
@@ -259,8 +267,7 @@ class StereoPickCube(panda.PandaBase):
             if os.environ.get("PICK_ENV_DEBUG", "0") == "1":
                 print(f"[pick_env] running from: {__file__}")
 
-            m_phys = self._mjx_model
-            m_render = self._render_mjx_model
+            m = self._mjx_model
             B = rng.shape[0]
 
             keys = jax.vmap(lambda k: jax.random.split(k, 3))(rng)
@@ -280,8 +287,8 @@ class StereoPickCube(panda.PandaBase):
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)  # (B, 3)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)  # (B, 3)
 
-            nq = m_phys.nq
-            nv = m_phys.nv
+            nq = m.nq
+            nv = m.nv
 
             init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]  # (nq,)
             qpos = jp.broadcast_to(init_q0, (B, nq))  # (B, nq)
@@ -293,26 +300,36 @@ class StereoPickCube(panda.PandaBase):
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
             target_quat = jp.broadcast_to(target_quat0, (B, 4))
 
-            # Build per-world Data, forward per-world, then stack. (Madrona-safe)
-            def _make_one(qpos_i, ctrl_i, tgt_pos_i, tgt_quat_i):
-                d = mjx.make_data(m_phys)
-                d = d.replace(
-                    qpos=qpos_i,
-                    qvel=jp.zeros((nv,), dtype=jp.float32),
-                    ctrl=ctrl_i,
-                )
-                d = d.replace(
-                    mocap_pos=d.mocap_pos.at[self._mocap_target, :].set(tgt_pos_i),
-                    mocap_quat=d.mocap_quat.at[self._mocap_target, :].set(tgt_quat_i),
-                )
-                return mjx.forward(m_phys, d)
+            # Build ONE Data, broadcast to [B, ...], then run one batched forward.
+            # This avoids vmapping mjx.make_data(m), which can produce renderer-hostile buffers.
+            d0 = mjx.make_data(m)
 
-            data = jax.vmap(_make_one)(qpos, ctrl, target_pos, target_quat)
+            def _bcast(x):
+                # Broadcast arrays to [B, ...] while leaving scalars alone.
+                # (Most mjx.Data leaves are arrays.)
+                if hasattr(x, "ndim") and x.ndim >= 1:
+                    return jp.broadcast_to(x, (B,) + x.shape)
+                return x
+
+            data = jax.tree_util.tree_map(_bcast, d0)
+
+            data = data.replace(
+                qpos=qpos,
+                qvel=jp.zeros((B, nv), dtype=jp.float32),
+                ctrl=ctrl,
+            )
+
+            data = data.replace(
+                mocap_pos=data.mocap_pos.at[:, self._mocap_target, :].set(target_pos),
+                mocap_quat=data.mocap_quat.at[:, self._mocap_target, :].set(target_quat),
+            )
+
+            data = mjx.forward(m, data)
             print("data done")
 
             # ---- Renderer init once ----
             if self._render_token is None:
-                token, _, _ = self.renderer.init(data, m_render)
+                token, _, _ = self.renderer.init(data, self._mjx_model)
                 jax.tree_util.tree_map(jax.block_until_ready, token)
                 self._render_token = token
             print("rendered")
