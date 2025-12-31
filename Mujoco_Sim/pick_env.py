@@ -233,38 +233,42 @@ class StereoPickCube(panda.PandaBase):
 
             ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
             ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
-
+            
             # ---- Create a batched MJX Data (like the cartesian env would) ----
-            # Prefer mjx_env.make_data if present (lets you set nconmax/njmax).
             data = None
+            data0 = None
+
+            def _batch_leaf(x):
+                if not hasattr(x, "ndim"):
+                    return x
+                if x.ndim == 0:
+                    return jp.broadcast_to(x, (B,))
+                return jp.broadcast_to(x, (B,) + x.shape)
+
             if hasattr(mjx_env, "make_data"):
                 try:
-                    data = mjx_env.make_data(
+                    # IMPORTANT: make_data returns a *single-world-like* tree sometimes.
+                    # Treat it as a template and broadcast it.
+                    data0 = mjx_env.make_data(
                         self._mj_model,
-                        qpos=qpos,
-                        qvel=qvel,
-                        ctrl=ctrl,
+                        qpos=jp.asarray(self._init_q, dtype=jp.float32)[..., :int(m.nq)],
+                        qvel=jp.zeros((int(m.nv),), dtype=jp.float32),
+                        ctrl=jp.asarray(self._init_ctrl, dtype=jp.float32),
                         impl=m.impl.value if hasattr(m, "impl") else self._config.impl,
                         nconmax=self._config.nconmax,
                         njmax=self._config.njmax,
                     )
                 except TypeError:
-                    data = None
+                    data0 = None
 
-            if data is None:
-                # Fallback: broadcast a single-world template to [B, ...]
+            if data0 is None:
                 data0 = mjx.make_data(m)
 
-                def _batch_leaf(x):
-                    if not hasattr(x, "ndim"):
-                        return x
-                    if x.ndim == 0:
-                        # Scalars become per-world vectors so vmap / step are well-defined.
-                        return jp.broadcast_to(x, (B,))
-                    return jp.broadcast_to(x, (B,) + x.shape)
+            # Now broadcast every leaf to [B, ...]
+            data = jax.tree_util.tree_map(_batch_leaf, data0)
 
-                data = jax.tree_util.tree_map(_batch_leaf, data0)
-                data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
+            # Finally overwrite the batched state
+            data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
             
             # Set target mocap (batched).
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
@@ -281,7 +285,7 @@ class StereoPickCube(panda.PandaBase):
             mpos = mpos.at[:, 0, :].set(target_pos)
             mquat = mquat.at[:, 0, :].set(target_quat)
             data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
-
+        
             # Forward so x* fields exist for rendering/rewards on the first step.
             try:
                 data = mjx.forward(m, data)
