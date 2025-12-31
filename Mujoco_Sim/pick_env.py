@@ -209,15 +209,31 @@ class StereoPickCube(panda.PandaBase):
         self._init_renderer()  # constructs BatchRenderer (no init/render here)
         # Create a correctly batched data and init renderer token once.
         B = self.render_batch_size
+
         d0 = mjx.make_data(self._mjx_model)
-        init_data = jax.tree_util.tree_map(
-            lambda x: jp.stack([x] * B, axis=0) if hasattr(x, "ndim") and x.ndim > 0 else x,
-            d0,
+
+        def _batch_leaf(x):
+            # keep Python scalars / shape=() arrays unbatched
+            if not hasattr(x, "ndim"):
+                return x
+            if x.ndim == 0:
+                return x
+            return jp.stack([x] * B, axis=0)
+
+        init_data = jax.tree_util.tree_map(_batch_leaf, d0)
+
+        # Only vmap along axis 0 for leaves that actually have a leading batch dim.
+        in_axes = jax.tree_util.tree_map(
+            lambda x: 0 if (hasattr(x, "ndim") and x.ndim > 0) else None,
+            init_data,
         )
-        init_data = jax.vmap(lambda d: mjx.forward(self._mjx_model, d))(init_data)
+
+        init_data = jax.vmap(lambda d: mjx.forward(self._mjx_model, d), in_axes=in_axes, out_axes=0)(init_data)
+
         jax.tree_util.tree_map(jax.block_until_ready, init_data)
         self._render_token, _, _ = self.renderer.init(init_data, self._mjx_model)
         jax.tree_util.tree_map(jax.block_until_ready, self._render_token)
+
 
         self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
 
