@@ -34,7 +34,11 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_kinematics
 
 # Madrona MJX renderer
-from madrona_mjx.renderer import BatchRenderer  # pytype: disable=import-error
+from madrona_mjx.renderer import BatchRenderer  # type: ignore
+import jaxlib
+import madrona_mjx # type: ignore
+import pathlib
+import os
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
@@ -305,9 +309,44 @@ class StereoPickCube(panda.PandaBase):
             # ---- Renderer init once (token cached across resets) ----
             if self._render_token is None:
                 if debug:
-                    print("[pick_env] renderer.init(...)")
+                    backend = jax.lib.xla_bridge.get_backend()
+
+                    print("[diag] jax/jaxlib:", jax.__version__, jaxlib.__version__)
+                    print("[diag] backend:", backend.platform, "|", backend.platform_version)
+                    print("[diag] jaxlib file:", jaxlib.__file__, "mtime:", os.path.getmtime(jaxlib.__file__))
+
+                    # Find the actual compiled .so for madrona_mjx (not just __init__.py)
+                    pkg_dir = pathlib.Path(madrona_mjx.__file__).resolve().parent
+                    so_files = sorted(pkg_dir.rglob("*.so"))
+                    print("[diag] madrona package:", madrona_mjx.__file__, "mtime:", os.path.getmtime(madrona_mjx.__file__))
+                    print("[diag] madrona .so files:", [str(p) for p in so_files[:3]])
+                    if so_files:
+                        so0 = so_files[0]
+                        print("[diag] madrona .so mtime:", str(so0), os.path.getmtime(so0))
+
+                    # Also log the dtype you pass into the renderer config (int64 here is a common footgun)
+                    eg = np.asarray(self._config.vision_config.enabled_geom_groups)
+                    print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype)
+
+                    print("[diag] calling renderer.init ...")
+
+                # Call init + do a tiny smoke render to force the custom call to actually execute here
                 self._render_token, _, _ = self.renderer.init(data, m)
                 jax.block_until_ready(self._render_token)
+
+                if debug:
+                    print("[diag] render_token:", type(self._render_token),
+                        "dtype:", getattr(self._render_token, "dtype", None),
+                        "shape:", getattr(self._render_token, "shape", None))
+
+                    # Smoke render: if ABI/config is broken, the failure should happen on THIS line
+                    try:
+                        _, rgb, _ = self.renderer.render(self._render_token, data, self._mjx_model)
+                        jax.block_until_ready(rgb)
+                        print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
+                    except Exception as e:
+                        print("[diag] smoke render FAILED:", type(e).__name__, e)
+                        raise
                 if debug:
                     print(f"[pick_env] render_token dtype={self._render_token.dtype} shape={self._render_token.shape}")
             print('rendered')
