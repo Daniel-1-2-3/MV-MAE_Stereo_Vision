@@ -167,9 +167,7 @@ class RSLRLBraxWrapper(VecEnv):
     action = torch.clip(action, -1.0, 1.0)  # pytype: disable=attribute-error
     action = _torch_to_jax(action)
     self.env_state = self.step_fn(self.env_state, action)
-    pixels = self._render_pixels_fn(self.env_state.data)  # [B, H, 2W, 3] uint8
-    self.env_state = self.env_state.replace(obs=pixels)
-    
+
     critic_obs = None
     if self.asymmetric_obs:
       obs = _jax_to_torch(self.env_state.obs["state"])
@@ -211,8 +209,6 @@ class RSLRLBraxWrapper(VecEnv):
   def reset(self):
     # todo add random init like in collab examples?
     self.env_state = self.reset_fn(self.key_reset)
-    pixels = self._render_pixels_fn(self.env_state.data)
-    self.env_state = self.env_state.replace(obs=pixels)
 
     if self.asymmetric_obs:
       obs = _jax_to_torch(self.env_state.obs["state"])

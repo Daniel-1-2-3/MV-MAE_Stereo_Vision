@@ -147,34 +147,31 @@ class StereoPickCube(panda.PandaBase):
             viz_gpu_hdls=None,
         )
 
-        # Make a dummy mjx.Data and batch it to shape [B, ...] so renderer.init matches num_worlds
-        data0 = mjx_env.make_data(
+                # Make a dummy mjx.Data batched to shape [B, ...] so renderer.init matches num_worlds.
+        # IMPORTANT: do NOT broadcast every leaf of mjx.Data (unsafe for renderer custom-call).
+        B = int(self.render_batch_size)
+
+        init_q0 = jp.asarray(self._init_q, dtype=jp.float32) # [nq]
+        qpos0 = jp.broadcast_to(init_q0[None, :], (B, init_q0.shape[0])) # [B, nq]
+        qvel0 = jp.zeros((B, self._mjx_model.nv), dtype=jp.float32) # [B, nv]
+
+        init_ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32) # [nu]
+        ctrl0 = jp.broadcast_to(init_ctrl0[None, :], (B, init_ctrl0.shape[0])) # [B, nu]
+
+        data0_batched = mjx_env.make_data(
             self._mj_model,
-            qpos=jp.array(self._init_q),
-            qvel=jp.zeros(self._mjx_model.nv, dtype=jp.float32),
-            ctrl=self._init_ctrl,
+            qpos=qpos0,
+            qvel=qvel0,
+            ctrl=ctrl0,
             impl=self._mjx_model.impl.value,
             nconmax=self._config.nconmax,
             njmax=self._config.njmax,
         )
-        
-        def _batch(x):
-            # Batch every JAX array leaf so Madrona sees consistent [B, ...] everywhere.
-            if isinstance(x, jax.Array):
-                if x.ndim == 0:
-                    return jp.broadcast_to(x, (self.render_batch_size,))
-                return jp.broadcast_to(x, (self.render_batch_size,) + x.shape)
-            return x
-
-        data0_batched = jax.tree_util.tree_map(_batch, data0)
-
-        # Init
         token, _, _ = self.renderer.init(data0_batched, self._mjx_model)
-
         # Force the raytracer custom-call to actually run now (many failures happen on first render, not init)
         token, rgb, depth = self.renderer.render(token, data0_batched, self._mjx_model)
 
-        # Block on real device outputs produced by the custom call (token often isn’t enough)
+        # Block on real device outputs produced by the custom call
         jax.block_until_ready(rgb)
         jax.block_until_ready(depth)
 
