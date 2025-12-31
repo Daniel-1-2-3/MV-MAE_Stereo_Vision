@@ -37,11 +37,16 @@ try:
 except ImportError:
     TensorDict = None
 
-def _jax_to_torch(tensor):
-    import torch.utils.dlpack as tpack  # pytype: disable=import-error # pylint: disable=import-outside-toplevel
+def _jax_to_torch(x):
+    import torch.utils.dlpack as tpack  # pylint: disable=import-outside-toplevel
 
-    tensor = tpack.from_dlpack(tensor)
-    return tensor
+    try:
+        x = x.block_until_ready()
+    except AttributeError:
+        pass  # not a jax.Array
+
+    t = tpack.from_dlpack(x)
+    return t.clone()
 
 def _torch_to_jax(tensor):
     from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
