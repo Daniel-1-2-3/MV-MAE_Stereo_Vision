@@ -50,24 +50,7 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     echo "=== [4] Installing Python deps (offline from wheelhouse) ==="
     python -m pip install --no-index --find-links "$WHL" -r "$REQ"
 
-    echo "=== [5] Build Madrona-MJX (geom_quat) ==="
-    # Clean any previous partial clone from earlier builds
-    rm -rf /opt/madrona_mjx
-    cd /opt
-    git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
-    cd /opt/madrona_mjx
-    echo "[post] Running: git submodule update --init --recursive"
-    git submodule update --init --recursive
-
-    mkdir -p build
-    cd build
-    cmake .. -DLOAD_VULKAN=OFF
-    make -j"$(nproc)"
-    cd ..
-    # Editable install so Python can import madrona_mjx
-    uv pip install -e .
-
-    echo "=== [6] Install CUDA 12.8 pinned NVIDIA libs ==="
+    echo "=== [5] Install CUDA 12.8 pinned NVIDIA libs ==="
     cat >/tmp/nvidia_cuda12_12.8.txt <<'REQ'
 nvidia-cublas-cu12==12.8.3.14
 nvidia-cuda-cupti-cu12==12.8.57
@@ -92,9 +75,26 @@ REQ
     # Install/override to these exact CUDA12.8 wheels
     uv pip install -r /tmp/nvidia_cuda12_12.8.txt
 
-    echo "=== [7] Installing JAX 0.4.36 with CUDA12 local plugin (GPU JAX) ==="
+    echo "=== [6] Installing JAX 0.4.36 with CUDA12 local plugin (GPU JAX) ==="
     # This pulls jax, jaxlib, and jax-cuda12-plugin, and wires them to the pinned CUDA libs.
     uv pip install --upgrade "jax[cuda12_local]==0.4.36"
+
+    echo "=== [7] Build Madrona-MJX (geom_quat) ==="
+    # Clean any previous partial clone from earlier builds
+    rm -rf /opt/madrona_mjx
+    cd /opt
+    git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
+    cd /opt/madrona_mjx
+    echo "[post] Running: git submodule update --init --recursive"
+    git submodule update --init --recursive
+
+    mkdir -p build
+    cd build
+    cmake .. -DLOAD_VULKAN=OFF
+    make -j"$(nproc)"
+    cd ..
+    # Editable install so Python can import madrona_mjx
+    uv pip install -e .
 
     echo "=== [8] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
