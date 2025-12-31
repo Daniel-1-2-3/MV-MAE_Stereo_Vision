@@ -131,6 +131,10 @@ class StereoPickCube(panda.PandaBase):
     
     def _post_init(self, obj_name="box", keyframe="low_home"):
         super()._post_init(obj_name, keyframe)
+
+        # IMPORTANT: ensure mjx_model matches whatever model state PandaBase finalized
+        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+
         self._init_q = jp.asarray(self._mj_model.keyframe(keyframe).qpos, dtype=jp.float32)
         self._guide_q = self._mj_model.keyframe("picked").qpos
         self._guide_ctrl = self._mj_model.keyframe("picked").ctrl
@@ -357,6 +361,6 @@ class StereoPickCube(panda.PandaBase):
         return jp.concatenate([left, right], axis=2)  # [B, H, 2W, 3]
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-        # data is batched in MJX (leading dim B), so this returns [B, H, 2W, 3] uint8.
+        # data is batched in MJX (leading dim B), so this returns [B, H, 2W, 3]
         pixels = self.render_pixels(info["render_token"], data)
         return info, pixels
