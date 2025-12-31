@@ -310,6 +310,7 @@ class DrQv2Agent:
         return metrics
     
     def learn(self, total_timesteps: int, learning_starts: int) -> None:
+        print("started learn fn")
         self.train(training=True)
         global_step_count, episode_step_count = 0, 0
         episode_reward = torch.zeros((self.num_envs,), device=self.device, dtype=torch.float32)
@@ -317,7 +318,8 @@ class DrQv2Agent:
         
         obs_td = self.env.reset() # TensorDict, batch=[num_envs]
         obs = obs_td["state"] # torch.Tensor on GPU (via dlpack)
-        
+
+        print("loop start")
         while global_step_count <= total_timesteps:
             if episode_step_count >= self.episode_length:
                 print("Step:", global_step_count, "Mean ep reward:", (episode_reward.mean().item() / self.episode_length))

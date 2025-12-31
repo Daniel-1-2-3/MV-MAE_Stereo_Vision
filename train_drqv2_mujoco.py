@@ -78,6 +78,7 @@ def main():
     device_rank = 0 if has_gpu else None
 
     raw_env = StereoPickCube(render_batch_size=num_envs)
+    print("Loaded env")
     brax_env = RSLRLBraxWrapper(
         raw_env,
         num_envs,
@@ -88,8 +89,10 @@ def main():
         randomization_fn=None,
         device_rank=device_rank,
     )
+    print("wrappeed")
 
     runner = DrQv2Agent(brax_env, num_envs=num_envs)
+    print("made agent")
 
     start_time = datetime.now()
     runner.learn(total_timesteps=total_timesteps, learning_starts=learning_starts)
