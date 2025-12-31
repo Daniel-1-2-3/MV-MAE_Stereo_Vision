@@ -14,9 +14,17 @@ class Prepare:
 
     @staticmethod
     def normalize(x: torch.Tensor) -> torch.Tensor:
+        # If x came from a view / custom source, make it safe
+        if x.is_cuda and not x.is_contiguous():
+            x = x.contiguous()
+
         was_u8 = (x.dtype == torch.uint8)
-        x = x.float()
+
+        # Cast using to() (same as .float(), but lets you control device too)
+        x = x.to(dtype=torch.float32)
+
         if was_u8:
-            x = x / 255.0
+            x = x * (1.0 / 255.0)
+
         mean, std = Prepare._stats(x.device, x.dtype)
         return (x - mean) / std
