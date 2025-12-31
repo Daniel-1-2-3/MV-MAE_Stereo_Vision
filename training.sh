@@ -125,6 +125,7 @@ export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
+export PICK_ENV_DEBUG=1
 
 echo "=== Madrona + GPU detection (inside container) ==="
 if command -v nvidia-smi >/dev/null 2>&1; then
