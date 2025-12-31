@@ -126,7 +126,7 @@ class StereoPickCube(panda.PandaBase):
         # Renderer + token are initialized lazily on first reset() with real data
         self._render_token = None
         self._init_renderer()  # now ONLY constructs BatchRenderer (no init/render here)
-        self._render_jit = jax.jit(lambda token, data: self.renderer.render(token, data, self._mjx_model))
+        self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
     
     def _post_init(self, obj_name="box", keyframe="low_home"):
         super()._post_init(obj_name, keyframe)
@@ -233,13 +233,7 @@ class StereoPickCube(panda.PandaBase):
         mocap_quat = mocap_quat.at[:, self._mocap_target, :].set(target_quat[:, None, :])
         data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
         
-        if self._render_token is None:
-            token, _, _ = self.renderer.init(data, self._mjx_model)
-            # Force first render here so any kernel compilation happens in a valid state
-            token, rgb, depth = self.renderer.render(token, data, self._mjx_model)
-            jax.block_until_ready(rgb)
-            jax.block_until_ready(depth)
-            self._render_token = token
+        render_token, _, _ = self.renderer.init(data, self._mjx_model)
         
         # Initialize env state and info
         metrics = {
@@ -247,16 +241,17 @@ class StereoPickCube(panda.PandaBase):
             **{k: 0.0 for k in self._config.reward_config.scales.keys()}
         }
         info = {
-            "rng": rng_main, 
-            "target_pos": target_pos, 
-            "reached_box": jp.asarray(0.0, jp.float32), 
+            "rng": rng_main,
+            "target_pos": target_pos,
+            "reached_box": jp.zeros((B,), dtype=jp.float32),
+            "render_token": render_token,
         }
         info, obs = self._get_obs(data, info)
         reward, done = jp.zeros(2)
         return State(data, obs, reward, done, metrics, info)
 
     def step(self, state: State, action: jax.Array) -> State:
-        delta = action * self._action_scale
+        delta = action * self._config.action_scale
         ctrl = state.data.ctrl + delta
         ctrl = jp.clip(ctrl, self._lowers, self._uppers)
 
@@ -332,18 +327,13 @@ class StereoPickCube(panda.PandaBase):
         }
         return info, rewards
     
-    def render_pixels(self, data_batched: mjx.Data) -> jax.Array:
-        # data_batched has leading dim [B, ...]
-        _, rgb, _ = self._render_jit(self._render_token, data_batched)
-
-        # rgb shape from madrona is typically [num_cams, B, H, W, 4]
-        # Fuse cam0 and cam1, uint8 output [B, H, 2W, 3]
-        left  = rgb[0, ..., :3].astype(jp.float32) / 255.0  # [B, H, W, 3]
-        right = rgb[1, ..., :3].astype(jp.float32) / 255.0  # [B, H, W, 3]
-        fused = jp.concatenate([left, right], axis=2)  # axis=2 is width (H, W)
-        return fused
+    def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
+        _, rgb, _ = self._render_jit(render_token, data_batched)
+        left  = rgb[0, ..., :3].astype(jp.float32) / 255.0
+        right = rgb[1, ..., :3].astype(jp.float32) / 255.0
+        return jp.concatenate([left, right], axis=2)
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
         # data is batched in MJX (leading dim B), so this returns [B, H, 2W, 3] uint8.
-        pixels = self.render_pixels(data)
+        pixels = self.render_pixels(info["render_token"], data)
         return info, pixels
