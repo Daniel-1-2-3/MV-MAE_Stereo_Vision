@@ -39,10 +39,10 @@ except ImportError:
 
 def _jax_to_torch(tensor):
     import torch.utils.dlpack as tpack
-    # Make sure JAX finished producing the buffer
     if hasattr(tensor, "block_until_ready"):
         tensor.block_until_ready()
-    return tpack.from_dlpack(tensor)
+    t = tpack.from_dlpack(tensor)
+    return t.contiguous().clone()
 
 def _torch_to_jax(tensor):
     from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
