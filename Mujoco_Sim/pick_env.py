@@ -263,7 +263,15 @@ class StereoPickCube(panda.PandaBase):
 
             # IMPORTANT: make derived quantities valid before any rendering
             print("m.nq:", m.nq, "data.qpos.shape:", data.qpos.shape, "init_q.shape:", init_q.shape)
-            data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+            def _data_in_axes(d):
+                # For each leaf: map axis 0 if it has a batch dimension, else broadcast (None).
+                return jax.tree_util.tree_map(
+                    lambda x: 0 if (hasattr(x, "ndim") and x.ndim >= 1) else None,
+                    d,
+                )
+
+            in_axes = _data_in_axes(data)
+            data = jax.vmap(lambda d: mjx.forward(m, d), in_axes=in_axes, out_axes=0)(data)
 
             if self._render_token is None:
                 self._render_token, _, _ = self.renderer.init(data, m)
