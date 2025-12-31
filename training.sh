@@ -126,8 +126,6 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 export PICK_ENV_DEBUG=1
-export PICK_ENV_DEBUG_LEVEL=2
-export PICK_ENV_DEBUG_JAXPRINT=1  
 
 echo "=== Madrona + GPU detection (inside container) ==="
 if command -v nvidia-smi >/dev/null 2>&1; then
