@@ -222,7 +222,11 @@ class StereoPickCube(panda.PandaBase):
             mocap_pos=data.mocap_pos.at[:, mocap_id, :].set(target_pos),
             mocap_quat=data.mocap_quat.at[:, mocap_id, :].set(target_quat),
         )
-        data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+        in_axes = jax.tree_util.tree_map(
+            lambda x: 0 if (hasattr(x, "ndim") and x.ndim >= 1) else None,
+            data,
+        )
+        data = jax.vmap(lambda d: mjx.forward(m, d), in_axes=in_axes, out_axes=0)(data)
 
         token, _, _ = self.renderer.init(data, m)
         jax.tree_util.tree_map(jax.block_until_ready, token)
@@ -326,9 +330,12 @@ class StereoPickCube(panda.PandaBase):
             data = data.replace(
                 mocap_pos=data.mocap_pos.at[:, mocap_id, :].set(target_pos),
                 mocap_quat=data.mocap_quat.at[:, mocap_id, :].set(target_quat),
+            )   
+            in_axes = jax.tree_util.tree_map(
+                lambda x: 0 if (hasattr(x, "ndim") and x.ndim >= 1) else None,
+                data,
             )
-
-            data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+            data = jax.vmap(lambda d: mjx.forward(m, d), in_axes=in_axes, out_axes=0)(data)
 
             render_token = self._render_token
 
