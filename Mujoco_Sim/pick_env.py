@@ -338,8 +338,8 @@ class StereoPickCube(panda.PandaBase):
 
         # rgb shape from madrona is typically [num_cams, B, H, W, 4]
         # Fuse cam0 and cam1, uint8 output [B, H, 2W, 3]
-        left  = rgb[0, ..., :3].astype(jp.uint8)   # [B, H, W, 3]
-        right = rgb[1, ..., :3].astype(jp.uint8)   # [B, H, W, 3]
+        left  = rgb[0, ..., :3].astype(jp.float32) / 255.0  # [B, H, W, 3]
+        right = rgb[1, ..., :3].astype(jp.float32) / 255.0  # [B, H, W, 3]
         fused = jp.concatenate([left, right], axis=2)  # axis=2 is width (H, W)
         return fused
 
