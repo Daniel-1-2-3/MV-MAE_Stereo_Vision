@@ -96,6 +96,7 @@ class StereoPickCube(panda.PandaBase):
         print(config)
         if config is None:
             config = default_config()
+        print(config)
         super().__init__(config, config_overrides)
 
         self.render_batch_size = render_batch_size
