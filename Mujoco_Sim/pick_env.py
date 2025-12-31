@@ -90,9 +90,11 @@ class StereoPickCube(panda.PandaBase):
         render_batch_size: int = 32,
         render_height: int = 64,
         render_width: int = 64,
-        config=default_config(),
+        config=None,
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
     ):
+        if config is None:
+            config = default_config()
         super().__init__(config, config_overrides)
 
         self.render_batch_size = render_batch_size
