@@ -287,10 +287,12 @@ class StereoPickCube(panda.PandaBase):
             data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
         
             # Forward so x* fields exist for rendering/rewards on the first step.
-            try:
-                data = mjx.forward(m, data)
-            except Exception:
-                data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+            print("qpos", data.qpos.shape)
+            print("qvel", data.qvel.shape)
+            print("ctrl", data.ctrl.shape)
+            print("mocap_pos", data.mocap_pos.shape)
+            print("mocap_quat", data.mocap_quat.shape)
+            data = jax.vmap(lambda d: mjx.forward(m, d))(data)
             print('data')
 
             # Sample per-world brightness once per episode (shape [B, 1, 1, 1] for broadcasting).
