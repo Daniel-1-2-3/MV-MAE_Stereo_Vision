@@ -26,15 +26,13 @@ fi
 HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
 
-# execute.py must exist at the project root
 if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
   echo "FATAL: execute.py not found at:"
   echo "  $HOST_PROJECT_ROOT/execute.py"
   exit 10
 fi
 
-# ---------------- Python path inside container ----------------
-# Prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
+# Prefer host-mounted code under /workspace so edits require no SIF rebuild.
 export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # ---------------- EGL / MuJoCo GL setup ----------------
@@ -70,7 +68,6 @@ GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
 # ---------------- Binds ----------------
-# ---- mujoco_playground external_deps fix (site-packages is read-only) ----
 HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
 mkdir -p "$HOST_MJP_DEPS"
 MJP_DEPS_IN_CONTAINER="/opt/mvmae_venv/lib/python3.12/site-packages/mujoco_playground/external_deps"
@@ -84,110 +81,309 @@ BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 # Critical bind: mount the entire project to /workspace
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
-# ---------------- Quick EGL + GPU probe ----------------
+# ============================================================
+# 0) HOST-SIDE SNAPSHOT (proves which node/driver you landed on)
+# ============================================================
+echo "================ HOST SNAPSHOT ================"
+date
+hostname
+echo "SLURM_JOB_ID=$SLURM_JOB_ID"
+echo "SLURM_NODELIST=$SLURM_NODELIST"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo
+
+echo "---- nvidia-smi (host) ----"
+nvidia-smi -L || true
+nvidia-smi || true
+echo
+
+echo "---- Host GL / EGL vendor json ----"
+echo "VENDOR_JSON=$VENDOR_JSON"
+echo "NV_EGL_DIR=$NV_EGL_DIR"
+echo "GLVND_DIR=$GLVND_DIR"
+echo "================================================"
+echo
+
+# ============================================================
+# 1) QUICK CONTAINER PROBE (GPU + EGL + basic imports)
+# ============================================================
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
   bash -lc '
+set -euo pipefail
+
+echo "================ CONTAINER PROBE ================"
+date
+hostname
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
+echo
+
+echo "---- nvidia-smi (container) ----"
+nvidia-smi -L || true
+nvidia-smi || true
+echo
+
+echo "---- glibc / gcc ----"
+ldd --version | head -n 2 || true
+which g++ || true
+g++ --version | head -n 2 || true
+echo
+
+echo "---- Python + key packages ----"
+python -V
 python - << "PY"
-import torch, mujoco, OpenGL.GL as gl
-print("torch cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
-ctx = mujoco.GLContext(64, 64); ctx.make_current()
+import sys, platform
+print("python:", sys.version)
+print("platform:", platform.platform())
+
+def show(mod):
+    try:
+        m = __import__(mod)
+        print(f"{mod}: OK  version={getattr(m, '__version__', 'unknown')}  file={getattr(m, '__file__', None)}")
+        return m
+    except Exception as e:
+        print(f"{mod}: FAIL {e!r}")
+        return None
+
+torch = show("torch")
+jax   = show("jax")
+jaxlib= show("jaxlib")
+muj   = show("mujoco")
+mm    = show("madrona_mjx")
+
+if torch and torch.cuda.is_available():
+    print("torch.cuda:", True, torch.cuda.get_device_name(0))
+else:
+    print("torch.cuda:", False)
+
+if jax:
+    try:
+        print("jax.devices():", jax.devices())
+        print("jax.default_backend():", jax.default_backend())
+    except Exception as e:
+        print("jax backend query FAIL:", e)
+
+# Show where XLA extension comes from (helps spot wrong wheel)
+if jaxlib:
+    try:
+        from jaxlib import xla_extension
+        print("jaxlib.xla_extension:", xla_extension.__file__)
+    except Exception as e:
+        print("xla_extension FAIL:", e)
+PY
+echo
+
+echo "---- EGL context sanity (MuJoCo + OpenGL) ----"
+python - << "PY"
+import mujoco
+import OpenGL.GL as gl
+ctx = mujoco.GLContext(64, 64)
+ctx.make_current()
 to_s = lambda b: b.decode("utf-8","ignore") if b else None
 print("OpenGL vendor  :", to_s(gl.glGetString(gl.GL_VENDOR)))
 print("OpenGL renderer:", to_s(gl.glGetString(gl.GL_RENDERER)))
 ctx.free()
 PY
+echo "================================================"
 '
 
-# ---------------- Training with Madrona cache integration ----------------
+# ============================================================
+# 2) DEEP DIVE: SHARED LIB / ABI CHECKS FOR madrona_mjx + JAX
+#    This is the #1 way to catch "scary cuda errors" culprits:
+#    - missing libs (NOT FOUND)
+#    - libstdc++ / GLIBCXX mismatches
+#    - linking against unexpected libcuda/libcudart
+# ============================================================
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
   bash -lc '
-set -e
+set -euo pipefail
 
-echo "=== MuJoCo version ==="
-python - <<'"'"'PY'"'"'
-import mujoco
-print("MuJoCo version:", mujoco.__version__)
+echo "================ ABI / LDD CHECKS ================"
+MADDIR="$(python - <<'"'"'PY'"'"'
+import os, madrona_mjx
+print(os.path.dirname(madrona_mjx.__file__))
 PY
-echo "======================"
+)"
+echo "madrona_mjx dir: $MADDIR"
+echo
 
+echo "---- List madrona_mjx *.so ----"
+ls -lah "$MADDIR" || true
+find "$MADDIR" -maxdepth 2 -name "*.so" -print || true
+echo
+
+echo "---- ldd on madrona_mjx shared libs (look for NOT FOUND) ----"
+shopt -s nullglob
+for so in "$MADDIR"/*.so "$MADDIR"/*/*.so; do
+  echo "----- $so -----"
+  ldd "$so" | egrep -i "not found|libcuda|libcudart|libnvrtc|libnvidia|libstdc\+\+|libgcc_s|GLIBC|GLIBCXX|CXXABI" || true
+done
+echo
+
+echo "---- ldd on jaxlib xla_extension ----"
+python - <<'"'"'PY'"'"'
+from jaxlib import xla_extension
+print(xla_extension.__file__)
+PY
+XLA_SO="$(python - <<'"'"'PY'"'"'
+from jaxlib import xla_extension
+print(xla_extension.__file__)
+PY
+)"
+echo "xla_extension: $XLA_SO"
+ldd "$XLA_SO" | egrep -i "not found|libcuda|libcudart|libnvrtc|libnvidia|libstdc\+\+|libgcc_s|GLIBC|GLIBCXX|CXXABI" || true
+echo
+
+echo "---- CUDA library resolution (where are libs coming from?) ----"
+python - <<'"'"'PY'"'"'
+import ctypes.util
+for name in ["cuda", "cudart", "nvrtc"]:
+    print(name, "->", ctypes.util.find_library(name))
+PY
+echo "=================================================="
+'
+
+# ============================================================
+# 3) MADRONA CACHE SETUP + JAX FLAGS + MINIMAL REPRO
+#    This tries to fail FAST at the exact culprit:
+#    - first env reset
+#    - renderer.init
+#    - one render call
+# ============================================================
+apptainer exec --nv \
+  "${BIND_FLAGS[@]}" \
+  --pwd "$WORKDIR_IN_CONTAINER" \
+  "$IMG" \
+  bash -lc '
+set -euo pipefail
+
+echo "================ MADRONA / JAX SETUP ================"
 export PYTHONUNBUFFERED=1
 
-# JAX / XLA tuning (optional)
+# Make JAX print real stack traces
 export JAX_TRACEBACK_FILTERING=off
-export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+
+# Reduce async confusion during debugging:
+# (set to 1 only while diagnosing; it will slow you down)
+export CUDA_LAUNCH_BLOCKING=1
+
+# Optional allocator tweaks
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 
-echo "=== Madrona + GPU detection (inside container) ==="
-if command -v nvidia-smi >/dev/null 2>&1; then
-  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
-  echo "Actual GPU: $ACTUAL_GPU"
-  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1)
-  if [ -z "$GPU_MODEL" ]; then
-    GPU_MODEL="unknown"
-  fi
-else
-  echo "WARNING: nvidia-smi not found in container; using generic GPU tag"
-  GPU_MODEL="unknown"
-fi
-GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
+# Keep your cuda data dir flag if needed
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 
+echo "XLA_FLAGS=$XLA_FLAGS"
+echo "CUDA_LAUNCH_BLOCKING=$CUDA_LAUNCH_BLOCKING"
+echo
+
+echo "---- GPU identity ----"
+nvidia-smi -L || true
+echo
+
+# ---------------- Madrona cache integration ----------------
+echo "---- Madrona cache selection ----"
+ACTUAL_GPU="$(nvidia-smi -L 2>/dev/null | head -1 || true)"
+echo "Actual GPU: $ACTUAL_GPU"
+GPU_MODEL="$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)"
+GPU_MODEL="${GPU_MODEL:-unknown}"
+GPU_MODEL_LOWER="$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")"
 ENV_CONFIG="default"
 
-# Cache build dir lives in your submit directory, shared host<->container
 CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
 mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
-
 export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
 export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
 
-echo "Madrona cache configuration:"
-echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
-echo "  ENV_CONFIG      = $ENV_CONFIG"
-echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
-echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
-if [ -f "$MADRONA_MWGPU_KERNEL_CACHE" ] && [ -f "$MADRONA_BVH_KERNEL_CACHE" ]; then
-  echo "  Cache files found (no recompile expected)."
-else
-  echo "  No cache files yet; first run will compile and populate them."
-fi
+echo "MADRONA_MWGPU_KERNEL_CACHE=$MADRONA_MWGPU_KERNEL_CACHE"
+echo "MADRONA_BVH_KERNEL_CACHE=$MADRONA_BVH_KERNEL_CACHE"
+ls -lah "$CACHE_BUILD_DIR" || true
 echo
 
-echo "========================================="
-echo "Starting MV-MAE training with MJX + Madrona"
-echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
-echo "========================================="
+echo "---- Versions (inside container) ----"
+python - <<'"'"'PY'"'"'
+import jax, jaxlib, mujoco, madrona_mjx
+print("jax", jax.__version__)
+print("jaxlib", jaxlib.__version__)
+print("mujoco", mujoco.__version__)
+print("madrona_mjx", madrona_mjx.__file__)
+print("jax.devices()", jax.devices())
+print("jax.default_backend()", jax.default_backend())
+PY
+echo "======================================================"
+echo
 
-# ---------------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------------
+# ============================================================
+# 3a) MINIMAL SMOKE TEST: import env + do one reset
+#     If this fails, it isolates to env reset / renderer.init.
+# ============================================================
+echo "================ MINIMAL ENV SMOKE TEST ================"
+python - <<'"'"'PY'"'"'
+import os
+import jax
+import jax.numpy as jnp
+
+# Make failures happen where they occur (not later)
+from jax import config
+config.update("jax_debug_nans", False)
+
+# Import your env
+from Mujoco_Sim.pick_env import StereoPickCube
+
+# IMPORTANT: match your training batch size here (or start with 1 then 128)
+B = int(os.environ.get("SMOKE_B", "128"))
+
+env = StereoPickCube(config_overrides={
+    "vision": True,
+    "vision_config.render_batch_size": B,
+    # keep your resolution the same as training
+    "vision_config.render_width": 64,
+    "vision_config.render_height": 64,
+    "vision_config.use_rasterizer": False,
+})
+
+key = jax.random.PRNGKey(0)
+keys = jax.random.split(key, B)
+
+print("Resetting...")
+st = env.reset(keys)
+
+# Force sync immediately so errors point to the real op
+jax.block_until_ready(st.obs)
+
+print("Reset OK. obs shape:", getattr(st.obs, "shape", None))
+PY
+echo "========================================================"
+echo
+
+# ============================================================
+# 4) RUN TRAINING
+# ============================================================
+echo "================ TRAINING RUN ================"
+
+# Runtime deps prefix (persist on host)
 DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
-
 PY_MM=$(python - <<'"'"'PY'"'"'
 import sys
 print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
 )
-
 SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
 BIN_DIR="${DEPS_PREFIX}/bin"
-
 mkdir -p "$DEPS_PREFIX"
-
-# Make prefix visible for imports + CLI entrypoints (keep /workspace first)
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 
-# ---------------- Install TensorBoard (persistently) ----------------
-echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
-
-if python - <<'PY'
+echo "=== Ensuring TensorBoard in ${DEPS_PREFIX} ==="
+if python - <<'"'"'PY'"'"'
 import importlib.util
 ok = importlib.util.find_spec("tensorboard") is not None
 print("tensorboard already importable:", ok)
@@ -200,16 +396,11 @@ else
   python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
 fi
 
+echo "---- Final version echo ----"
 python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__)"
-python -c "import madrona_mjx; import inspect; print('madrona_mjx', madrona_mjx.__file__)"
+python -c "import madrona_mjx; print('madrona_mjx', madrona_mjx.__file__)"
+echo
 
-python - <<'PY'
-import tensorboard
-print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
-PY
-echo "============================================"
-
-# ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py 2>&1
 
 echo "Training completed."
