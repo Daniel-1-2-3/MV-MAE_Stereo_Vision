@@ -265,15 +265,22 @@ class StereoPickCube(panda.PandaBase):
 
                 data = jax.tree_util.tree_map(_batch_leaf, data0)
                 data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
-
+            
             # Set target mocap (batched).
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
             target_quat = jp.broadcast_to(target_quat0, (B, 4))
-            print("mocap_pos shape:", data.mocap_pos.shape)
-            print("mocap_quat shape:", data.mocap_quat.shape)
-            mocap_pos = data.mocap_pos.at[:].set(target_pos)
-            mocap_quat = data.mocap_quat.at[:].set(target_quat)
-            data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
+            mpos = data.mocap_pos  # Ensure mocap arrays are batched: expected [B, nmocap, 3] and [B, nmocap, 4]
+            mquat = data.mocap_quat
+
+            if mpos.ndim == 2:   # (nmocap, 3)
+                mpos = jp.broadcast_to(mpos, (B,) + mpos.shape)   # (B, nmocap, 3)
+            if mquat.ndim == 2:  # (nmocap, 4)
+                mquat = jp.broadcast_to(mquat, (B,) + mquat.shape)  # (B, nmocap, 4)
+
+            # Write target into mocap #0 for each world, target_pos is (B, 3)
+            mpos = mpos.at[:, 0, :].set(target_pos)
+            mquat = mquat.at[:, 0, :].set(target_quat)
+            data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
 
             # Forward so x* fields exist for rendering/rewards on the first step.
             try:
