@@ -202,6 +202,7 @@ class StereoPickCube(panda.PandaBase):
         # Force allocations in reset onto the same device as rng (important for GPU custom calls)
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
+            m = self._mjx_model 
             # Optional: set PICK_ENV_DEBUG=1 to prove you're running the file you edited.
             if os.environ.get("PICK_ENV_DEBUG", "0") == "1":
                 print(f"[pick_env] running from: {__file__}")
@@ -229,8 +230,8 @@ class StereoPickCube(panda.PandaBase):
             )  # (B, 3)
 
             # Initialize data (must match self._mjx_model shapes)
-            nq = self._mjx_model.nq
-            nv = self._mjx_model.nv
+            nq = m.nq
+            nv = m.nv
 
             init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
 
@@ -243,7 +244,7 @@ class StereoPickCube(panda.PandaBase):
             ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
 
             # Create MJX data from the MJX model (prevents nq mismatch)
-            data = mjx.make_data(self._mjx_model).replace(qpos=init_q, qvel=qvel, ctrl=ctrl)
+            data = mjx.make_data(m).replace(qpos=init_q, qvel=qvel, ctrl=ctrl)
 
             # Set target mocap position
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
@@ -261,10 +262,11 @@ class StereoPickCube(panda.PandaBase):
             data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
 
             # IMPORTANT: make derived quantities valid before any rendering
-            data = mjx.forward(self._mjx_model, data)
+            print("m.nq:", m.nq, "data.qpos.shape:", data.qpos.shape, "init_q.shape:", init_q.shape)
+            data = mjx.forward(m, data)
 
             if self._render_token is None:
-                self._render_token, _, _ = self.renderer.init(data, self._mjx_model)
+                self._render_token, _, _ = self.renderer.init(data, m)
                 # Force the failure to appear *here* if init/render is the culprit
                 jax.block_until_ready(self._render_token)
 
