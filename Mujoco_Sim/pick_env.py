@@ -159,7 +159,12 @@ class StereoPickCube(panda.PandaBase):
         )
         
         def _batch(x):
-            return x if (not hasattr(x, "ndim") or x.ndim == 0) else jp.broadcast_to(x, (self.render_batch_size,) + x.shape)
+            # Batch every JAX array leaf so Madrona sees consistent [B, ...] everywhere.
+            if isinstance(x, jax.Array):
+                if x.ndim == 0:
+                    return jp.broadcast_to(x, (self.render_batch_size,))
+                return jp.broadcast_to(x, (self.render_batch_size,) + x.shape)
+            return x
 
         data0_batched = jax.tree_util.tree_map(_batch, data0)
 
