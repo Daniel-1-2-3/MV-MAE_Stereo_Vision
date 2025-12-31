@@ -49,7 +49,7 @@ def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
 def default_vision_config() -> config_dict.ConfigDict:
     return config_dict.create(
         gpu_id=0,
-        use_rasterizer=True,
+        use_rasterizer=False,
         enabled_geom_groups=[0, 1, 2],
     )
 
