@@ -93,6 +93,7 @@ class StereoPickCube(panda.PandaBase):
         config=None,
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
     ):
+        print(config)
         if config is None:
             config = default_config()
         super().__init__(config, config_overrides)
