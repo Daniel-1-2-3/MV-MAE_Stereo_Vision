@@ -206,25 +206,24 @@ class StereoPickCube(panda.PandaBase):
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)      # (B, 3)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt) # (B, 3)
    
-            # Initialize data
-            init_q0 = jp.array(self._init_q, dtype=jp.float32)
+            # Initialize data (must match self._mjx_model shapes)
             B = rng.shape[0]
-            
-            init_q = jp.broadcast_to(init_q0, (B,) + init_q0.shape)
+            nq = self._mjx_model.nq
+            nv = self._mjx_model.nv
+
+            init_q0 = jp.asarray(self._init_q, dtype=jp.float32)
+            assert init_q0.shape[-1] == nq, (init_q0.shape[-1], nq)
+
+            init_q = jp.broadcast_to(init_q0, (B, nq))
             init_q = init_q.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
-            qvel = jp.zeros((B, self._mjx_model.nv), dtype=jp.float32)
-            ctrl0 = jp.array(self._init_ctrl, dtype=jp.float32)
+
+            qvel = jp.zeros((B, nv), dtype=jp.float32)
+
+            ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
             ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
-            
-            data = mjx_env.make_data(
-                self._mj_model,
-                qpos=init_q,
-                qvel=qvel,
-                ctrl=ctrl,
-                impl=self._mjx_model.impl.value,
-                nconmax=self._config.nconmax,
-                njmax=self._config.njmax,
-            )
+
+            # Create MJX data from the MJX model (prevents nq mismatch)
+            data = mjx.make_data(self._mjx_model).replace(qpos=init_q, qvel=qvel, ctrl=ctrl)
         
             # Set target mocap position
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
