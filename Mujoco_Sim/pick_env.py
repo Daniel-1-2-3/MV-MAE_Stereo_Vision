@@ -36,6 +36,20 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # pytype: disable=import-error
 
+def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
+    used_basenames = {Path(k).name for k in assets.keys()}
+
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        base = p.name
+        if base in used_basenames:
+            continue
+        rel_key = p.relative_to(root).as_posix()
+        assets[rel_key] = p.read_bytes()
+        used_basenames.add(base)
+
+    return assets
 
 def default_vision_config() -> config_dict.ConfigDict:
     return config_dict.create(
@@ -86,18 +100,18 @@ class StereoPickCube(panda.PandaBase):
     """Bring a box to a target."""
     def __init__(
         self,
-        render_batch_size: int = 32,
-        render_height: int = 64,
-        render_width: int = 64,
-        config=default_config(),
+        config: config_dict.ConfigDict = default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+        render_batch_size: int = 128,
+        render_width: int = 64,
+        render_height: int = 64,
     ):
         # ---- Store render params early (used by renderer init) ----
         self.render_batch_size = int(render_batch_size)
-        self.render_height = int(render_height)
         self.render_width = int(render_width)
+        self.render_height = int(render_height)
 
-        # ---- Resolve XML path (PandaBase requires this) ----
+        # ---- Resolve XML path ----
         xml_path = (
             mjx_env.ROOT_PATH
             / "manipulation"
@@ -105,43 +119,50 @@ class StereoPickCube(panda.PandaBase):
             / "xmls"
             / "mjx_single_cube_camera.xml"
         )
+        self._xml_path = xml_path.as_posix()
 
+        # ---- Correct base init call (PandaBase expects xml_path first) ----
         super().__init__(
             xml_path=xml_path,
             config=config,
             config_overrides=config_overrides,
         )
 
-        # Expand floor size to non-zero so Madrona can render it
-        self._mj_model.geom_size[self._mj_model.geom("floor").id, :2] = [5.0, 5.0]
+        # ---- Load model assets EXACTLY like your original menagerie-merge version ----
+        # Start with panda.get_assets()
+        self._model_assets = dict(panda.get_assets())
 
-        # Make the finger pads white for increased visibility
-        mesh_id = self._mj_model.mesh("finger_1").id
-        geoms = [
-            idx
-            for idx, data_id in enumerate(self._mj_model.geom_dataid)
-            if data_id == mesh_id
-        ]
-        self._mj_model.geom_matid[geoms] = self._mj_model.mat("off_white").id
+        # Merge in Menagerie assets from the external deps path
+        menagerie_dir = (
+            Path.cwd()
+            / "mujoco_playground_external_deps"
+            / "mujoco_menagerie"
+            / "franka_emika_panda"
+        )
+        self._model_assets = _add_assets(self._model_assets, menagerie_dir)
 
-        # IMPORTANT: we mutated the MuJoCo model, so we must re-upload it to MJX.
-        # (Otherwise MJX uses the pre-mutation version.)
-        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+        # ---- Rebuild mj_model using the merged assets (overriding whatever PandaBase loaded) ----
+        mj_model = self.modify_model(
+            mujoco.MjModel.from_xml_string(xml_path.read_text(), assets=self._model_assets)
+        )
+        mj_model.opt.timestep = self._config.sim_dt
 
-        # ---- Base per-task init (uses self._mj_model, so do it AFTER tweaks) ----
+        self._mj_model = mj_model
+        self._mjx_model = mjx.put_model(mj_model, impl=self._config.impl)
+
+        # ---- Base per-task init (same as your original) ----
         self._post_init(obj_name="box", keyframe="low_home")
 
-        # ---- Contact sensor IDs (same as before) ----
-        self._box_hand_found_sensor = self._mj_model.sensor("box_hand_found").id
-        self._floor_hand_found_sensor = [
-            self._mj_model.sensor(f"{geom}_floor_found").id
+        # ---- Floor collision geoms (match your original pick_env, NOT sensor ids) ----
+        self._floor_hand_geom_ids = [
+            self._mj_model.geom(geom).id
             for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
         ]
+        self._floor_geom_id = self._mj_model.geom("floor").id
 
-        # ---- Renderer (same as before) ----
+        # ---- Renderer (lazy token init on first reset) ----
         self._render_token = None
-        self._init_renderer()
-        # keep same calling convention as before
+        self._init_renderer()  # constructs BatchRenderer (no init/render here)
         self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
 
     def _post_init(self, obj_name, keyframe):
