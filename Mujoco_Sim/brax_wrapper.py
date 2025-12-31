@@ -42,18 +42,6 @@ def _jax_to_torch(tensor):
     tensor = tpack.from_dlpack(tensor)
     return tensor
 
-def _jax_to_torch(x):
-    import torch.utils.dlpack as tpack  # pylint: disable=import-outside-toplevel
-
-    try:
-        x = x.block_until_ready()
-    except AttributeError:
-        pass  # not a jax.Array
-
-    t = tpack.from_dlpack(x)
-
-    return t.clone()
-
 def _torch_to_jax(tensor):
     from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
 
