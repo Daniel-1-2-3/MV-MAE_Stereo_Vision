@@ -175,11 +175,12 @@ class StereoPickCube(panda.PandaBase):
         return jp.any(pair & valid, axis=-1)
 
     def reset(self, rng: jax.Array) -> State:
-        rng, rng_box, rng_target = jax.random.split(rng, 3)
+        if rng.ndim == 1:
+            rng = rng[None, :]  # -> (1, 2)
 
-        # Intialize box position
-        B = rng.shape[0] if rng.ndim == 2 else None
-        shape = (B, 3) if B is not None else (3,)
+        rng, rng_box, rng_target = jax.random.split(rng, 3)
+        B = rng.shape[0]
+        shape = (B, 3)
         box_pos = (
             jax.random.uniform(
                 rng_box,
@@ -224,10 +225,17 @@ class StereoPickCube(panda.PandaBase):
         # Set target mocap position
         target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
         target_quat = jp.broadcast_to(target_quat0, (B, 4))
-        data = data.replace(
-            mocap_pos=data.mocap_pos.at[:, self._mocap_target, :].set(target_pos),
-            mocap_quat=data.mocap_quat.at[:, self._mocap_target, :].set(target_quat),
-        )
+        mocap_pos = data.mocap_pos
+        mocap_quat = data.mocap_quat
+
+        if mocap_pos.ndim == 2:
+            mocap_pos = jp.broadcast_to(mocap_pos[None, ...], (B,) + mocap_pos.shape)
+        if mocap_quat.ndim == 2:
+            mocap_quat = jp.broadcast_to(mocap_quat[None, ...], (B,) + mocap_quat.shape)
+
+        mocap_pos = mocap_pos.at[:, self._mocap_target, :].set(target_pos)
+        mocap_quat = mocap_quat.at[:, self._mocap_target, :].set(target_quat)
+        data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
         
         if self._render_token is None:
             token, _, _ = self.renderer.init(data, self._mjx_model)
