@@ -47,21 +47,9 @@ def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     return assets
 
 def default_vision_config() -> config_dict.ConfigDict:
-    # Madrona's raytracer custom call has been the most common source of the
-    # "Unable to parse backend config" warnings followed by CUDA "invalid
-    # argument" crashes. Default to the rasterizer unless explicitly disabled.
-    use_rasterizer_env = os.getenv("MJX_USE_RASTERIZER", "1")
-    use_rasterizer = str(use_rasterizer_env).lower() not in {"0", "false", "no"}
-
-    gpu_id_env = os.getenv("MJX_GPU_ID", "0")
-    try:
-        gpu_id = int(gpu_id_env)
-    except ValueError:
-        gpu_id = 0
-
     return config_dict.create(
-        gpu_id=gpu_id,
-        use_rasterizer="false",
+        gpu_id=0,
+        use_rasterizer=True,
         enabled_geom_groups=[0, 1, 2],
     )
 
@@ -84,10 +72,7 @@ def default_config() -> config_dict.ConfigDict:
         vision_config=default_vision_config(),
         obs_noise=config_dict.create(brightness=[1.0, 1.0]),
         impl='jax',
-        # 24 * 2048 allocates *very* large contact buffers for batched MJX data
-        # (B * nconmax). This can blow GPU memory / trigger downstream renderer
-        # failures without providing any benefit for this task.
-        nconmax=24 * 512,
+        nconmax=24 * 2048,
         njmax=128,
     )
     return config

@@ -33,10 +33,6 @@ export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
-# Prefer Madrona's rasterizer (more stable on many clusters than the raytracer).
-export APPTAINERENV_MJX_USE_RASTERIZER=1
-export APPTAINERENV_MJX_GPU_ID=0
-
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 [[ -f "$VENDOR_JSON" ]] || { echo "FATAL: $VENDOR_JSON not found"; exit 3; }
 export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
@@ -80,12 +76,6 @@ import jax, jaxlib
 print("jax", jax.__version__, "jaxlib", jaxlib.__version__)
 print("devices:", jax.devices())
 print("default_backend:", jax.default_backend())
-
-# Tiny GPU sanity check: if this fails, the issue is *not* your env code.
-k = jax.random.PRNGKey(0)
-x = jax.numpy.ones((8, 8), dtype=jax.numpy.float32)
-y = (x @ x).block_until_ready()
-print("jax sanity:", float(y[0, 0]))
 PY
 
 echo "=== MuJoCo ==="
