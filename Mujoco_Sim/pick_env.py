@@ -16,21 +16,24 @@
 
 from typing import Any, Dict, Optional, Union
 
+import contextlib
+import os
+from pathlib import Path
+
 import jax
 import jax.numpy as jp
-import contextlib
-from ml_collections import config_dict
 import mujoco
+import numpy as np
+from ml_collections import config_dict
 from mujoco import mjx
 from mujoco.mjx._src import math
+
 from Custom_Mujoco_Playground._src import mjx_env
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_kinematics
 from Custom_Mujoco_Playground._src.mjx_env import State  # pylint: disable=g-importing-member
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
-import numpy as np
-from pathlib import Path
-import os
+
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
@@ -47,12 +50,14 @@ def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
 
     return assets
 
+
 def default_vision_config() -> config_dict.ConfigDict:
     return config_dict.create(
         gpu_id=0,
         use_rasterizer=False,
         enabled_geom_groups=[0, 1, 2],
     )
+
 
 def default_config() -> config_dict.ConfigDict:
     """Returns the default config for bring_to_target tasks."""
@@ -64,19 +69,20 @@ def default_config() -> config_dict.ConfigDict:
         action_scale=0.04,
         reward_config=config_dict.create(
             scales=config_dict.create(
-                gripper_box=4.0, # Gripper goes to the box.
-                box_target=8.0, # Box goes to the target mocap.
-                no_floor_collision=0.25, # Do not collide the gripper with the floor.
-                robot_target_qpos=0.3, # Arm stays close to target pose.
+                gripper_box=4.0,  # Gripper goes to the box.
+                box_target=8.0,  # Box goes to the target mocap.
+                no_floor_collision=0.25,  # Do not collide the gripper with the floor.
+                robot_target_qpos=0.3,  # Arm stays close to target pose.
             )
         ),
         vision_config=default_vision_config(),
         obs_noise=config_dict.create(brightness=[1.0, 1.0]),
-        impl='jax',
+        impl="jax",
         nconmax=24 * 2048,
         njmax=128,
     )
     return config
+
 
 class StereoPickCube(panda.PandaBase):
     """Bring a box to a target."""
@@ -92,7 +98,9 @@ class StereoPickCube(panda.PandaBase):
         self.render_batch_size = render_batch_size
         self.render_width = render_width
         self.render_height = render_height
+
         mjx_env.MjxEnv.__init__(self, config, config_overrides)
+
         xml_path = (
             mjx_env.ROOT_PATH
             / "manipulation"
@@ -101,6 +109,7 @@ class StereoPickCube(panda.PandaBase):
             / "mjx_single_cube_camera.xml"
         )
         self._xml_path = xml_path.as_posix()
+
         self._model_assets = dict(panda.get_assets())
         menagerie_dir = (
             Path.cwd()
@@ -109,11 +118,21 @@ class StereoPickCube(panda.PandaBase):
             / "franka_emika_panda"
         )
         self._model_assets = _add_assets(self._model_assets, menagerie_dir)
-        mj_model = self.modify_model(mujoco.MjModel.from_xml_string(xml_path.read_text(), assets=self._model_assets))
+
+        mj_model = self.modify_model(
+            mujoco.MjModel.from_xml_string(xml_path.read_text(), assets=self._model_assets)
+        )
         mj_model.opt.timestep = self._config.sim_dt
+
+        # Keep model's buffer sizes aligned with env config (used by MJX data allocation defaults).
+        if hasattr(mj_model, "nconmax"):
+            mj_model.nconmax = int(self._config.nconmax)
+        if hasattr(mj_model, "njmax"):
+            mj_model.njmax = int(self._config.njmax)
 
         self._mj_model = mj_model
         self._mjx_model = mjx.put_model(mj_model, impl=self._config.impl)
+
         self._post_init(obj_name="box", keyframe="low_home")
 
         # Geom ids for parts of the robot that must not hit the floor.
@@ -122,13 +141,13 @@ class StereoPickCube(panda.PandaBase):
             for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
         ]
         self._floor_geom_id = self._mj_model.geom("floor").id
-        
+
         # Cache render token to not re-run renderer.init on every reset.
         # Renderer + token are initialized lazily on first reset() with real data
         self._render_token = None
-        self._init_renderer()  # now ONLY constructs BatchRenderer (no init/render here)
+        self._init_renderer()  # constructs BatchRenderer (no init/render here)
         self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
-    
+
     def _post_init(self, obj_name="box", keyframe="low_home"):
         super()._post_init(obj_name, keyframe)
 
@@ -139,7 +158,7 @@ class StereoPickCube(panda.PandaBase):
         self._guide_q = self._mj_model.keyframe("picked").qpos
         self._guide_ctrl = self._mj_model.keyframe("picked").ctrl
         self._start_tip_transform = panda_kinematics.compute_franka_fk(self._init_ctrl[:7])
-    
+
     def _init_renderer(self):
         self.renderer = BatchRenderer(
             m=self._mjx_model,
@@ -147,7 +166,9 @@ class StereoPickCube(panda.PandaBase):
             num_worlds=self.render_batch_size,
             batch_render_view_width=self.render_width,
             batch_render_view_height=self.render_height,
-            enabled_geom_groups=np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32),
+            enabled_geom_groups=np.asarray(
+                self._config.vision_config.enabled_geom_groups, dtype=np.int32
+            ),
             enabled_cameras=None,
             add_cam_debug_geo=False,
             use_rasterizer=self._config.vision_config.use_rasterizer,
@@ -156,23 +177,23 @@ class StereoPickCube(panda.PandaBase):
 
     def modify_model(self, mj_model: mujoco.MjModel):
         # Expand floor size to non-zero so Madrona can render it
-        mj_model.geom_size[mj_model.geom('floor').id, :2] = [5.0, 5.0]
+        mj_model.geom_size[mj_model.geom("floor").id, :2] = [5.0, 5.0]
 
         # Make the finger pads white for increased visibility
-        mesh_id = mj_model.mesh('finger_1').id
+        mesh_id = mj_model.mesh("finger_1").id
         geoms = [
             idx
             for idx, data_id in enumerate(mj_model.geom_dataid)
             if data_id == mesh_id
         ]
-        mj_model.geom_matid[geoms] = mj_model.mat('off_white').id
+        mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
         return mj_model
 
     def _has_contact_with_floor(self, data: mjx.Data, geom_id: int) -> jax.Array:
-        g1 = data.contact.geom1          # [B, nconmax]
+        g1 = data.contact.geom1  # [B, nconmax]
         g2 = data.contact.geom2
-        idx = jp.arange(g1.shape[-1])    # [nconmax]
-        valid = idx[None, :] < data.ncon[:, None]   # [B, nconmax]
+        idx = jp.arange(g1.shape[-1])  # [nconmax]
+        valid = idx[None, :] < data.ncon[:, None]  # [B, nconmax]
 
         pair = jp.logical_or(
             jp.logical_and(g1 == geom_id, g2 == self._floor_geom_id),
@@ -183,36 +204,43 @@ class StereoPickCube(panda.PandaBase):
     def reset(self, rng: jax.Array) -> State:
         if rng.ndim == 1:
             rng = rng[None, :]  # -> (1, 2)
-            
+
         # Force allocations in reset onto the same device as rng (important for GPU custom calls)
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
+            # Optional: set PICK_ENV_DEBUG=1 to prove you're running the file you edited.
+            if os.environ.get("PICK_ENV_DEBUG", "0") == "1":
+                print(f"[pick_env] running from: {__file__}")
+
             B = rng.shape[0]
             keys = jax.vmap(lambda k: jax.random.split(k, 3))(rng)
             rng_main = keys[:, 0, :]
             rng_box = keys[:, 1, :]
             rng_target = keys[:, 2, :]
 
-
             min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
-            max_box = jp.array([ 0.2,  0.2, 0.0], dtype=jp.float32)
+            max_box = jp.array([0.2, 0.2, 0.0], dtype=jp.float32)
             min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
-            max_tgt = jp.array([ 0.2,  0.2, 0.4], dtype=jp.float32)
+            max_tgt = jp.array([0.2, 0.2, 0.4], dtype=jp.float32)
             base = jp.asarray(self._init_obj_pos, dtype=jp.float32)  # (3,)
 
             def _sample_pos(key, mn, mx):
                 return jax.random.uniform(key, (3,), minval=mn, maxval=mx) + base
 
-            box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)      # (B, 3)
-            target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt) # (B, 3)
-   
+            box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(
+                rng_box, min_box, max_box
+            )  # (B, 3)
+            target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(
+                rng_target, min_tgt, max_tgt
+            )  # (B, 3)
+
             # Initialize data (must match self._mjx_model shapes)
-            B = rng.shape[0]
             nq = self._mjx_model.nq
             nv = self._mjx_model.nv
 
             init_q0 = jp.asarray(self._init_q, dtype=jp.float32)
-            assert init_q0.shape[-1] == nq, (init_q0.shape[-1], nq)
+            # JIT-safe shape check: reshape hard-fails if sizes differ.
+            init_q0 = jp.reshape(init_q0, (nq,))
 
             init_q = jp.broadcast_to(init_q0, (B, nq))
             init_q = init_q.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
@@ -224,7 +252,7 @@ class StereoPickCube(panda.PandaBase):
 
             # Create MJX data from the MJX model (prevents nq mismatch)
             data = mjx.make_data(self._mjx_model).replace(qpos=init_q, qvel=qvel, ctrl=ctrl)
-        
+
             # Set target mocap position
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
             target_quat = jp.broadcast_to(target_quat0, (B, 4))
@@ -239,16 +267,22 @@ class StereoPickCube(panda.PandaBase):
             mocap_pos = mocap_pos.at[:, self._mocap_target, :].set(target_pos[:, None, :])
             mocap_quat = mocap_quat.at[:, self._mocap_target, :].set(target_quat[:, None, :])
             data = data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
+
             # IMPORTANT: make derived quantities valid before any rendering
             data = mjx.forward(self._mjx_model, data)
+
             if self._render_token is None:
                 self._render_token, _, _ = self.renderer.init(data, self._mjx_model)
                 # Force the failure to appear *here* if init/render is the culprit
                 jax.block_until_ready(self._render_token)
+
             render_token = self._render_token
             metrics = {
                 "out_of_bounds": jp.zeros((B,), dtype=jp.float32),
-                **{k: jp.zeros((B,), dtype=jp.float32) for k in self._config.reward_config.scales.keys()},
+                **{
+                    k: jp.zeros((B,), dtype=jp.float32)
+                    for k in self._config.reward_config.scales.keys()
+                },
             }
             info = {
                 "rng": rng_main,
@@ -273,14 +307,12 @@ class StereoPickCube(panda.PandaBase):
         data = mjx_env.step(self._mjx_model, state.data, ctrl, self.n_substeps)
 
         info, raw_rewards = self._get_reward(data, state.info)
-        rewards = {
-            k: v * self._config.reward_config.scales[k]
-            for k, v in raw_rewards.items()
-        }
+        rewards = {k: v * self._config.reward_config.scales[k] for k, v in raw_rewards.items()}
         reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
+
         box_pos = data.xpos[:, self._obj_body, :]
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0, axis=-1)
-        out_of_bounds |= box_pos[:, 2] < 0.0           
+        out_of_bounds |= box_pos[:, 2] < 0.0
         nan_qpos = jp.any(jp.isnan(data.qpos), axis=-1)
         nan_qvel = jp.any(jp.isnan(data.qvel), axis=-1)
         done = (out_of_bounds | nan_qpos | nan_qvel).astype(jp.float32)
@@ -317,15 +349,15 @@ class StereoPickCube(panda.PandaBase):
 
         robot_target_qpos = 1 - jp.tanh(
             jp.linalg.norm(
-                data.qpos[:, self._robot_arm_qposadr] - self._init_q[self._robot_arm_qposadr],
-                axis=-1
+                data.qpos[:, self._robot_arm_qposadr]
+                - self._init_q[self._robot_arm_qposadr],
+                axis=-1,
             )
         )
 
-        # collisions: your batched helper + reduction is already correct
         hand_floor = jp.stack(
             [self._has_contact_with_floor(data, gid) for gid in self._floor_hand_geom_ids],
-            axis=0
+            axis=0,
         )  # [n_geoms, B]
         floor_collision = jp.any(hand_floor, axis=0)
         no_floor_collision = 1.0 - floor_collision.astype(jp.float32)
@@ -341,25 +373,24 @@ class StereoPickCube(panda.PandaBase):
             "robot_target_qpos": robot_target_qpos,
         }
         return info, rewards
-    
+
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
         _, rgb, _ = self._render_jit(render_token, data_batched)
 
         # Support either [2, B, H, W, 4] or [B, 2, H, W, 4]
         if rgb.shape[0] == 2:
-            left  = rgb[0, ..., :3]
+            left = rgb[0, ..., :3]
             right = rgb[1, ..., :3]
         elif rgb.shape[1] == 2:
-            left  = rgb[:, 0, ..., :3]
+            left = rgb[:, 0, ..., :3]
             right = rgb[:, 1, ..., :3]
         else:
             raise ValueError(f"Unexpected rgb shape: {rgb.shape}")
 
-        left  = left.astype(jp.float32) / 255.0
+        left = left.astype(jp.float32) / 255.0
         right = right.astype(jp.float32) / 255.0
         return jp.concatenate([left, right], axis=2)  # [B, H, 2W, 3]
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-        # data is batched in MJX (leading dim B), so this returns [B, H, 2W, 3]
         pixels = self.render_pixels(info["render_token"], data)
         return info, pixels
