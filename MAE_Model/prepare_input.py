@@ -15,11 +15,13 @@ class Prepare:
     def normalize(x: torch.Tensor) -> torch.Tensor:
         if x.is_cuda and not x.is_contiguous():
             x = x.contiguous()
-            
+
+        # Required: uint8 -> float32 and scale to [0,1]
         if x.dtype == torch.uint8:
             x = x.to(torch.float32) * (1.0 / 255.0)
         else:
             x = x.to(torch.float32)
 
         mean, std = Prepare._stats(x.device)
-        return (x - mean) / st
+        return (x - mean) / std
+    
