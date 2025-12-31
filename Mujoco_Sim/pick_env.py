@@ -124,12 +124,6 @@ class StereoPickCube(panda.PandaBase):
         )
         mj_model.opt.timestep = self._config.sim_dt
 
-        # Keep model's buffer sizes aligned with env config (used by MJX data allocation defaults).
-        if hasattr(mj_model, "nconmax"):
-            mj_model.nconmax = int(self._config.nconmax)
-        if hasattr(mj_model, "njmax"):
-            mj_model.njmax = int(self._config.njmax)
-
         self._mj_model = mj_model
         self._mjx_model = mjx.put_model(mj_model, impl=self._config.impl)
 
