@@ -84,26 +84,20 @@ def adjust_brightness(img: jax.Array, scale: jax.Array) -> jax.Array:
 
 class StereoPickCube(panda.PandaBase):
     """Bring a box to a target."""
-
     def __init__(
         self,
         render_batch_size: int = 32,
         render_height: int = 64,
         render_width: int = 64,
-        config=None,
+        config=default_config(),
         config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
     ):
-        print(config)
-        if config is None:
-            config = default_config()
-        print(config)
-        super().__init__(config, config_overrides)
+        # ---- Store render params early (used by renderer init) ----
+        self.render_batch_size = int(render_batch_size)
+        self.render_height = int(render_height)
+        self.render_width = int(render_width)
 
-        self.render_batch_size = render_batch_size
-        self.render_height = render_height
-        self.render_width = render_width
-
-        # Load model
+        # ---- Resolve XML path (PandaBase requires this) ----
         xml_path = (
             mjx_env.ROOT_PATH
             / "manipulation"
@@ -111,40 +105,40 @@ class StereoPickCube(panda.PandaBase):
             / "xmls"
             / "mjx_single_cube_camera.xml"
         )
-        self._xml_path = xml_path.as_posix()
-        self._model_assets = panda.get_assets()
 
-        mj_model = mujoco.MjModel.from_xml_string(
-            xml_path.read_text(), assets=self._model_assets
+        super().__init__(
+            xml_path=xml_path,
+            config=config,
+            config_overrides=config_overrides,
         )
-        mj_model.opt.timestep = config.sim_dt
 
         # Expand floor size to non-zero so Madrona can render it
-        mj_model.geom_size[mj_model.geom("floor").id, :2] = [5.0, 5.0]
+        self._mj_model.geom_size[self._mj_model.geom("floor").id, :2] = [5.0, 5.0]
 
-        # Make finger pads white for increased visibility
-        mesh_id = mj_model.mesh("finger_1").id
+        # Make the finger pads white for increased visibility
+        mesh_id = self._mj_model.mesh("finger_1").id
         geoms = [
             idx
-            for idx, data_id in enumerate(mj_model.geom_dataid)
+            for idx, data_id in enumerate(self._mj_model.geom_dataid)
             if data_id == mesh_id
         ]
-        mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
+        self._mj_model.geom_matid[geoms] = self._mj_model.mat("off_white").id
 
-        self._mj_model = mj_model
-        self._mjx_model = mjx.put_model(mj_model, impl=self._config.impl)
+        # IMPORTANT: we mutated the MuJoCo model, so we must re-upload it to MJX.
+        # (Otherwise MJX uses the pre-mutation version.)
+        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
 
-        # base init
+        # ---- Base per-task init (uses self._mj_model, so do it AFTER tweaks) ----
         self._post_init(obj_name="box", keyframe="low_home")
 
-        # Contact sensor IDs.
+        # ---- Contact sensor IDs (same as before) ----
         self._box_hand_found_sensor = self._mj_model.sensor("box_hand_found").id
         self._floor_hand_found_sensor = [
             self._mj_model.sensor(f"{geom}_floor_found").id
             for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
         ]
 
-        # Renderer
+        # ---- Renderer (same as before) ----
         self._render_token = None
         self._init_renderer()
         # keep same calling convention as before
