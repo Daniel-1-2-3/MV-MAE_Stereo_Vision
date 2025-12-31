@@ -263,7 +263,7 @@ class StereoPickCube(panda.PandaBase):
 
             # IMPORTANT: make derived quantities valid before any rendering
             print("m.nq:", m.nq, "data.qpos.shape:", data.qpos.shape, "init_q.shape:", init_q.shape)
-            data = mjx.forward(m, data)
+            data = jax.vmap(lambda d: mjx.forward(m, d))(data)
 
             if self._render_token is None:
                 self._render_token, _, _ = self.renderer.init(data, m)
