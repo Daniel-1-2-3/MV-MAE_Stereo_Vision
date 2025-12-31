@@ -178,10 +178,10 @@ class StereoPickCube(panda.PandaBase):
             num_worlds=self.render_batch_size,
             batch_render_view_width=self.render_width,
             batch_render_view_height=self.render_height,
-            enabled_geom_groups=np.asarray(self._config.vision_config.enabled_geom_groups),
+            enabled_geom_groups=np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32),
             enabled_cameras=None,
             add_cam_debug_geo=False,
-            use_rasterizer=self._config.vision_config.use_rasterizer,
+            use_rasterizer=bool(self._config.vision_config.use_rasterizer),
             viz_gpu_hdls=None,
         )
 
