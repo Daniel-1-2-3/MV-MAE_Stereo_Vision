@@ -26,7 +26,6 @@ fi
 HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
 
-# execute.py must exist at the project root
 if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
   echo "FATAL: execute.py not found at:"
   echo "  $HOST_PROJECT_ROOT/execute.py"
@@ -34,7 +33,6 @@ if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
 fi
 
 # ---------------- Python path inside container ----------------
-# Prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
 export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # ---------------- EGL / MuJoCo GL setup ----------------
@@ -47,7 +45,6 @@ export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
-# NVIDIA EGL vendor JSON on the HOST
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 if [[ ! -f "$VENDOR_JSON" ]]; then
   echo "FATAL: $VENDOR_JSON not found on host (NVIDIA EGL ICD missing)."
@@ -55,7 +52,6 @@ if [[ ! -f "$VENDOR_JSON" ]]; then
 fi
 export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
 
-# Locate libEGL_nvidia.so on HOST
 NV_EGL_DIR="$(ldconfig -p | awk '/libEGL_nvidia\.so/{print $NF; exit}' | xargs -r dirname || true)"
 for d in /usr/lib/x86_64-linux-gnu/nvidia /usr/lib/nvidia /usr/lib64/nvidia /usr/lib/x86_64-linux-gnu; do
   [[ -z "$NV_EGL_DIR" && -e "$d/libEGL_nvidia.so.0" ]] && NV_EGL_DIR="$d"
@@ -65,12 +61,10 @@ if [[ -z "${NV_EGL_DIR:-}" || ! -d "$NV_EGL_DIR" ]]; then
   exit 4
 fi
 
-# GLVND client lib directory
 GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
 # ---------------- Binds ----------------
-# ---- mujoco_playground external_deps fix (site-packages is read-only) ----
 HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
 mkdir -p "$HOST_MJP_DEPS"
 MJP_DEPS_IN_CONTAINER="/opt/mvmae_venv/lib/python3.12/site-packages/mujoco_playground/external_deps"
@@ -80,8 +74,6 @@ BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
-
-# Critical bind: mount the entire project to /workspace
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
 # ---------------- Quick EGL + GPU probe ----------------
@@ -109,14 +101,15 @@ apptainer exec --nv \
   bash -lc '
 set -e
 
+source /opt/mvmae_venv/bin/activate
+export PYTHONUNBUFFERED=1
+
 echo "=== MuJoCo version ==="
 python - <<'"'"'PY'"'"'
 import mujoco
 print("MuJoCo version:", mujoco.__version__)
 PY
 echo "======================"
-
-export PYTHONUNBUFFERED=1
 
 # JAX / XLA tuning (optional)
 export JAX_TRACEBACK_FILTERING=off
@@ -127,87 +120,9 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 export PICK_ENV_DEBUG=1
 
-# ---- NEW: make JAX actually pick GPU plugin backend ----
-# (Your earlier diagnostics showed cpu default unless JAX_PLATFORMS was set.)
+# ---- FIX 1: force JAX to load the CUDA PJRT plugin backend ----
 export JAX_PLATFORMS="cuda,cpu"
 export JAX_PLATFORM_NAME=""
-
-# ---- NEW: prevent nanobind double-registration by forcing a single Madrona extension identity ----
-# The crash happens when both:
-#   - madrona_mjx._madrona_mjx_batch_renderer  (namespaced)
-#   - _madrona_mjx_batch_renderer              (top-level copy)
-# get loaded. sitecustomize runs on every Python start, so it fixes all entrypoints.
-source /opt/mvmae_venv/bin/activate
-SITE_DIR="$(python -c "import site; print(site.getsitepackages()[0])")"
-cat > "${SITE_DIR}/sitecustomize.py" <<'"'"'PY'"'"'
-import sys, importlib
-
-# Always load the namespaced extension first...
-m = importlib.import_module("madrona_mjx._madrona_mjx_batch_renderer")
-# ...and alias the top-level name to the same module so it can never load twice.
-sys.modules["_madrona_mjx_batch_renderer"] = m
-
-# Visualizer is not needed for headless training; keep its top-level name from importing a second copy.
-try:
-    v = importlib.import_module("madrona_mjx._madrona_mjx_visualizer")
-    sys.modules["_madrona_mjx_visualizer"] = v
-except Exception:
-    pass
-PY
-
-echo "=== Madrona + GPU detection (inside container) ==="
-if command -v nvidia-smi >/dev/null 2>&1; then
-  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
-  echo "Actual GPU: $ACTUAL_GPU"
-  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1)
-  if [ -z "$GPU_MODEL" ]; then
-    GPU_MODEL="unknown"
-  fi
-else
-  echo "WARNING: nvidia-smi not found in container; using generic GPU tag"
-  GPU_MODEL="unknown"
-fi
-GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
-
-ENV_CONFIG="default"
-
-# Cache build dir lives in your submit directory, shared host<->container
-CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
-mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
-
-export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
-export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
-
-echo "Madrona cache configuration:"
-echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
-echo "  ENV_CONFIG      = $ENV_CONFIG"
-echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
-echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
-if [ -f "$MADRONA_MWGPU_KERNEL_CACHE" ] && [ -f "$MADRONA_BVH_KERNEL_CACHE" ]; then
-  echo "  Cache files found (no recompile expected)."
-else
-  echo "  No cache files yet; first run will compile and populate them."
-fi
-echo
-
-echo "============================================"
-echo "JAX backend sanity:"
-python - <<'"'"'PY'"'"'
-import jax, jax.numpy as jnp
-print("JAX:", jax.__version__)
-print("JAX_PLATFORMS:", __import__("os").environ.get("JAX_PLATFORMS"))
-print("devices:", jax.devices())
-print("default backend:", jax.default_backend())
-x = jnp.ones((1024, 1024), dtype=jnp.float32)
-y = (x @ x).block_until_ready()
-print("matmul done on:", y.device)
-PY
-echo "========================================="
-
-echo "========================================="
-echo "Starting MV-MAE training with MJX + Madrona"
-echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
-echo "========================================="
 
 # ---------------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------------
 DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
@@ -221,15 +136,32 @@ PY
 SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
 BIN_DIR="${DEPS_PREFIX}/bin"
 
-mkdir -p "$DEPS_PREFIX"
+mkdir -p "$DEPS_PREFIX" "$SITE_PKGS" "$BIN_DIR"
 
-# Make prefix visible for imports + CLI entrypoints (keep /workspace first)
+# ---- FIX 2: install sitecustomize into WRITABLE host prefix (not SIF site-packages) ----
+# This prevents nanobind "ExecMode already registered" by ensuring only ONE Madrona extension identity loads.
+cat > "${SITE_PKGS}/sitecustomize.py" <<'"'"'PY'"'"'
+import sys, importlib
+
+# Force the namespaced extension to be the single source of truth
+m = importlib.import_module("madrona_mjx._madrona_mjx_batch_renderer")
+sys.modules["_madrona_mjx_batch_renderer"] = m
+
+# Visualizer: alias if present; ignore if headless / not built / not used
+try:
+    v = importlib.import_module("madrona_mjx._madrona_mjx_visualizer")
+    sys.modules["_madrona_mjx_visualizer"] = v
+except Exception:
+    pass
+PY
+
+# Make prefix visible for imports + CLI entrypoints (keep /workspace first),
+# AND ensure SITE_PKGS is early so sitecustomize triggers on every python startup.
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 
 # ---------------- Install TensorBoard (persistently) ----------------
 echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
-
 if python - <<'"'"'PY'"'"'
 import importlib.util
 ok = importlib.util.find_spec("tensorboard") is not None
@@ -248,6 +180,59 @@ import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
 echo "============================================"
+
+echo "============================================"
+echo "JAX backend sanity:"
+python - <<'"'"'PY'"'"'
+import os, jax, jax.numpy as jnp
+print("JAX:", jax.__version__)
+print("JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS"))
+print("devices:", jax.devices())
+print("default backend:", jax.default_backend())
+x = jnp.ones((1024, 1024), dtype=jnp.float32)
+y = (x @ x).block_until_ready()
+print("matmul done on:", y.device)
+PY
+echo "============================================"
+
+echo "=== Madrona + GPU detection (inside container) ==="
+if command -v nvidia-smi >/dev/null 2>&1; then
+  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
+  echo "Actual GPU: $ACTUAL_GPU"
+  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1)
+  if [ -z "$GPU_MODEL" ]; then
+    GPU_MODEL="unknown"
+  fi
+else
+  echo "WARNING: nvidia-smi not found in container; using generic GPU tag"
+  GPU_MODEL="unknown"
+fi
+GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
+
+ENV_CONFIG="default"
+
+CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
+mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
+
+export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
+export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
+
+echo "Madrona cache configuration:"
+echo "  GPU_MODEL_LOWER = $GPU_MODEL_LOWER"
+echo "  ENV_CONFIG      = $ENV_CONFIG"
+echo "  MADRONA_MWGPU_KERNEL_CACHE = $MADRONA_MWGPU_KERNEL_CACHE"
+echo "  MADRONA_BVH_KERNEL_CACHE   = $MADRONA_BVH_KERNEL_CACHE"
+if [ -f "$MADRONA_MWGPU_KERNEL_CACHE" ] && [ -f "$MADRONA_BVH_KERNEL_CACHE" ]; then
+  echo "  Cache files found (no recompile expected)."
+else
+  echo "  No cache files yet; first run will compile and populate them."
+fi
+echo
+
+echo "========================================="
+echo "Starting MV-MAE training with MJX + Madrona"
+echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
+echo "========================================="
 
 # ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py 2>&1
