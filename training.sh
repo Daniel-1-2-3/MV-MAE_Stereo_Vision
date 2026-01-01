@@ -159,7 +159,7 @@ mkdir -p "$DEPS_PREFIX"
 # Put Madrona build FIRST so top-level _madrona_* resolves to the .so
 export PYTHONPATH="/opt/madrona_mjx/build:/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
-export LD_LIBRARY_PATH="/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/opt/madrona_mjx/build:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 
 # Hard delete any shadowing python files from /workspace (host bind)
 rm -f /workspace/_madrona_mjx_batch_renderer.py /workspace/_madrona_mjx_visualizer.py
