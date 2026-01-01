@@ -256,6 +256,7 @@ m = mujoco.MjModel.from_xml_string(xml)
 # One world, one cam, tiny render
 renderer = BatchRenderer(
     m,
+    gpu_id=0,
     num_worlds=1,
     batch_render_view_width=8,
     batch_render_view_height=8,
