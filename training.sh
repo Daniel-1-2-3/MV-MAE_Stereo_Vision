@@ -75,11 +75,21 @@ HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
 mkdir -p "$HOST_MJP_DEPS"
 MJP_DEPS_IN_CONTAINER="/opt/mvmae_venv/lib/python3.12/site-packages/mujoco_playground/external_deps"
 
+# ---- FIX 1: prevent nanobind double-import by hiding Madrona build-tree extensions ----
+# Your SIF contains BOTH:
+#   /opt/mvmae_venv/.../site-packages/_madrona_mjx_*.so  (good)
+#   /opt/madrona_mjx/build/_madrona_mjx_*.so             (bad when imported as madrona_mjx._madrona_mjx_*)
+# Importing both registers nanobind types twice and aborts. Make /opt/madrona_mjx/build empty at runtime.
+HOST_EMPTY_MADRONA_BUILD="$SLURM_SUBMIT_DIR/empty_madrona_build"
+mkdir -p "$HOST_EMPTY_MADRONA_BUILD"
+MADRONA_BUILD_IN_CONTAINER="/opt/madrona_mjx/build"
+
 BIND_FLAGS=( --bind "$HOST_PROJECT_ROOT:$HOST_PROJECT_ROOT" )
 BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d" )
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
+BIND_FLAGS+=( --bind "$HOST_EMPTY_MADRONA_BUILD:$MADRONA_BUILD_IN_CONTAINER" )
 
 # Critical bind: mount the entire project to /workspace
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
@@ -127,7 +137,8 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 export PICK_ENV_DEBUG=1
 
-# **CRITICAL FIX**: force GPU plugin path selection + avoid ROCm backend probing
+# ---- FIX 2: force JAX to use the CUDA PJRT plugin (your earlier tests proved this works) ----
+# If JAX picks CPU, you get missing GPU symbols / wrong init path.
 export JAX_PLATFORMS="cuda,cpu"
 
 echo "=== Madrona + GPU detection (inside container) ==="
@@ -164,6 +175,22 @@ else
   echo "  No cache files yet; first run will compile and populate them."
 fi
 echo
+
+# ---- sanity checks so you can see we fixed both failure modes ----
+echo "============================================"
+python - <<'"'"'PY'"'"'
+import importlib.util, jax, jax.numpy as jnp
+print("JAX:", jax.__version__)
+print("JAX_PLATFORMS:", __import__("os").environ.get("JAX_PLATFORMS"))
+print("devices:", jax.devices())
+print("default backend:", jax.default_backend())
+x = jnp.ones((1024,1024), dtype=jnp.float32)
+y = (x @ x).block_until_ready()
+print("matmul done on:", y.device)
+print("batch .so spec:", importlib.util.find_spec("_madrona_mjx_batch_renderer").origin)
+print("pkg  .so spec :", importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer"))
+PY
+echo "============================================"
 
 echo "========================================="
 echo "Starting MV-MAE training with MJX + Madrona"
@@ -209,27 +236,6 @@ import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
 echo "============================================"
-
-# ---------------- HARD FIX: prevent nanobind double-import of Madrona extensions ----------------
-# We do NOT touch site-packages (read-only). We just force a single canonical resolution at runtime.
-python - <<'"'"'PY'"'"'
-import os, sys, importlib.util
-
-# 1) Make sure /opt/madrona_mjx/build is NOT on sys.path anywhere (it can cause madrona_mjx._madrona_* to load from build tree).
-sys.path = [p for p in sys.path if p != "/opt/madrona_mjx/build" and not p.endswith("/opt/madrona_mjx/build")]
-os.environ["PYTHONNOUSERSITE"] = "1"
-
-# 2) Confirm the top-level extensions exist (the copies you put in site-packages).
-for name in ["_madrona_mjx_batch_renderer", "_madrona_mjx_visualizer"]:
-    spec = importlib.util.find_spec(name)
-    if not spec or not spec.origin:
-        raise SystemExit(f"[FATAL] {name} not importable from site-packages")
-
-print("[boot] Using extension copies from site-packages only.")
-PY
-
-# Ensure the package-qualified names resolve to the same modules by importing ONLY madrona_mjx.renderer normally afterward.
-# (madrona_mjx.renderer should prefer site-packages copies now that build path is not being picked up)
 
 # ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py 2>&1
