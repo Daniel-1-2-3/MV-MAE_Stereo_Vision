@@ -163,7 +163,7 @@ class StereoPickCube(panda.PandaBase):
         # ---- Renderer: create BatchRenderer now, init token lazily in reset() ----
         self._render_token = None
         self._init_renderer()
-        self._render_jit = lambda token, data: self.renderer.render(token, data, self._mjx_model)
+        self._render_jit = lambda token, data: self.renderer.render(token, data, self._mj_model)
 
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
@@ -329,7 +329,9 @@ class StereoPickCube(panda.PandaBase):
                     print("[diag] calling renderer.init ...")
 
                 # Call init + do a tiny smoke render to force the custom call to actually execute here
-                self._render_token, _, _ = self.renderer.init(data, m)
+                print("init model type:", type(self._mj_model), "has geom_quat:", hasattr(self._mj_model, "geom_quat"))
+                print("mjx model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
+                self._render_token, _, _ = self.renderer.init(data, self.mj_model)
                 jax.block_until_ready(self._render_token)
 
                 if debug:
