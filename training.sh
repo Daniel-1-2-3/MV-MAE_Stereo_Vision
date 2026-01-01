@@ -19,7 +19,7 @@ module load apptainer/1.3.5 || module load apptainer
 unset PYTHONPATH
 unset PYTHONHOME
 
-# ---------------- Apptainer image ----------------
+# --------------- Apptainer image ---------------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
 if [[ ! -f "$IMG" ]]; then
   echo "ERROR: $IMG not found"
