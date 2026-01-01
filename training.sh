@@ -257,9 +257,8 @@ m = mujoco.MjModel.from_xml_string(xml)
 renderer = BatchRenderer(
     m,
     num_worlds=1,
-    num_cams=1,
-    render_width=8,
-    render_height=8,
+    batch_render_view_width=8,
+    batch_render_view_height=8,
     use_rasterizer=False,  # raytracer path
 )
 
