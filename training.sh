@@ -15,15 +15,18 @@ cd "$SLURM_SUBMIT_DIR"
 
 module load apptainer/1.3.5 || module load apptainer
 
+# Prevent host python env from shadowing container
 unset PYTHONPATH
 unset PYTHONHOME
 
+# ---------------- Apptainer image ----------------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
 if [[ ! -f "$IMG" ]]; then
   echo "ERROR: $IMG not found"
   exit 2
 fi
 
+# ---------------- Project layout ----------------
 HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
 
@@ -33,9 +36,13 @@ if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
   exit 10
 fi
 
+# ---------------- Python path inside container ----------------
 export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation"
+
+# ---- JAX backend selection (CUDA PJRT plugin) ----
 export APPTAINERENV_JAX_PLATFORMS="cuda,cpu"
 
+# ---------------- EGL / MuJoCo GL setup ----------------
 export APPTAINERENV_MUJOCO_GL=egl
 export APPTAINERENV_PYOPENGL_PLATFORM=egl
 export APPTAINERENV_MUJOCO_PLATFORM=egl
@@ -45,6 +52,7 @@ export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
+# NVIDIA EGL vendor JSON on the HOST
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 if [[ ! -f "$VENDOR_JSON" ]]; then
   echo "FATAL: $VENDOR_JSON not found on host (NVIDIA EGL ICD missing)."
@@ -52,6 +60,7 @@ if [[ ! -f "$VENDOR_JSON" ]]; then
 fi
 export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
 
+# Locate libEGL_nvidia.so on HOST
 NV_EGL_DIR="$(ldconfig -p | awk '/libEGL_nvidia\.so/{print $NF; exit}' | xargs -r dirname || true)"
 for d in /usr/lib/x86_64-linux-gnu/nvidia /usr/lib/nvidia /usr/lib64/nvidia /usr/lib/x86_64-linux-gnu; do
   [[ -z "$NV_EGL_DIR" && -e "$d/libEGL_nvidia.so.0" ]] && NV_EGL_DIR="$d"
@@ -61,9 +70,11 @@ if [[ -z "${NV_EGL_DIR:-}" || ! -d "$NV_EGL_DIR" ]]; then
   exit 4
 fi
 
+# GLVND client lib directory
 GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
+# ---------------- Binds ----------------
 HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
 mkdir -p "$HOST_MJP_DEPS"
 MJP_DEPS_IN_CONTAINER="/opt/mvmae_venv/lib/python3.12/site-packages/mujoco_playground/external_deps"
@@ -75,6 +86,7 @@ BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
+# ---------------- Quick EGL + GPU probe ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
@@ -91,6 +103,7 @@ ctx.free()
 PY
 '
 
+# ---------------- Training ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
@@ -143,41 +156,26 @@ SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
 BIN_DIR="${DEPS_PREFIX}/bin"
 mkdir -p "$DEPS_PREFIX"
 
-# Critical: make build dir win so top-level import loads the .so directly.
+# Put Madrona build FIRST so top-level _madrona_* resolves to the .so
 export PYTHONPATH="/opt/madrona_mjx/build:/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 export LD_LIBRARY_PATH="/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
 
-# Remove any stale python shadow modules (from past runs)
+# Hard delete any shadowing python files from /workspace (host bind)
 rm -f /workspace/_madrona_mjx_batch_renderer.py /workspace/_madrona_mjx_visualizer.py
 rm -rf /workspace/__pycache__ || true
 
-# Re-create safe alias shims for cases where something insists on importing the top-level name.
-# NOTE: these shims will NOT be used if the .so is found first (which is ideal).
-cat > /workspace/_madrona_mjx_batch_renderer.py <<'"'"'PY'"'"'
-import importlib, sys
-_mod = importlib.import_module("madrona_mjx._madrona_mjx_batch_renderer")
-sys.modules[__name__] = _mod
-PY
-
-cat > /workspace/_madrona_mjx_visualizer.py <<'"'"'PY'"'"'
-import importlib, sys
-_mod = importlib.import_module("madrona_mjx._madrona_mjx_visualizer")
-sys.modules[__name__] = _mod
-PY
-
-echo "=== Verifying Madrona import (DO NOT double-import nanobind) ==="
+echo "=== Verify top-level Madrona modules resolve to .so (no nanobind double-load) ==="
 python - <<'"'"'PY'"'"'
 import _madrona_mjx_batch_renderer as br
 import _madrona_mjx_visualizer as vz
 print("_madrona_mjx_batch_renderer:", br.__file__)
 print("_madrona_mjx_visualizer   :", vz.__file__)
-# Hard fail if these resolve to .py; they must be .so (or the shim has failed)
 if br.__file__.endswith(".py") or vz.__file__.endswith(".py"):
-    raise SystemExit("FATAL: _madrona_mjx_* resolved to .py; would break custom calls")
-print("[ok] top-level Madrona modules resolved to compiled extensions.")
+    raise SystemExit("FATAL: _madrona_mjx_* resolved to .py; shadowing still present")
+print("[ok] _madrona_mjx_* resolved to compiled .so")
 PY
-echo "============================================"
+echo "==============================================================="
 
 # Run training
 stdbuf -oL -eL python -u execute.py 2>&1
