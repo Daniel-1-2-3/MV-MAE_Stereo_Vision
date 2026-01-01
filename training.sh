@@ -112,6 +112,16 @@ apptainer exec --nv \
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
+# --- Force CUDA runtime libs to win over any injected host libs ---
+export CUDA_HOME=/usr/local/cuda
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda ${XLA_FLAGS:-}"
+
+# Put CUDA libs first (nvJitLink lives here)
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+
+# Also ensure the dynamic linker cache sees these first in-process
+export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12:${LD_PRELOAD:-}"
+
 echo "=== MuJoCo version ==="
 python - <<'"'"'PY'"'"'
 import mujoco
@@ -165,6 +175,16 @@ echo "=== nvJitLink resolution ==="
 ldd /opt/madrona_mjx/build/libmadmjx_mgr.so | grep -i nvjitlink || true
 ldconfig -p | grep -i nvjitlink || true
 echo "==========================="
+
+echo "=== nvJitLink symbol check (the one Madrona needs) ==="
+python - <<'PY'
+import ctypes
+p = "/usr/local/cuda/lib64/libnvJitLink.so.12"
+lib = ctypes.CDLL(p)
+print("loaded:", p)
+print("has __nvJitLinkCreate_12_5:", hasattr(lib, "__nvJitLinkCreate_12_5"))
+PY
+echo "====================================================="
 
 # Hard delete any shadowing python files from /workspace (host bind)
 rm -f /workspace/_madrona_mjx_batch_renderer.py /workspace/_madrona_mjx_visualizer.py
