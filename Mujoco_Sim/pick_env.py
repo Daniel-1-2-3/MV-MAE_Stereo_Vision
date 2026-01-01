@@ -343,7 +343,6 @@ class StereoPickCube(panda.PandaBase):
                     # CONSISTENT API USE: render(token, state_batched, mujoco_model)
                     try:
                         _, rgb, _ = self.renderer.render(self._render_token, data, self._mj_model)
-                        jax.block_until_ready(rgb)
                         print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
                     except Exception as e:
                         print("[diag] smoke render FAILED:", type(e).__name__, e)
