@@ -50,3 +50,10 @@ scp -r `
 git fetch origin
 git reset --hard origin/main
 git clean -fd
+
+##### Test renderer
+apptainer exec --nv --bind "$PWD:/workspace" training.sif bash -lc '
+source /opt/mvmae_venv/bin/activate
+python -c "import _madrona_mjx_batch_renderer as m; print(m.__file__)"
+python -c "import _madrona_mjx_visualizer as m; print(m.__file__)"
+'

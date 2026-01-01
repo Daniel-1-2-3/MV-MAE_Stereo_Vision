@@ -80,7 +80,6 @@ REQ
     uv pip install --upgrade "jax[cuda12_local]==0.4.36"
 
     echo "=== [7] Build Madrona-MJX (geom_quat) ==="
-    # Clean any previous partial clone from earlier builds
     rm -rf /opt/madrona_mjx
     cd /opt
     git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
@@ -93,8 +92,18 @@ REQ
     cmake .. -DLOAD_VULKAN=OFF
     make -j"$(nproc)"
     cd ..
+
     # Editable install so Python can import madrona_mjx
     uv pip install -e .
+
+    # ---- NEW: make the compiled extension modules importable + ensure runtime finds Madrona libs ----
+    SITE_DIR="$(python -c 'import site; print(site.getsitepackages()[0])')"
+    echo "[post] site-packages: ${SITE_DIR}"
+    cp -v /opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so "${SITE_DIR}/"
+    cp -v /opt/madrona_mjx/build/_madrona_mjx_visualizer*.so "${SITE_DIR}/"
+
+    echo "/opt/madrona_mjx/build" > /etc/ld.so.conf.d/madrona_mjx.conf
+    ldconfig
 
     echo "=== [8] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
@@ -107,14 +116,12 @@ EOS
 
     echo "=== Build Completed Successfully ==="
 
-
 %environment
     export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     export DISPLAY=:1
     export HF_TOKEN=${HF_TOKEN:-}
     export WANDB_API_KEY=${WANDB_API_KEY:-}
     export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
-
 
 %runscript
     if command -v nvidia-smi >/dev/null 2>&1; then
@@ -132,7 +139,6 @@ EOS
 
     echo "[MVMAE] Running training script..."
     exec python -m MV_MAE_Implementation.execute "$@"
-
 
 %help
     Offline MV-MAE / DrQv2 / MJX + Madrona container.
