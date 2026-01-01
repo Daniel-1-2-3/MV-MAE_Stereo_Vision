@@ -1,9 +1,9 @@
 Bootstrap: docker
-From: nvidia/cuda:12.8.0-devel-ubuntu24.04
+From: nvidia/cuda:12.5.1-devel-ubuntu24.04
 
 %labels
     Author        Daniel Zhu
-    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.8, Offline bulk deps + online JAX GPU)
+    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.5.1, Offline bulk deps + online JAX GPU)
 
 %files
     . /opt/src/MV_MAE_Implementation
@@ -50,36 +50,12 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     echo "=== [4] Installing Python deps (offline from wheelhouse) ==="
     python -m pip install --no-index --find-links "$WHL" -r "$REQ"
 
-    echo "=== [5] Install CUDA 12.8 pinned NVIDIA libs ==="
-    cat >/tmp/nvidia_cuda12_12.8.txt <<'REQ'
-nvidia-cublas-cu12==12.8.3.14
-nvidia-cuda-cupti-cu12==12.8.57
-nvidia-cuda-nvcc-cu12==12.8.93
-nvidia-cuda-nvrtc-cu12==12.8.61
-nvidia-cuda-runtime-cu12==12.8.57
-nvidia-cudnn-cu12==9.7.1.26
-nvidia-cufft-cu12==11.3.3.41
-nvidia-cufile-cu12==1.13.0.11
-nvidia-curand-cu12==10.3.9.55
-nvidia-cusolver-cu12==11.7.2.55
-nvidia-cusparse-cu12==12.5.7.53
-nvidia-cusparselt-cu12==0.6.3
-nvidia-nccl-cu12==2.26.2
-nvidia-nvjitlink-cu12==12.8.61
-nvidia-nvtx-cu12==12.8.55
-REQ
-
-    # Let uv talk to the network for this step (don’t enforce PIP_NO_INDEX here)
+    echo "=== [5] Installing JAX 0.4.36 with CUDA12 wheels (GPU JAX) ==="
+    # Let uv talk to the network for this step
     unset PIP_NO_INDEX
+    uv pip install --upgrade "jax[cuda12]==0.4.36"
 
-    # Install/override to these exact CUDA12.8 wheels
-    uv pip install -r /tmp/nvidia_cuda12_12.8.txt
-
-    echo "=== [6] Installing JAX 0.4.36 with CUDA12 local plugin (GPU JAX) ==="
-    # This pulls jax, jaxlib, and jax-cuda12-plugin, and wires them to the pinned CUDA libs.
-    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
-
-    echo "=== [7] Build Madrona-MJX (geom_quat) ==="
+    echo "=== [6] Build Madrona-MJX (geom_quat) ==="
     rm -rf /opt/madrona_mjx
     cd /opt
     git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
@@ -96,7 +72,7 @@ REQ
     # Editable install so Python can import madrona_mjx
     uv pip install -e .
 
-    # ---- NEW: make the compiled extension modules importable + ensure runtime finds Madrona libs ----
+    # Make compiled extension modules importable + ensure runtime finds Madrona libs
     SITE_DIR="$(python -c 'import site; print(site.getsitepackages()[0])')"
     echo "[post] site-packages: ${SITE_DIR}"
     cp -v /opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so "${SITE_DIR}/"
@@ -105,7 +81,7 @@ REQ
     echo "/opt/madrona_mjx/build" > /etc/ld.so.conf.d/madrona_mjx.conf
     ldconfig
 
-    echo "=== [8] Auto-enable venv inside container ==="
+    echo "=== [7] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
     cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
 export VIRTUAL_ENV=/opt/mvmae_venv
@@ -143,8 +119,8 @@ EOS
 %help
     Offline MV-MAE / DrQv2 / MJX + Madrona container.
     - Bulk deps (torch, mujoco, etc.) from local wheelhouse.
-    - NVIDIA CUDA 12.8 wheels pinned.
-    - JAX 0.4.36 with cuda12_local plugin installed from PyPI (GPU backend).
+    - CUDA base image: 12.5.1 (Madrona-MJX supported range).
+    - JAX 0.4.36 with cuda12 wheels from PyPI.
     Dev workflow:
       Bind your host repo root (the directory containing MV_MAE_Implementation/) to /workspace
       and you can add/edit files without rebuilding the SIF.
