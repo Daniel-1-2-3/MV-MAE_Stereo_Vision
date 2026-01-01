@@ -262,12 +262,6 @@ renderer = BatchRenderer(
     batch_render_view_height=8,
     use_rasterizer=False,  # raytracer path
 )
-
-# If init triggers your custom call issue, it will fail here (before training)
-tok = renderer.init()
-print("[madrona] init ok, token dtype/shape:", getattr(tok, "dtype", None), getattr(tok, "shape", None))
-print("[ok] GPU sanity check passed")
-PY
 echo "==============================================="
 
 # Run training
