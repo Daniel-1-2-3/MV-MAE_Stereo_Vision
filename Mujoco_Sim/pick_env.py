@@ -13,174 +13,246 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Stereo pixels version of PandaPickCube with Madrona rendering and dense shaping rewards.
+"""Bring a box to a target and orientation.
 
-This version ports 3 anti-stuck tricks from pick_cartesian.py:
-1) Reward progress (best-so-far improvement only).
-2) Occasional guide-state swap at episode start to aid exploration.
-4) For vision policies, disable state-based penalties (action_rate/no_soln_reward).
+Key design for stability + speed:
+
+- Physics is JIT-friendly and does NOT render (see reset_physics / step_physics).
+- Rendering is always executed outside the physics JIT (see render_obs).
+- Public API remains the same: reset(...) and step(...), returning pixels in State.obs.
+
+This prevents the Madrona renderer custom-call from being traced/compiled as part of the
+big physics step, which is a common cause of the PJRT/XLA "cuModuleGetFunction invalid argument"
+failure and repeated backend_config warnings.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Union
+
 import contextlib
 import importlib.util
 import os
 from pathlib import Path
 
+# Reduce noisy XLA logging (includes the "backend config ... non UTF-8" warnings).
+# This does not fix the underlying cause, but keeps logs readable.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "3")
+
 import jax
 import jax.numpy as jp
-import numpy as np
+import jaxlib
 import mujoco
+import numpy as np
+from ml_collections import config_dict
 from mujoco import mjx
 from mujoco.mjx._src import math
-from ml_collections import config_dict
-
-import jaxlib
 
 from Custom_Mujoco_Playground._src import mjx_env
+from Custom_Mujoco_Playground._src.mjx_env import State
+from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
+from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_kinematics
+
+# Madrona MJX renderer
+from madrona_mjx.renderer import BatchRenderer  # type: ignore
 
 
-def adjust_brightness(pixels: jax.Array, brightness: jax.Array) -> jax.Array:
-    return jp.clip(pixels * brightness, 0.0, 1.0)
+def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
+    used_basenames = {Path(k).name for k in assets.keys()}
+
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        base = p.name
+        if base in used_basenames:
+            continue
+        rel_key = p.relative_to(root).as_posix()
+        assets[rel_key] = p.read_bytes()
+        used_basenames.add(base)
+
+    return assets
 
 
-class State:
-    def __init__(self, data, obs, reward, done, metrics, info):
-        self.data = data
-        self.obs = obs
-        self.reward = reward
-        self.done = done
-        self.metrics = metrics
-        self.info = info
+def default_vision_config() -> config_dict.ConfigDict:
+    return config_dict.create(
+        gpu_id=0,
+        render_batch_size=1024,
+        render_width=64,
+        render_height=64,
+        use_rasterizer=False,
+        enabled_geom_groups=[0, 1, 2],
+    )
+
+
+def default_config():
+    config = config_dict.create(
+        ctrl_dt=0.05,
+        sim_dt=0.005,
+        episode_length=150,
+        action_repeat=1,
+        action_scale=0.04,
+        reward_config=config_dict.create(
+            scales=config_dict.create(
+                gripper_box=4.0,
+                box_target=8.0,
+                no_floor_collision=0.25,
+                no_box_collision=0.05,
+                robot_target_qpos=0.0,
+            ),
+            action_rate=-0.0005,
+            no_soln_reward=-0.01,
+            lifted_reward=0.5,
+            success_reward=2.0,
+        ),
+        vision=True,
+        vision_config=default_vision_config(),
+        obs_noise=config_dict.create(brightness=[1.0, 1.0]),
+        impl="jax",
+        nconmax=24 * 2048,
+        njmax=128,
+    )
+    return config
+
+
+def adjust_brightness(img: jax.Array, scale: jax.Array) -> jax.Array:
+    """Scales pixel values by per-world brightness and clamps to [0, 1]."""
+    return jp.clip(img * scale, 0.0, 1.0)
 
 
 def _batched_body_xpos(data: mjx.Data, body_id: int) -> jax.Array:
+    """Returns body position as [B,3] if batched, else [3]."""
     xpos = data.xpos
-    if xpos.ndim == 3:
+    if hasattr(xpos, "ndim") and xpos.ndim == 3:
         return xpos[:, body_id, :]
-    return xpos[body_id, :]
+    return xpos[body_id]
 
 
-def _batched_body_xmat(data: mjx.Data, body_id: int) -> jax.Array:
-    xmat = data.xmat
-    if xmat.ndim == 3:
-        return xmat[:, body_id, :]
-    return xmat[body_id, :]
+def _any_nan(x: jax.Array) -> jax.Array:
+    if x.ndim <= 1:
+        return jp.any(jp.isnan(x))
+    axes = tuple(range(1, x.ndim))
+    return jp.any(jp.isnan(x), axis=axes)
 
 
-def _batched_geom_xpos(data: mjx.Data, geom_id: int) -> jax.Array:
-    xpos = data.geom_xpos
-    if xpos.ndim == 3:
-        return xpos[:, geom_id, :]
-    return xpos[geom_id, :]
+class StereoPickCube(panda.PandaBase):
+    """Bring a box to a target."""
 
-
-def _batched_geom_xmat(data: mjx.Data, geom_id: int) -> jax.Array:
-    xmat = data.geom_xmat
-    if xmat.ndim == 3:
-        return xmat[:, geom_id, :]
-    return xmat[geom_id, :]
-
-
-def _batched_site_xpos(data: mjx.Data, site_id: int) -> jax.Array:
-    xpos = data.site_xpos
-    if xpos.ndim == 3:
-        return xpos[:, site_id, :]
-    return xpos[site_id, :]
-
-
-def _batched_site_xmat(data: mjx.Data, site_id: int) -> jax.Array:
-    xmat = data.site_xmat
-    if xmat.ndim == 3:
-        return xmat[:, site_id, :]
-    return xmat[site_id, :]
-
-
-class StereoPickCube:
     def __init__(
         self,
-        render_batch_size: int = 32,
-        config: Optional[config_dict.ConfigDict] = None,
+        config: config_dict.ConfigDict = default_config(),
+        config_overrides: Optional[Dict[str, Union[str, int, list[Any]]]] = None,
+        render_batch_size: int = 128,
+        render_width: int = 64,
+        render_height: int = 64,
     ):
+        # ---- Render params ----
         self.render_batch_size = int(render_batch_size)
-        self._config = config if config is not None else self._default_config()
+        self.render_width = int(render_width)
+        self.render_height = int(render_height)
 
-        # Load MJ model (CPU) + MJX model (JAX)
-        xml_path = Path(self._config.xml_path)
-        if not xml_path.exists():
-            raise FileNotFoundError(f"MuJoCo XML not found: {xml_path}")
+        # ---- Base MJX env init (DO NOT call super()) ----
+        mjx_env.MjxEnv.__init__(self, config, config_overrides)
 
-        self._mj_model = mujoco.MjModel.from_xml_path(str(xml_path))
-        self._mj_data = mujoco.MjData(self._mj_model)
-        self._mjx_model = mjx.put_model(self._mj_model)
+        # ---- XML path ----
+        xml_path = (
+            mjx_env.ROOT_PATH
+            / "manipulation"
+            / "franka_emika_panda"
+            / "xmls"
+            / "mjx_single_cube_camera.xml"
+        )
+        self._xml_path = xml_path.as_posix()
 
-        self.n_substeps = int(self._config.n_substeps)
+        # ---- Assets: start from panda.get_assets(), then merge Menagerie dir ----
+        self._model_assets = dict(panda.get_assets())
+        menagerie_dir = (
+            Path.cwd()
+            / "mujoco_playground_external_deps"
+            / "mujoco_menagerie"
+            / "franka_emika_panda"
+        )
+        self._model_assets = _add_assets(self._model_assets, menagerie_dir)
 
-        # IDs
-        self._obj_body = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_BODY, self._config.object_body)
-        self._obj_geom = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, self._config.object_geom)
-        self._target_site = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_SITE, self._config.target_site)
-        self._gripper_site = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_SITE, self._config.gripper_site)
+        # ---- Build mujoco model using merged assets, apply modify_model ----
+        mj_model = self.modify_model(
+            mujoco.MjModel.from_xml_string(
+                xml_path.read_text(),
+                assets=self._model_assets,
+            )
+        )
+        mj_model.opt.timestep = self._config.sim_dt
 
-        # Control ranges
-        self._lowers = jp.array(self._mj_model.actuator_ctrlrange[:, 0], dtype=jp.float32)
-        self._uppers = jp.array(self._mj_model.actuator_ctrlrange[:, 1], dtype=jp.float32)
+        # ---- Store MuJoCo and MJX models ----
+        self._mj_model: mujoco.MjModel = mj_model
+        self._mjx_model: mjx.Model = mjx.put_model(mj_model, impl=self._config.impl)
 
-        # Madrona renderer (non-jit)
-        from madrona_mjx.renderer import BatchRenderer  # noqa: WPS433
+        # ---- Task post init ----
+        self._post_init(obj_name="box", keyframe="low_home")
 
-        self.renderer = BatchRenderer(self._config.vision_config)
-        self._render_fn = self.renderer.render  # (token, state, model)
+        # ---- Floor collision geom ids ----
+        self._floor_hand_geom_ids = [
+            self._mj_model.geom(geom).id
+            for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
+        ]
+        self._floor_geom_id = self._mj_model.geom("floor").id
 
+        # ---- Renderer: create now, init token lazily in reset_physics() ----
+        self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
-        self.render_height = int(self._config.vision_config.height)
-        self.render_width = int(self._config.vision_config.width)
+        # Non-jitted render helper (matches probed signature: render(token, state, model))
+        self._render_fn = lambda token, data: self.renderer.render(token, data, self._mj_model)
 
-    def _default_config(self) -> config_dict.ConfigDict:
-        cfg = config_dict.ConfigDict()
+    def _post_init(self, obj_name, keyframe):
+        super()._post_init(obj_name, keyframe)
+        # PandaBase post-init can mutate MuJoCo model; re-upload to MJX.
+        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+        self._sample_orientation = False
 
-        cfg.xml_path = "panda_pick_cube.xml"
+    def _create_renderer(self) -> BatchRenderer:
+        enabled_geom_groups = np.asarray(
+            self._config.vision_config.enabled_geom_groups, dtype=np.int32
+        )
+        return BatchRenderer(
+            m=self._mjx_model,
+            gpu_id=int(self._config.vision_config.gpu_id),
+            num_worlds=int(self.render_batch_size),
+            batch_render_view_width=int(self.render_width),
+            batch_render_view_height=int(self.render_height),
+            enabled_geom_groups=enabled_geom_groups,
+            enabled_cameras=None,
+            add_cam_debug_geo=False,
+            use_rasterizer=bool(self._config.vision_config.use_rasterizer),
+            viz_gpu_hdls=None,
+        )
 
-        cfg.n_substeps = 20
+    def _make_batched_data(self, B: int) -> mjx.Data:
+        """Create a batched mjx.Data with leading batch axis B and overwrite qpos/qvel/ctrl."""
+        m = self._mjx_model
 
-        cfg.object_body = "box"
-        cfg.object_geom = "box"
-        cfg.target_site = "target"
-        cfg.gripper_site = "gripper_site"
+        data0 = mjx.make_data(m)
 
-        cfg.action_scale = 0.02
+        def _batch_leaf(x):
+            if not hasattr(x, "ndim"):
+                return x
+            if x.ndim == 0:
+                return jp.broadcast_to(x, (B,))
+            if x.shape[0] == B:
+                return x
+            return jp.broadcast_to(x, (B,) + x.shape)
 
-        cfg.obs_noise = config_dict.ConfigDict()
-        cfg.obs_noise.brightness = [0.85, 1.15]
+        data = jax.tree_util.tree_map(_batch_leaf, data0)
 
-        cfg.vision_config = config_dict.ConfigDict()
-        cfg.vision_config.enabled_geom_groups = [0, 1, 2]
-        cfg.vision_config.height = 64
-        cfg.vision_config.width = 64
+        nq = int(m.nq)
+        nv = int(m.nv)
 
-        cfg.reward_config = config_dict.ConfigDict()
-        cfg.reward_config.scales = config_dict.ConfigDict()
-        cfg.reward_config.scales.reach = 1.0
-        cfg.reward_config.scales.lift = 1.0
-        cfg.reward_config.scales.place = 1.0
-
-        return cfg
-
-    def _make_data_batched(self, B: int) -> mjx.Data:
-        data0 = mjx.make_data(self._mjx_model)
-        data = jax.tree_map(lambda x: jp.broadcast_to(x, (B,) + x.shape), data0)
-
-        nq = int(self._mjx_model.nq)
-        nv = int(self._mjx_model.nv)
-
-        init_q0 = jp.asarray(self._mjx_model.qpos0, dtype=jp.float32)
+        init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
         qpos = jp.broadcast_to(init_q0, (B, nq))
+
         qvel = jp.zeros((B, nv), dtype=jp.float32)
 
-        ctrl0 = jp.zeros((int(self._mj_model.nu),), dtype=jp.float32)
+        ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
         ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
 
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
@@ -209,7 +281,6 @@ class StereoPickCube:
         return pixels
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
-        # CHANGED: do NOT read render_token from info; use persistent self._render_token
         pixels = self.render_pixels(self._render_token, data)
         if "brightness" in info:
             pixels = adjust_brightness(pixels, info["brightness"])
@@ -259,7 +330,7 @@ class StereoPickCube:
                   "dtype:", getattr(self._render_token, "dtype", None),
                   "shape:", getattr(self._render_token, "shape", None))
 
-            # One-time smoke render
+            # One-time smoke render (exactly like your original).
             _, rgb, _ = self.renderer.render(self._render_token, data, self._mj_model)
             jax.block_until_ready(rgb)
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
@@ -269,6 +340,10 @@ class StereoPickCube:
             print("[diag] post-render canary ok")
 
     def reset_physics(self, rng: jax.Array) -> State:
+        """Resets B worlds (B == render_batch_size) and ensures the render token exists.
+
+        Returns a State whose obs is a small placeholder. Use render_obs(...) to get pixels.
+        """
         if rng.ndim == 1:
             rng = rng[None, :]
         if rng.shape[0] != self.render_batch_size:
@@ -279,10 +354,20 @@ class StereoPickCube:
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
             m = self._mjx_model
-            B = int(self.render_batch_size)
+            # Force B to be a concrete Python int (NOT a tracer)
+            B = rng.shape[0]
+            if hasattr(B, "dtype") or hasattr(B, "aval"):
+                B = int(B.item())
+            else:
+                B = int(B)
 
-            rng_main = rng
-            keys = jax.vmap(lambda k: jax.random.split(k, 4))(rng_main)
+            if debug:
+                print(f"[pick_env] reset_physics: B={B} render_batch_size={self.render_batch_size}")
+                if dev is not None:
+                    print(f"[pick_env] reset_physics device: {dev}")
+
+            keys = jax.vmap(lambda k: jax.random.split(k, 4))(rng)
+            rng_main = keys[:, 0, :]
             rng_box = keys[:, 1, :]
             rng_target = keys[:, 2, :]
             rng_brightness = keys[:, 3, :]
@@ -291,25 +376,20 @@ class StereoPickCube:
             max_box = jp.array([0.2, 0.2, 0.0], dtype=jp.float32)
             min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
             max_tgt = jp.array([0.2, 0.2, 0.4], dtype=jp.float32)
+            base = jp.asarray(self._init_obj_pos, dtype=jp.float32)
 
             def _sample_pos(key, mn, mx):
-                return jax.random.uniform(key, (3,), minval=mn, maxval=mx)
+                return jax.random.uniform(key, (3,), minval=mn, maxval=mx) + base
 
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)
 
-            data = self._make_data_batched(B)
+            data = self._make_batched_data(B)
 
-            # Set object position into qpos via free joint (assumes object is first free joint).
-            # Keep your original indexing/logic exactly:
-            qpos = data.qpos
-            if qpos.ndim == 2:
-                qpos = qpos.at[:, 0:3].set(box_pos)
-            else:
-                qpos = qpos.at[0:3].set(box_pos[0])
-            data = data.replace(qpos=qpos)
+            data = data.replace(
+                qpos=data.qpos.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
+            )
 
-            # Mocap target
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
             target_quat = jp.broadcast_to(target_quat0, (B, 4))
 
@@ -343,49 +423,18 @@ class StereoPickCube:
                 "target_pos": target_pos,
                 "reached_box": jp.zeros((B,), dtype=jp.float32),
                 "truncation": jp.zeros((B,), dtype=jp.float32),
-                # CHANGED: do NOT store render_token in info
                 "brightness": brightness,
             }
 
+            # Placeholder obs to keep physics state small.
             obs = jp.zeros((int(B), 1), dtype=jp.float32)
             reward = jp.zeros((int(B),), dtype=jp.float32)
             done = jp.zeros((int(B),), dtype=jp.float32)
 
             return State(data, obs, reward, done, metrics, info)
 
-    def _get_reward(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], dict[str, jax.Array]]:
-        # --- original logic unchanged ---
-        target_pos = info["target_pos"]
-        gripper_pos = _batched_site_xpos(data, self._gripper_site)
-        box_pos = _batched_body_xpos(data, self._obj_body)
-
-        if gripper_pos.ndim == 2:
-            reach_dist = jp.linalg.norm(gripper_pos - box_pos, axis=1)
-        else:
-            reach_dist = jp.linalg.norm(gripper_pos - box_pos)
-
-        reach = -reach_dist
-
-        if box_pos.ndim == 2:
-            lift = box_pos[:, 2]
-        else:
-            lift = box_pos[2]
-
-        if box_pos.ndim == 2:
-            place_dist = jp.linalg.norm(box_pos - target_pos, axis=1)
-        else:
-            place_dist = jp.linalg.norm(box_pos - target_pos[0])
-
-        place = -place_dist
-
-        rewards = {
-            "reach": reach,
-            "lift": lift,
-            "place": place,
-        }
-        return info, rewards
-
     def step_physics(self, state: State, action: jax.Array) -> State:
+        """JIT-friendly physics step. Does NOT render."""
         action_scale = self._config.action_scale
         delta = action * action_scale
         ctrl = state.data.ctrl + delta
@@ -403,9 +452,101 @@ class StereoPickCube:
         else:
             out_of_bounds = jp.any(jp.abs(box_pos) > 1.0) | (box_pos[2] < 0.0)
 
-        done = out_of_bounds.astype(jp.float32)
+        new_metrics = dict(state.metrics)
+        new_metrics["out_of_bounds"] = out_of_bounds.astype(jp.float32)
+        for k, v in raw_rewards.items():
+            new_metrics[k] = v
 
-        metrics = state.metrics
-        metrics["out_of_bounds"] = out_of_bounds.astype(jp.float32)
+        done = out_of_bounds | _any_nan(data.qpos) | _any_nan(data.qvel)
 
-        return State(data, state.obs, total_reward, done, metrics, info)
+        # Keep obs small in physics state.
+        obs = state.obs
+
+        return state.replace(
+            data=data,
+            obs=obs,
+            reward=total_reward,
+            done=done.astype(jp.float32),
+            metrics=new_metrics,
+            info=info,
+        )
+
+    # -------------------------
+    # Public API (same as before)
+    # -------------------------
+
+    def reset(self, rng: jax.Array) -> State:
+        """Public reset: physics reset + non-jit rendering -> pixels in obs."""
+        st = self.reset_physics(rng)
+        print('finished reset physics')
+        obs = self.render_obs(st.data, st.info)
+        return st.replace(obs=obs)
+
+    def step(self, state: State, action: jax.Array) -> State:
+        """Public step: physics step + non-jit rendering -> pixels in obs."""
+        st = self.step_physics(state, action)
+        obs = self.render_obs(st.data, st.info)
+        return st.replace(obs=obs)
+
+    # -------------------------
+    # Rewards (unchanged, except robust body indexing)
+    # -------------------------
+
+    def _get_reward(self, data: mjx.Data, info: dict[str, Any]):
+        box_pos = _batched_body_xpos(data, self._obj_body)
+        target_pos = info["target_pos"]
+
+        gripper_pos = _batched_body_xpos(data, self._hand_body)
+        d_gripper_box = jp.linalg.norm(gripper_pos - box_pos, axis=-1)
+        d_box_target = jp.linalg.norm(box_pos - target_pos, axis=-1)
+
+        reached_box = jp.minimum(info["reached_box"] + (d_gripper_box < 0.05), 1.0)
+        info = {**info, "reached_box": reached_box}
+
+        gripper_box = 1.0 - jp.tanh(5.0 * d_gripper_box)
+        box_target = reached_box * (1.0 - jp.tanh(5.0 * d_box_target))
+
+        floor_coll = jp.zeros_like(gripper_box)
+        for sensor_id in self._floor_hand_found_sensor:
+            floor_coll = floor_coll + (
+                data.sensordata[self._mj_model.sensor_adr[sensor_id]] > 0
+            ).astype(jp.float32)
+        no_floor_collision = jp.where(floor_coll > 0, 0.0, 1.0)
+
+        hand_box = (
+            data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
+        )
+        no_box_collision = jp.where(hand_box, 0.0, 1.0)
+
+        raw_rewards = dict(
+            gripper_box=gripper_box,
+            box_target=box_target,
+            no_floor_collision=no_floor_collision,
+            no_box_collision=no_box_collision,
+            robot_target_qpos=jp.zeros_like(gripper_box),
+        )
+        return info, raw_rewards
+
+    def modify_model(self, mj_model: mujoco.MjModel):
+        mj_model.geom_size[mj_model.geom("floor").id, :2] = [5.0, 5.0]
+
+        mesh_id = mj_model.mesh("finger_1").id
+        geoms = [
+            idx
+            for idx, data_id in enumerate(mj_model.geom_dataid)
+            if data_id == mesh_id
+        ]
+        mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
+        return mj_model
+
+    @property
+    def xml_path(self) -> str:
+        return self._xml_path
+
+    @property
+    def mj_model(self) -> mujoco.MjModel:
+        return self._mj_model
+
+    @property
+    def mjx_model(self) -> mjx.Model:
+        return self._mjx_model
