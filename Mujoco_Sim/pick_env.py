@@ -354,7 +354,12 @@ class StereoPickCube(panda.PandaBase):
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
             m = self._mjx_model
-            B = int(rng.shape[0])
+            # Force B to be a concrete Python int (NOT a tracer)
+            B = rng.shape[0]
+            if hasattr(B, "dtype") or hasattr(B, "aval"):
+                B = int(B.item())
+            else:
+                B = int(B)
 
             if debug:
                 print(f"[pick_env] reset_physics: B={B} render_batch_size={self.render_batch_size}")
@@ -424,9 +429,9 @@ class StereoPickCube(panda.PandaBase):
             }
 
             # Placeholder obs to keep physics state small.
-            obs = jp.zeros((B, 1), dtype=jp.float32)
-            reward = jp.zeros((B,), dtype=jp.float32)
-            done = jp.zeros((B,), dtype=jp.float32)
+            obs = jp.zeros((int(B), 1), dtype=jp.float32)
+            reward = jp.zeros((int(B),), dtype=jp.float32)
+            done = jp.zeros((int(B),), dtype=jp.float32)
 
             return State(data, obs, reward, done, metrics, info)
 
@@ -475,6 +480,7 @@ class StereoPickCube(panda.PandaBase):
     def reset(self, rng: jax.Array) -> State:
         """Public reset: physics reset + non-jit rendering -> pixels in obs."""
         st = self.reset_physics(rng)
+        print('finished reset physics')
         obs = self.render_obs(st.data, st.info)
         return st.replace(obs=obs)
 
