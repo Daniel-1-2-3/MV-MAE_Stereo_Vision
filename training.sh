@@ -15,6 +15,9 @@ cd "$SLURM_SUBMIT_DIR"
 
 module load apptainer/1.3.5 || module load apptainer
 
+# ---- IMPORTANT: prevent host Python/CVMFS leakage into container ----
+unset PYTHONPATH PYTHONHOME PYTHONUSERBASE || true
+
 # ---------------- Apptainer image ----------------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
 if [[ ! -f "$IMG" ]]; then
@@ -34,8 +37,9 @@ if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
 fi
 
 # ---------------- Python path inside container ----------------
-# Prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
-export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
+# DO NOT append host PYTHONPATH (CVMFS can poison jax/jaxlib resolution)
+export APPTAINERENV_PYTHONNOUSERSITE=1
+export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation"
 
 # ---------------- EGL / MuJoCo GL setup ----------------
 export APPTAINERENV_MUJOCO_GL=egl
@@ -46,10 +50,6 @@ export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
 export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
-
-# ---- JAX backend selection: IMPORTANT ----
-# JAX "gpu" is NOT the platform name you want here; use CUDA PJRT plugin backend.
-export APPTAINERENV_JAX_PLATFORMS="cuda,cpu"
 
 # NVIDIA EGL vendor JSON on the HOST
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
@@ -111,7 +111,10 @@ apptainer exec --nv \
   --pwd "$WORKDIR_IN_CONTAINER" \
   "$IMG" \
   bash -lc '
-set -e
+set -euo pipefail
+
+# Always activate the venv explicitly
+source /opt/mvmae_venv/bin/activate
 
 echo "=== MuJoCo version ==="
 python - <<'"'"'PY'"'"'
@@ -122,8 +125,18 @@ echo "======================"
 
 export PYTHONUNBUFFERED=1
 
-# JAX / XLA tuning (optional)
+# ---- HARD isolate from any leaked host python site-packages ----
+unset PYTHONHOME PYTHONUSERBASE || true
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation"
+
+# ---- JAX: force the PJRT CUDA plugin path (not legacy) ----
+# (use cuda, not gpu)
+export JAX_PLATFORMS="cuda,cpu"
+unset JAX_PLATFORM_NAME || true
 export JAX_TRACEBACK_FILTERING=off
+
+# Your other tuning
 export JAX_DISABLE_CUSOLVER=1
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -131,14 +144,36 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 export PICK_ENV_DEBUG=1
 
-# Force CUDA PJRT plugin backend path
-export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
+# ---- Prevent nanobind double-registration by ensuring Madrona build dir is NOT on sys.path ----
+# Drop a sitecustomize.py in a tiny prefix we control, and put it first in PYTHONPATH.
+FIXDIR="/workspace/.pyfix"
+mkdir -p "$FIXDIR"
+cat > "$FIXDIR/sitecustomize.py" <<'"'"'PY'"'"'
+import sys
+bad = []
+for p in list(sys.path):
+    if p is None: 
+        continue
+    if "/cvmfs/" in p:
+        bad.append(p)
+    if p.rstrip("/") == "/opt/madrona_mjx/build":
+        bad.append(p)
+# Remove duplicates while preserving order
+new = []
+for p in sys.path:
+    if p in bad:
+        continue
+    if p not in new:
+        new.append(p)
+sys.path[:] = new
+PY
+export PYTHONPATH="$FIXDIR:${PYTHONPATH}"
 
 echo "=== Madrona + GPU detection (inside container) ==="
 if command -v nvidia-smi >/dev/null 2>&1; then
-  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
+  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
   echo "Actual GPU: $ACTUAL_GPU"
-  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1)
+  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
   if [ -z "$GPU_MODEL" ]; then
     GPU_MODEL="unknown"
   fi
@@ -169,11 +204,6 @@ else
 fi
 echo
 
-echo "========================================="
-echo "Starting MV-MAE training with MJX + Madrona"
-echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
-echo "========================================="
-
 # ---------------- Runtime Python deps (persist on host via $SLURM_SUBMIT_DIR) ----------------
 DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
 
@@ -188,77 +218,9 @@ BIN_DIR="${DEPS_PREFIX}/bin"
 
 mkdir -p "$DEPS_PREFIX"
 
-# Make prefix visible for imports + CLI entrypoints (prefix must come BEFORE SIF venv packages)
-# Also, prefer Madrona build dir so we don’t load two different nanobind modules from different paths.
-export PYTHONPATH="/opt/madrona_mjx/build:/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
+# Make prefix visible for imports + CLI entrypoints (keep /workspace first)
+export PYTHONPATH="/workspace:${FIXDIR}:${SITE_PKGS}:/opt/src:/opt/src/MV_MAE_Implementation"
 export PATH="${BIN_DIR}:${PATH}"
-
-# Ensure Madrona runtime shared libs can be found
-export LD_LIBRARY_PATH="/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
-
-# ---------------- Ensure JAX is actually CUDA-capable (fixes CPU-only jaxlib in /opt/mvmae_venv) ----------------
-echo "=== Ensuring JAX CUDA runtime is installed in ${DEPS_PREFIX} (override CPU-only jaxlib in SIF) ==="
-
-python - <<'"'"'PY'"'"'
-import os, sys, importlib.util
-
-os.environ["JAX_PLATFORMS"] = os.environ.get("JAX_PLATFORMS", "cuda,cpu")
-
-def gpu_ok():
-    import jax
-    devs = jax.devices()
-    plats = [getattr(d, "platform", "unknown") for d in devs]
-    print("jax.__version__:", jax.__version__)
-    print("JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS"))
-    print("JAX devices:", devs)
-    print("device platforms:", plats)
-    return any(p in ("cuda", "gpu") for p in plats)
-
-# Quick pre-check: do we already see CUDA?
-try:
-    ok = gpu_ok()
-except Exception as e:
-    print("pre-check failed:", type(e).__name__, e)
-    ok = False
-
-if ok:
-    print("[ok] JAX sees CUDA already.")
-    raise SystemExit(0)
-
-print("[fix] JAX does NOT see CUDA. Installing/overriding into persistent prefix...")
-
-PY
-
-# Install exact versions (same as your SIF: 0.4.36) into the persistent prefix.
-# This is what actually overrides the CPU-only jaxlib/xla_extension in /opt/mvmae_venv.
-python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" \
-  "jax[cuda12_local]==0.4.36"
-
-# Re-check after install and force a tiny GPU compute
-python - <<'"'"'PY'"'"'
-import os
-os.environ["JAX_PLATFORMS"] = os.environ.get("JAX_PLATFORMS", "cuda,cpu")
-import jax, jax.numpy as jnp
-
-print("jax:", jax.__version__)
-print("default backend:", jax.default_backend())
-print("devices:", jax.devices())
-
-# Hard fail if still CPU-only
-plats = [d.platform for d in jax.devices()]
-if not any(p in ("cuda", "gpu") for p in plats):
-    import jaxlib, jaxlib.xla_extension as xe
-    print("FATAL: still no CUDA devices.")
-    print("jaxlib:", getattr(jaxlib, "__version__", None), "at", getattr(jaxlib, "__file__", None))
-    print("xla_extension:", getattr(xe, "__file__", None))
-    print("has GpuAllocatorConfig:", hasattr(xe, "GpuAllocatorConfig"))
-    raise SystemExit(42)
-
-x = jnp.ones((1024, 1024), dtype=jnp.float32)
-y = (x @ x).block_until_ready()
-print("[ok] matmul ran on:", y.device())
-PY
-echo "============================================"
 
 # ---------------- Install TensorBoard (persistently) ----------------
 echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
@@ -281,6 +243,31 @@ import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
 echo "============================================"
+
+# ---------------- PRE-FLIGHT: prove JAX CUDA is live on the compute node ----------------
+python - <<'"'"'PY'"'"'
+import os, importlib.util
+import jax, jax.numpy as jnp
+print("JAX:", jax.__version__)
+print("JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS"))
+print("devices:", jax.devices())
+print("default backend:", jax.default_backend())
+
+# hard fail if cuda not present (so we don’t proceed into weird internal errors)
+devs = [d.platform for d in jax.devices()]
+if "gpu" not in devs and "cuda" not in devs:
+    raise SystemExit("FATAL: JAX CUDA backend did not initialize on this node.")
+
+# tiny CUDA compute to force compilation immediately
+x = jnp.ones((256,256), dtype=jnp.float32)
+y = (x @ x).block_until_ready()
+print("matmul done on:", y.device)
+PY
+
+echo "========================================="
+echo "Starting MV-MAE training with MJX + Madrona"
+echo "Watch for Compiling /opt/madrona_mjx/... only on first run."
+echo "========================================="
 
 # ---------------- Run training ----------------
 stdbuf -oL -eL python -u execute.py 2>&1
