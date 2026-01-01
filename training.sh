@@ -161,6 +161,11 @@ export PYTHONPATH="/opt/madrona_mjx/build:/workspace:${SITE_PKGS}:${PYTHONPATH:-
 export PATH="${BIN_DIR}:${PATH}"
 export LD_LIBRARY_PATH="/opt/madrona_mjx/build:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 
+echo "=== nvJitLink resolution ==="
+ldd /opt/madrona_mjx/build/libmadmjx_mgr.so | grep -i nvjitlink || true
+ldconfig -p | grep -i nvjitlink || true
+echo "==========================="
+
 # Hard delete any shadowing python files from /workspace (host bind)
 rm -f /workspace/_madrona_mjx_batch_renderer.py /workspace/_madrona_mjx_visualizer.py
 rm -rf /workspace/__pycache__ || true
