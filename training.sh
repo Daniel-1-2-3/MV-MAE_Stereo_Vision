@@ -15,144 +15,154 @@ cd "$SLURM_SUBMIT_DIR"
 
 module load apptainer/1.3.5 || module load apptainer
 
-# ---------------- Apptainer image ----------------
+# ---------------- Image + inputs ----------------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
+WORKDIR_IN_CONTAINER="/workspace"
+
 if [[ ! -f "$IMG" ]]; then
-  echo "ERROR: $IMG not found"
+  echo "FATAL: Apptainer image not found: $IMG"
   exit 2
 fi
 
-# ---------------- Project layout ----------------
-HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
-WORKDIR_IN_CONTAINER="/workspace"
-
-if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
-  echo "FATAL: execute.py not found at:"
-  echo "  $HOST_PROJECT_ROOT/execute.py"
-  exit 10
-fi
-
-# ---------------- EGL / MuJoCo GL setup ----------------
-# NOTE: Don't rely on APPTAINERENV_PYTHONPATH forwarding (your container already sets PYTHONPATH).
-export APPTAINERENV_MUJOCO_GL=egl
-export APPTAINERENV_PYOPENGL_PLATFORM=egl
-export APPTAINERENV_MUJOCO_PLATFORM=egl
-export APPTAINERENV_DISPLAY=
-export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
-export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
-export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
-
-# NVIDIA EGL vendor JSON on the HOST
-VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
-if [[ ! -f "$VENDOR_JSON" ]]; then
-  echo "FATAL: $VENDOR_JSON not found on host (NVIDIA EGL ICD missing)."
+if [[ ! -f "$SLURM_SUBMIT_DIR/execute.py" ]]; then
+  echo "FATAL: execute.py not found in submit dir: $SLURM_SUBMIT_DIR"
   exit 3
 fi
-export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
 
-# Locate libEGL_nvidia.so on HOST
+# ---------------- Host EGL/NVIDIA libraries ----------------
+VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+if [[ ! -f "$VENDOR_JSON" ]]; then
+  echo "FATAL: Missing NVIDIA EGL vendor JSON on host: $VENDOR_JSON"
+  exit 4
+fi
+
 NV_EGL_DIR="$(ldconfig -p | awk '/libEGL_nvidia\.so/{print $NF; exit}' | xargs -r dirname || true)"
 for d in /usr/lib/x86_64-linux-gnu/nvidia /usr/lib/nvidia /usr/lib64/nvidia /usr/lib/x86_64-linux-gnu; do
   [[ -z "$NV_EGL_DIR" && -e "$d/libEGL_nvidia.so.0" ]] && NV_EGL_DIR="$d"
 done
 if [[ -z "${NV_EGL_DIR:-}" || ! -d "$NV_EGL_DIR" ]]; then
-  echo "FATAL: Could not find libEGL_nvidia.so* on host."
-  exit 4
+  echo "FATAL: Could not locate libEGL_nvidia.so* directory on host."
+  exit 5
 fi
 
-# GLVND client lib directory
 GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
-# ---------------- Binds ----------------
-# mujoco_playground external_deps fix (site-packages is read-only)
+# ---------------- Persistent prefixes (host) ----------------
+DEPS_PREFIX="$SLURM_SUBMIT_DIR/.pydeps_prefix"
+mkdir -p "$DEPS_PREFIX"
+
+# mujoco_playground external_deps workaround (host dir bind)
 HOST_MJP_DEPS="$SLURM_SUBMIT_DIR/mujoco_playground_external_deps"
 mkdir -p "$HOST_MJP_DEPS"
 MJP_DEPS_IN_CONTAINER="/opt/mvmae_venv/lib/python3.12/site-packages/mujoco_playground/external_deps"
 
-# Hide Madrona build-tree extensions to avoid nanobind double-import crashes
-# (we will provide our own /workspace/madrona_mjx shim that imports the *site-packages* extensions)
+# Hide Madrona build-tree (prevents nanobind “double import” path)
 HOST_EMPTY_MADRONA_BUILD="$SLURM_SUBMIT_DIR/empty_madrona_build"
 mkdir -p "$HOST_EMPTY_MADRONA_BUILD"
 MADRONA_BUILD_IN_CONTAINER="/opt/madrona_mjx/build"
 
+# ---------------- Container environment (EGL/MuJoCo/JAX) ----------------
+export APPTAINERENV_MUJOCO_GL=egl
+export APPTAINERENV_PYOPENGL_PLATFORM=egl
+export APPTAINERENV_MUJOCO_PLATFORM=egl
+export APPTAINERENV_DISPLAY=
+export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
+
+# JAX/XLA defaults (you can tweak later)
+export APPTAINERENV_JAX_TRACEBACK_FILTERING=off
+export APPTAINERENV_JAX_DISABLE_CUSOLVER=1
+export APPTAINERENV_XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+export APPTAINERENV_XLA_PYTHON_CLIENT_PREALLOCATE=false
+export APPTAINERENV_XLA_PYTHON_CLIENT_ALLOCATOR=platform
+export APPTAINERENV_XLA_PYTHON_CLIENT_MEM_FRACTION=.60
+export APPTAINERENV_JAX_PLATFORMS="cuda,cpu"
+export APPTAINERENV_PYTHONUNBUFFERED=1
+export APPTAINERENV_PYTHONNOUSERSITE=1
+export APPTAINERENV_PICK_ENV_DEBUG=1
+
+# ---------------- Binds ----------------
 BIND_FLAGS=( )
-BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
+BIND_FLAGS+=( --bind "$SLURM_SUBMIT_DIR:$WORKDIR_IN_CONTAINER" )
 BIND_FLAGS+=( --bind "/usr/share/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d" )
 BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 BIND_FLAGS+=( --bind "$HOST_EMPTY_MADRONA_BUILD:$MADRONA_BUILD_IN_CONTAINER" )
 
-# ---------------- Quick EGL + GPU probe ----------------
+# ---------------- 0) Quick GPU + EGL probe (uses /bin/sh, not bash) ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
   --env SUBMIT_DIR="$SLURM_SUBMIT_DIR" \
-  "$IMG" \
-  /bin/sh -s <<'EOS'
-set -e
+  "$IMG" /bin/sh -lc '
+set -eu
 
-PYTHON="/opt/mvmae_venv/bin/python"
-if [ ! -x "$PYTHON" ]; then PYTHON="python"; fi
+PY="/opt/mvmae_venv/bin/python"
+[ -x "$PY" ] || PY="python"
 
-"$PYTHON" - <<'PY'
-import torch, mujoco
-import OpenGL.GL as gl
-
-print("Using container shell:", "/bin/sh")
+$PY - <<'"'"'PY'"'"'
+import torch
+print("Using container shell: /bin/sh")
 print("torch cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
 
+import mujoco
+import OpenGL.GL as gl
 ctx = mujoco.GLContext(64, 64); ctx.make_current()
 to_s = lambda b: b.decode("utf-8","ignore") if b else None
 print("OpenGL vendor  :", to_s(gl.glGetString(gl.GL_VENDOR)))
 print("OpenGL renderer:", to_s(gl.glGetString(gl.GL_RENDERER)))
 ctx.free()
+print("MuJoCo version:", mujoco.__version__)
 PY
-EOS
+'
 
-# ---------------- Training ----------------
+# ---------------- 1) Main run (force site-packages Madrona, no source-tree) ----------------
 apptainer exec --nv \
   "${BIND_FLAGS[@]}" \
   --pwd "$WORKDIR_IN_CONTAINER" \
   --env SUBMIT_DIR="$SLURM_SUBMIT_DIR" \
-  "$IMG" \
-  /bin/sh -s <<'EOS'
-set -e
+  "$IMG" /bin/sh -lc '
+set -eu
 
-PYTHON="/opt/mvmae_venv/bin/python"
-if [ ! -x "$PYTHON" ]; then PYTHON="python"; fi
+PY="/opt/mvmae_venv/bin/python"
+[ -x "$PY" ] || PY="python"
 
-export PYTHONUNBUFFERED=1
-export PYTHONNOUSERSITE=1
+# -------------------------------------------------------------------
+# CRITICAL: Force Python to IGNORE container .pth/site hacks that are
+# injecting /opt/madrona_mjx/src ahead of everything.
+# -S disables the site module (no .pth processing).
+# Then we explicitly set PYTHONPATH to only what we want.
+# -------------------------------------------------------------------
 
-# ---- JAX / XLA tuning ----
-export JAX_TRACEBACK_FILTERING=off
-export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_ALLOCATOR=platform
-export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
-export JAX_PLATFORMS="cuda,cpu"
+# venv site-packages (contains _madrona_mjx_batch_renderer .so)
+VENV_SITE="/opt/mvmae_venv/lib/python3.12/site-packages"
 
-# If you want pick_env extra prints:
-export PICK_ENV_DEBUG=1
-
-echo "=== MuJoCo version ==="
-"$PYTHON" - <<'PY'
-import mujoco
-print("MuJoCo version:", mujoco.__version__)
+# persistent prefix site-packages (tensorboard, etc)
+DEPS_PREFIX="${SUBMIT_DIR}/.pydeps_prefix"
+PY_MM=$($PY - <<'"'"'PY'"'"'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
-echo "======================"
+)
+PREFIX_SITE="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
+BIN_DIR="${DEPS_PREFIX}/bin"
+mkdir -p "$DEPS_PREFIX"
 
-# ---------------- Madrona cache paths (host-persistent) ----------------
-# Put caches under $SUBMIT_DIR so they persist across runs.
+# DO NOT append any existing PYTHONPATH (it may include /opt/madrona_mjx/src)
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="/workspace:${PREFIX_SITE}:${VENV_SITE}"
+export PATH="${BIN_DIR}:${PATH}"
+
+# Use python with site disabled everywhere
+PYRUN="$PY -S"
+
+# ---------------- Madrona cache (host-persistent) ----------------
 if command -v nvidia-smi >/dev/null 2>&1; then
-  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
-  echo "Actual GPU: $ACTUAL_GPU"
-  GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1)
-  [ -z "$GPU_MODEL" ] && GPU_MODEL="unknown"
+  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
+  echo "Actual GPU: ${ACTUAL_GPU:-<none>}"
+  GPU_MODEL=$(echo "${ACTUAL_GPU:-}" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
+  [ -n "$GPU_MODEL" ] || GPU_MODEL="unknown"
 else
   echo "WARNING: nvidia-smi not found in container; using generic GPU tag"
   GPU_MODEL="unknown"
@@ -178,74 +188,9 @@ else
 fi
 echo
 
-# ---------------- Persistent python prefix for extra deps (optional) ----------------
-DEPS_PREFIX="${SUBMIT_DIR}/.pydeps_prefix"
-
-PY_MM=$("$PYTHON" - <<'PY'
-import sys
-print(f"{sys.version_info.major}.{sys.version_info.minor}")
-PY
-)
-
-SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
-BIN_DIR="${DEPS_PREFIX}/bin"
-mkdir -p "$DEPS_PREFIX"
-
-# Make sure /workspace is first
-export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
-export PATH="${BIN_DIR}:${PATH}"
-
-# ---------------- CRITICAL FIX: provide /workspace/madrona_mjx shim ----------------
-# Reason:
-# - You hide /opt/madrona_mjx/build (empty bind) to avoid nanobind double-imports.
-# - But the source-tree /opt/madrona_mjx/src/madrona_mjx tries to import madrona_mjx._madrona_mjx_batch_renderer from build.
-# - This shim makes `import madrona_mjx` resolve to /workspace and uses the *site-packages* extension module instead.
-mkdir -p /workspace/madrona_mjx
-
-cat > /workspace/madrona_mjx/__init__.py <<'PY'
-from .renderer import BatchRenderer
-__all__ = ["BatchRenderer"]
-PY
-
-cat > /workspace/madrona_mjx/renderer.py <<'PY'
-try:
-    # Site-packages installs these as TOP-LEVEL extension modules:
-    #   _madrona_mjx_batch_renderer.so
-    from _madrona_mjx_batch_renderer import MadronaBatchRenderer as BatchRenderer  # type: ignore
-    from _madrona_mjx_batch_renderer import MadronaBatchRenderer  # type: ignore
-except Exception as e:
-    raise ImportError(
-        "Failed to import site-packages Madrona extension `_madrona_mjx_batch_renderer`.\n"
-        "This usually means the extension is missing from site-packages or cannot load its CUDA deps."
-    ) from e
-
-__all__ = ["BatchRenderer", "MadronaBatchRenderer"]
-PY
-
-cat > /workspace/madrona_mjx/visualizer.py <<'PY'
-try:
-    from _madrona_mjx_visualizer import MadronaVisualizer  # type: ignore
-except Exception:
-    MadronaVisualizer = None
-__all__ = ["MadronaVisualizer"]
-PY
-
-# ---------------- Diagnostics: prove we're importing the correct thing ----------------
-echo "=== madrona_mjx import origin check ==="
-"$PYTHON" - <<'PY'
-import importlib.util
-import sys
-
-print("python:", sys.executable)
-print("spec madrona_mjx:", importlib.util.find_spec("madrona_mjx").origin)
-print("spec _madrona_mjx_batch_renderer:", importlib.util.find_spec("_madrona_mjx_batch_renderer").origin)
-print("spec madrona_mjx._madrona_mjx_batch_renderer:", importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer"))
-PY
-echo
-
-# ---------------- Optional: TensorBoard into persistent prefix ----------------
+# ---------------- Install TensorBoard into persistent prefix (optional) ----------------
 echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
-if "$PYTHON" - <<'PY'
+if $PYRUN - <<'"'"'PY'"'"'
 import importlib.util
 ok = importlib.util.find_spec("tensorboard") is not None
 print("tensorboard already importable:", ok)
@@ -255,24 +200,64 @@ then
   echo "TensorBoard already installed."
 else
   echo "Installing tensorboard into persistent prefix..."
-  "$PYTHON" -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
+  $PY -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
 fi
 
-"$PYTHON" - <<'PY'
+$PYRUN - <<'"'"'PY'"'"'
 import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
 echo "============================================"
 echo
 
+# -------------------------------------------------------------------
+# CRITICAL: Provide /workspace/madrona_mjx shim package.
+# Your code does: from madrona_mjx.renderer import BatchRenderer
+# This shim makes that resolve to the site-packages extension module
+# _madrona_mjx_batch_renderer (TOP-LEVEL), not /opt/madrona_mjx/src.
+# -------------------------------------------------------------------
+mkdir -p /workspace/madrona_mjx
+
+cat > /workspace/madrona_mjx/__init__.py <<'"'"'PY'"'"'
+from .renderer import BatchRenderer
+__all__ = ["BatchRenderer"]
+PY
+
+cat > /workspace/madrona_mjx/renderer.py <<'"'"'PY'"'"'
+# Site-packages provides the extension as a TOP-LEVEL module:
+#   _madrona_mjx_batch_renderer*.so
+try:
+    from _madrona_mjx_batch_renderer import MadronaBatchRenderer as BatchRenderer  # type: ignore
+    from _madrona_mjx_batch_renderer import MadronaBatchRenderer  # type: ignore
+except Exception as e:
+    raise ImportError(
+        "Could not import site-packages extension `_madrona_mjx_batch_renderer`.\n"
+        "If it exists but fails to load, it may be missing runtime CUDA deps inside the container."
+    ) from e
+
+__all__ = ["BatchRenderer", "MadronaBatchRenderer"]
+PY
+
+# ---------------- Proof check (NO site, shim should win) ----------------
+echo "=== madrona_mjx import origin check (python -S) ==="
+$PYRUN - <<'"'"'PY'"'"'
+import importlib.util, sys, os
+print("python:", sys.executable)
+print("PYTHONPATH:", os.environ.get("PYTHONPATH"))
+print("sys.path[0:10]:", sys.path[:10])
+print("spec madrona_mjx:", importlib.util.find_spec("madrona_mjx").origin)
+print("spec _madrona_mjx_batch_renderer:", importlib.util.find_spec("_madrona_mjx_batch_renderer").origin)
+PY
+echo "==============================================="
+echo
+
 # ---------------- Run training ----------------
 echo "========================================="
 echo "Starting MV-MAE training with MJX + Madrona"
 echo "========================================="
-
-stdbuf -oL -eL "$PYTHON" -u execute.py 2>&1
+stdbuf -oL -eL $PYRUN -u execute.py 2>&1
 
 echo "Training completed."
-EOS
+'
 
 echo "Finished at $(date)"
