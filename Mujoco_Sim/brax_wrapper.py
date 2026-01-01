@@ -165,8 +165,11 @@ class RSLRLBraxWrapper(VecEnv):
 
         # ---- JIT step; keep reset unjitted ----
         print("JITing step")
-        self.reset_fn = env.reset
-        self.step_fn = jax.jit(env.step)
+        # ---- JIT physics step only; render separately to avoid compiling Madrona custom calls inside the main step JIT ----
+        self.reset_fn = getattr(env, "reset_physics", env.reset)
+        self.step_fn = jax.jit(getattr(env, "step_physics", env.step))
+        self._use_separate_render = hasattr(env, "render_obs") and hasattr(env, "step_physics") and hasattr(env, "reset_physics")
+
         print("Done JITing step")
 
         self.env_state = None
@@ -183,7 +186,13 @@ class RSLRLBraxWrapper(VecEnv):
 
         # ---- Observations ----
         # For your pick_env: env_state.obs is pixels tensor [B,H,2W,3]
-        obs_t = _jax_to_torch(self.env_state.obs)
+        # Render pixels (jitted inside env) without carrying them through the physics state.
+        pixels = (
+            self.env.render_obs(self.env_state.data, self.env_state.info)
+            if getattr(self, "_use_separate_render", False)
+            else self.env_state.obs
+        )
+        obs_t = _jax_to_torch(pixels)
         obs = {"state": obs_t}
 
         reward = _jax_to_torch(self.env_state.reward)
@@ -239,7 +248,19 @@ class RSLRLBraxWrapper(VecEnv):
 
         self.env_state = self.reset_fn(self.key_reset)
 
-        obs_t = _jax_to_torch(self.env_state.obs)
+        # Render pixels (jitted inside env) without carrying them through the physics state.
+
+        pixels = (
+
+            self.env.render_obs(self.env_state.data, self.env_state.info)
+
+            if getattr(self, "_use_separate_render", False)
+
+            else self.env_state.obs
+
+        )
+
+        obs_t = _jax_to_torch(pixels)
         obs = {"state": obs_t}
 
         if TensorDict is None:
