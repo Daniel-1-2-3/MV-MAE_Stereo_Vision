@@ -315,13 +315,13 @@ class StereoPickCube(panda.PandaBase):
                     print("[diag] jaxlib file:", jaxlib.__file__, "mtime:", os.path.getmtime(jaxlib.__file__))
 
                     # Find the actual compiled .so for madrona_mjx (not just __init__.py)
-                    pkg_dir = pathlib.Path(madrona_mjx.__file__).resolve().parent
-                    so_files = sorted(pkg_dir.rglob("*.so"))
-                    print("[diag] madrona package:", madrona_mjx.__file__, "mtime:", os.path.getmtime(madrona_mjx.__file__))
-                    print("[diag] madrona .so files:", [str(p) for p in so_files[:3]])
-                    if so_files:
-                        so0 = so_files[0]
-                        print("[diag] madrona .so mtime:", str(so0), os.path.getmtime(so0))
+                    import importlib
+                    for name in ["_madrona_mjx_batch_renderer", "_madrona_mjx_visualizer"]:
+                        try:
+                            m = importlib.import_module(name)
+                            print("[diag]", name, "->", m.__file__)
+                        except Exception as e:
+                            print("[diag]", name, "FAILED:", e)
 
                     # Also log the dtype you pass into the renderer config (int64 here is a common footgun)
                     eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
@@ -345,6 +345,11 @@ class StereoPickCube(panda.PandaBase):
                     except Exception as e:
                         print("[diag] smoke render FAILED:", type(e).__name__, e)
                         raise
+                    
+                    canary = jp.zeros((1,), dtype=jp.float32)
+                    jax.block_until_ready(canary)
+                    print("[diag] post-render canary ok")
+
                 if debug:
                     print(f"[pick_env] render_token dtype={self._render_token.dtype} shape={self._render_token.shape}")
             print('rendered')
