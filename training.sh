@@ -15,10 +15,6 @@ cd "$SLURM_SUBMIT_DIR"
 
 module load apptainer/1.3.5 || module load apptainer
 
-# ---- Important: prevent host PYTHONPATH from being forwarded / shadowing container env ----
-unset PYTHONPATH
-unset PYTHONHOME
-
 # ---------------- Apptainer image ----------------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
 if [[ ! -f "$IMG" ]]; then
@@ -39,7 +35,7 @@ fi
 
 # ---------------- Python path inside container ----------------
 # Prefer host-mounted code under /workspace so edits/additions require no SIF rebuild.
-export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation"
+export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation:${PYTHONPATH:-}"
 
 # ---------------- EGL / MuJoCo GL setup ----------------
 export APPTAINERENV_MUJOCO_GL=egl
@@ -50,9 +46,6 @@ export APPTAINERENV_LIBGL_ALWAYS_SOFTWARE=0
 export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
-
-# ---- JAX backend selection ----
-export APPTAINERENV_JAX_PLATFORMS="cuda,cpu"
 
 # NVIDIA EGL vendor JSON on the HOST
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
@@ -134,9 +127,6 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 export PICK_ENV_DEBUG=1
 
-# Force CUDA PJRT plugin backend path
-export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
-
 echo "=== Madrona + GPU detection (inside container) ==="
 if command -v nvidia-smi >/dev/null 2>&1; then
   ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
@@ -191,81 +181,14 @@ BIN_DIR="${DEPS_PREFIX}/bin"
 
 mkdir -p "$DEPS_PREFIX"
 
-# Make prefix visible for imports + CLI entrypoints (prefix must come BEFORE SIF venv packages)
-# Also, prefer Madrona build dir so we don’t load two different nanobind modules from different paths.
-export PYTHONPATH="/opt/madrona_mjx/build:/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
+# Make prefix visible for imports + CLI entrypoints (keep /workspace first)
+export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
-
-# Ensure Madrona runtime shared libs can be found
-export LD_LIBRARY_PATH="/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
-
-# ---------------- Ensure JAX is actually CUDA-capable ----------------
-echo "=== Ensuring JAX CUDA runtime is installed in ${DEPS_PREFIX} (override CPU-only jaxlib in SIF) ==="
-
-python - <<'"'"'PY'"'"'
-import os
-os.environ["JAX_PLATFORMS"] = os.environ.get("JAX_PLATFORMS", "cuda,cpu")
-
-def gpu_ok():
-    import jax
-    devs = jax.devices()
-    plats = [getattr(d, "platform", "unknown") for d in devs]
-    print("jax.__version__:", jax.__version__)
-    print("JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS"))
-    print("JAX devices:", devs)
-    print("device platforms:", plats)
-    return any(p in ("cuda", "gpu") for p in plats)
-
-try:
-    ok = gpu_ok()
-except Exception as e:
-    print("pre-check failed:", type(e).__name__, e)
-    ok = False
-
-if ok:
-    print("[ok] JAX sees CUDA already.")
-    raise SystemExit(0)
-
-print("[fix] JAX does NOT see CUDA. Installing/overriding into persistent prefix...")
-PY
-
-# Install exact versions into the persistent prefix.
-python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" \
-  "jax[cuda12_local]==0.4.36"
-
-# Re-check after install and force a tiny GPU compute
-python - <<'"'"'PY'"'"'
-import os
-os.environ["JAX_PLATFORMS"] = os.environ.get("JAX_PLATFORMS", "cuda,cpu")
-import jax, jax.numpy as jnp
-
-print("jax:", jax.__version__)
-print("default backend:", jax.default_backend())
-print("devices:", jax.devices())
-
-plats = [d.platform for d in jax.devices()]
-if not any(p in ("cuda", "gpu") for p in plats):
-    import jaxlib, jaxlib.xla_extension as xe
-    print("FATAL: still no CUDA devices.")
-    print("jaxlib:", getattr(jaxlib, "__version__", None), "at", getattr(jaxlib, "__file__", None))
-    print("xla_extension:", getattr(xe, "__file__", None))
-    print("has GpuAllocatorConfig:", hasattr(xe, "GpuAllocatorConfig"))
-    raise SystemExit(42)
-
-x = jnp.ones((1024, 1024), dtype=jnp.float32)
-y = (x @ x).block_until_ready()
-
-# ---- FIX: y.device may be a property (Device) or a method; handle both safely ----
-d = getattr(y, "device", None)
-dev = d() if callable(d) else d
-print("[ok] matmul ran on:", dev)
-PY
-echo "============================================"
 
 # ---------------- Install TensorBoard (persistently) ----------------
 echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
 
-if python - <<'"'"'PY'"'"'
+if python - <<'PY'
 import importlib.util
 ok = importlib.util.find_spec("tensorboard") is not None
 print("tensorboard already importable:", ok)
@@ -278,7 +201,7 @@ else
   python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
 fi
 
-python - <<'"'"'PY'"'"'
+python - <<'PY'
 import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
