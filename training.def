@@ -1,17 +1,17 @@
 Bootstrap: docker
-From: nvidia/cuda:12.5.1-devel-ubuntu24.04
+From: nvidia/cuda:12.4.1-devel-ubuntu24.04
 
 %labels
     Author        Daniel Zhu
-    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.5.1, Offline bulk deps + online JAX GPU)
+    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.4.1, offline deps + online JAX/Madrona)
 
 %files
     . /opt/src/MV_MAE_Implementation
 
 %post
-    set -e
+    set -euo pipefail
 
-    echo "=== [1] Installing base OS packages ==="
+    echo "=== [1] Base OS packages ==="
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         git build-essential cmake pkg-config curl ca-certificates \
@@ -23,12 +23,12 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
         python3 python3-venv python3-pip python3-dev
     rm -rf /var/lib/apt/lists/*
 
-    echo "=== [2] Creating Python venv ==="
+    echo "=== [2] Python venv ==="
     python3 -m venv /opt/mvmae_venv
     . /opt/mvmae_venv/bin/activate
     python -m pip install -U pip setuptools wheel uv
 
-    echo "=== [3] Configure offline wheelhouse for bulk deps ==="
+    echo "=== [3] Offline wheelhouse bulk deps ==="
     export TMPDIR=/opt/pip-tmp
     export PIP_CACHE_DIR=/opt/pip-cache
     export PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -38,56 +38,42 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
     REQ=/opt/src/MV_MAE_Implementation/requirements.txt
     WHL=/opt/src/MV_MAE_Implementation/wheelhouse
 
-    if [ ! -d "$WHL" ]; then
-        echo "[ERROR] Missing wheelhouse at $WHL"
-        exit 3
-    fi
-    if [ ! -f "$REQ" ]; then
-        echo "[ERROR] Missing requirements.txt at $REQ"
-        exit 2
-    fi
+    test -d "$WHL" || (echo "[ERROR] Missing wheelhouse at $WHL" && exit 3)
+    test -f "$REQ" || (echo "[ERROR] Missing requirements.txt at $REQ" && exit 2)
 
-    echo "=== [4] Installing Python deps (offline from wheelhouse) ==="
+    echo "=== [4] Install deps offline ==="
     python -m pip install --no-index --find-links "$WHL" -r "$REQ"
 
-    echo "=== [4b] Ensure pip doesn't later override torch/torchvision from PyPI ==="
-    # Your requirements include torch + torchvision. Those MUST come from your wheelhouse
-    # (GPU-enabled builds) to avoid accidentally ending up with CPU-only wheels.
-    # We keep build offline for bulk deps and only allow network for JAX/Madrona.
-    export PIP_NO_BUILD_ISOLATION=1
-
-    echo "=== [5] Installing JAX 0.4.36 with CUDA12 LOCAL wheels (GPU JAX) ==="
-    # Let uv talk to the network for this step
+    echo "=== [5] Install JAX GPU (online) ==="
     unset PIP_NO_INDEX
-    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
+    # This is the most stable install route for JAX GPU wheels.
+    uv pip install --upgrade "jax[cuda12]==0.4.36"
 
-    echo "=== [6] Build Madrona-MJX (geom_quat) ==="
+    echo "=== [6] Build Madrona-MJX ==="
     rm -rf /opt/madrona_mjx
     cd /opt
     git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
     cd /opt/madrona_mjx
-    echo "[post] Running: git submodule update --init --recursive"
     git submodule update --init --recursive
 
+    rm -rf build
     mkdir -p build
     cd build
-    cmake .. -DLOAD_VULKAN=OFF
+    cmake .. \
+      -DLOAD_VULKAN=OFF \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_ARCHITECTURES=89
     make -j"$(nproc)"
-    cd ..
 
-    # Editable install so Python can import madrona_mjx
+    echo "=== [7] Install madrona_mjx (one copy only) ==="
+    cd /opt/madrona_mjx
     uv pip install -e .
 
-    # Make compiled extension modules importable + ensure runtime finds Madrona libs
-    SITE_DIR="$(python -c 'import site; print(site.getsitepackages()[0])')"
-    echo "[post] site-packages: ${SITE_DIR}"
-    cp -v /opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so "${SITE_DIR}/"
-    cp -v /opt/madrona_mjx/build/_madrona_mjx_visualizer*.so "${SITE_DIR}/"
-
+    echo "=== [8] ldconfig for Madrona runtime libs ==="
     echo "/opt/madrona_mjx/build" > /etc/ld.so.conf.d/madrona_mjx.conf
     ldconfig
 
-    echo "=== [7] Auto-enable venv inside container ==="
+    echo "=== [9] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
     cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
 export VIRTUAL_ENV=/opt/mvmae_venv
@@ -99,44 +85,28 @@ EOS
     echo "=== Build Completed Successfully ==="
 
 %environment
-    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     export DISPLAY=:1
-    export HF_TOKEN=${HF_TOKEN:-}
-    export WANDB_API_KEY=${WANDB_API_KEY:-}
     export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
     export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+    # Critical: include CUDA targets dir (nvJitLink etc live here on many images)
+    export LD_LIBRARY_PATH="/opt/madrona_mjx/build:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}"
 
 %runscript
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        echo "GPU:"
-        nvidia-smi
-    fi
-
+    set -euo pipefail
     . /opt/mvmae_venv/bin/activate
+    cd /workspace 2>/dev/null || cd /opt/src
 
-    if [ -d "/workspace" ]; then
-        cd /workspace
-    else
-        cd /opt/src
-    fi
+    echo "=== [sanity] python/jax/jaxlib ==="
+    python -c "import sys,jax,jaxlib; print('py',sys.version); print('jax',jax.__version__,'jaxlib',jaxlib.__version__); print('devices',jax.devices())"
+
+    echo "=== [sanity] madrona .so path ==="
+    python -c "import madrona_mjx._madrona_mjx_batch_renderer as br; import os; print('so',br.__file__); print('mtime',os.path.getmtime(br.__file__))"
 
     echo "[MVMAE] Running training script..."
     exec python -m MV_MAE_Implementation.execute "$@"
 
 %help
-    Offline MV-MAE / DrQv2 / MJX + Madrona container.
-    - Bulk deps (torch, mujoco, etc.) from local wheelhouse.
-    - CUDA base image: 12.5.1 (Madrona-MJX supported range).
-    - JAX 0.4.36 with cuda12_local plugin installed from PyPI (GPU backend).
-    Dev workflow:
-      Bind your host repo root (the directory containing MV_MAE_Implementation/) to /workspace
-      and you can add/edit files without rebuilding the SIF.
-
     Build:
       apptainer build training.sif training.def
-
-    Run default training:
-      apptainer run --nv --bind "$PWD:/workspace" training.sif
-
-    Exec custom:
-      apptainer exec --nv --bind "$PWD:/workspace" training.sif python3
+    Run:
+      apptainer run --nv --cleanenv --bind "$PWD:/workspace" training.sif
