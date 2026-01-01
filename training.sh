@@ -177,6 +177,74 @@ print("[ok] _madrona_mjx_* resolved to compiled .so")
 PY
 echo "==============================================================="
 
+# ---------------- NEW: GPU sanity check (Torch + JAX + Madrona init) ----------------
+echo "=== GPU sanity check (Torch + JAX + Madrona) ==="
+python - <<'"'"'PY'"'"'
+import os, sys
+
+# ---- Torch CUDA smoke ----
+import torch
+print("[torch] version:", torch.__version__)
+print("[torch] cuda available:", torch.cuda.is_available())
+if not torch.cuda.is_available():
+    raise SystemExit("[torch] FATAL: torch.cuda.is_available() is False")
+print("[torch] gpu:", torch.cuda.get_device_name(0))
+x = torch.randn(1024, 1024, device="cuda")
+y = x @ x
+torch.cuda.synchronize()
+print("[torch] matmul ok")
+
+# ---- JAX CUDA smoke ----
+os.environ["JAX_PLATFORMS"] = os.environ.get("JAX_PLATFORMS", "cuda,cpu")
+import jax, jax.numpy as jnp
+print("[jax] version:", jax.__version__)
+print("[jax] devices:", jax.devices())
+if not any(d.platform in ("cuda", "gpu") for d in jax.devices()):
+    raise SystemExit("[jax] FATAL: no CUDA/GPU device visible to JAX")
+a = jnp.ones((1024, 1024), dtype=jnp.float32)
+b = (a @ a).block_until_ready()
+dev_attr = getattr(b, "device", None)
+dev = dev_attr() if callable(dev_attr) else dev_attr
+print("[jax] matmul ok on:", dev)
+
+# ---- Madrona init smoke (catches the custom-call / cuModuleGetFunction failure early) ----
+# This does NOT run your env; it only tries to import and initialize renderer pieces.
+import mujoco
+from madrona_mjx.renderer import BatchRenderer
+
+print("[madrona] MADRONA_MWGPU_KERNEL_CACHE:", os.environ.get("MADRONA_MWGPU_KERNEL_CACHE"))
+print("[madrona] MADRONA_BVH_KERNEL_CACHE  :", os.environ.get("MADRONA_BVH_KERNEL_CACHE"))
+
+# Minimal tiny model: use mujoco’s built-in small XML if available; otherwise a 1-body trivial MJCF.
+xml = """
+<mujoco>
+  <worldbody>
+    <body name="b" pos="0 0 0">
+      <geom type="sphere" size="0.05" rgba="0.7 0.2 0.2 1"/>
+      <camera name="cam" pos="0 0 0.5" quat="1 0 0 0"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+m = mujoco.MjModel.from_xml_string(xml)
+
+# One world, one cam, tiny render
+renderer = BatchRenderer(
+    m,
+    num_worlds=1,
+    num_cams=1,
+    render_width=8,
+    render_height=8,
+    use_rasterizer=False,  # raytracer path
+)
+
+# If init triggers your custom call issue, it will fail here (before training)
+tok = renderer.init()
+print("[madrona] init ok, token dtype/shape:", getattr(tok, "dtype", None), getattr(tok, "shape", None))
+print("[ok] GPU sanity check passed")
+PY
+echo "==============================================="
+
 # Run training
 stdbuf -oL -eL python -u execute.py 2>&1
 echo "Training completed."
