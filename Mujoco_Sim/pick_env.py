@@ -12,7 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Bring a box to a target and orientation."""
+
+"""Bring a box to a target and orientation.
+
+Key design for stability + speed:
+
+- Physics is JIT-friendly and does NOT render (see reset_physics / step_physics).
+- Rendering is always executed outside the physics JIT (see render_obs).
+- Public API remains the same: reset(...) and step(...), returning pixels in State.obs.
+
+This prevents the Madrona renderer custom-call from being traced/compiled as part of the
+big physics step, which is a common cause of the PJRT/XLA "cuModuleGetFunction invalid argument"
+failure and repeated backend_config warnings.
+"""
 
 from __future__ import annotations
 
@@ -21,11 +33,12 @@ from typing import Any, Dict, Optional, Union
 import contextlib
 import importlib.util
 import os
-
-# Reduce noisy XLA / CUDA log spam from custom calls (does not change behavior).
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-os.environ.setdefault("GLOG_minloglevel", "2")
 from pathlib import Path
+
+# Reduce noisy XLA logging (includes the "backend config ... non UTF-8" warnings).
+# This does not fix the underlying cause, but keeps logs readable.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "3")
 
 import jax
 import jax.numpy as jp
@@ -107,6 +120,21 @@ def adjust_brightness(img: jax.Array, scale: jax.Array) -> jax.Array:
     return jp.clip(img * scale, 0.0, 1.0)
 
 
+def _batched_body_xpos(data: mjx.Data, body_id: int) -> jax.Array:
+    """Returns body position as [B,3] if batched, else [3]."""
+    xpos = data.xpos
+    if hasattr(xpos, "ndim") and xpos.ndim == 3:
+        return xpos[:, body_id, :]
+    return xpos[body_id]
+
+
+def _any_nan(x: jax.Array) -> jax.Array:
+    if x.ndim <= 1:
+        return jp.any(jp.isnan(x))
+    axes = tuple(range(1, x.ndim))
+    return jp.any(jp.isnan(x), axis=axes)
+
+
 class StereoPickCube(panda.PandaBase):
     """Bring a box to a target."""
 
@@ -173,23 +201,8 @@ class StereoPickCube(panda.PandaBase):
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
-        # JIT-friendly wrappers around the Madrona custom calls.
-        # NOTE: mujoco.MjModel is a Python object; it is captured in the closure and treated as static.
-        self._render_init_fn = jax.jit(lambda state: self.renderer.init(state, self._mj_model))
-        self._render_raw_fn = jax.jit(lambda token, state: self.renderer.render(token, state, self._mj_model))
-
-        def _pixels_fn(token: jax.Array, state: mjx.Data, brightness: jax.Array) -> jax.Array:
-            # Custom call: returns (token_out, rgba, depth).
-            _, rgb, _ = self._render_raw_fn(token, state)
-            # Expect [B, 2, H, W, 4] (sometimes [2, B, ...]); normalize to [B, 2, ...].
-            if rgb.shape[0] == 2:
-                rgb = jp.swapaxes(rgb, 0, 1)
-            left = rgb[:, 0, ..., :3].astype(jp.float32) / 255.0
-            right = rgb[:, 1, ..., :3].astype(jp.float32) / 255.0
-            pixels = jp.concatenate([left, right], axis=2)  # [B, H, 2W, 3]
-            return adjust_brightness(pixels, brightness)
-
-        self._render_pixels_fn = jax.jit(_pixels_fn)
+        # Non-jitted render helper (matches probed signature: render(token, state, model))
+        self._render_fn = lambda token, data: self.renderer.render(token, data, self._mj_model)
 
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
@@ -198,9 +211,6 @@ class StereoPickCube(panda.PandaBase):
         self._sample_orientation = False
 
     def _create_renderer(self) -> BatchRenderer:
-        # IMPORTANT CONSISTENCY:
-        # - BatchRenderer constructed with MJX model (m=self._mjx_model)
-        # - init(...) / render(...) always take the MuJoCo MjModel (self._mj_model)
         enabled_geom_groups = np.asarray(
             self._config.vision_config.enabled_geom_groups, dtype=np.int32
         )
@@ -221,27 +231,23 @@ class StereoPickCube(panda.PandaBase):
         """Create a batched mjx.Data with leading batch axis B and overwrite qpos/qvel/ctrl."""
         m = self._mjx_model
 
-        # Template single-world data, then broadcast all leaves to [B, ...]
         data0 = mjx.make_data(m)
 
         def _batch_leaf(x):
             if not hasattr(x, "ndim"):
                 return x
-            # scalar -> [B]
             if x.ndim == 0:
                 return jp.broadcast_to(x, (B,))
-            # already batched?
             if x.shape[0] == B:
                 return x
             return jp.broadcast_to(x, (B,) + x.shape)
 
         data = jax.tree_util.tree_map(_batch_leaf, data0)
 
-        # Overwrite qpos/qvel/ctrl with our batched values
         nq = int(m.nq)
         nv = int(m.nv)
 
-        init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]  # (nq,)
+        init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
         qpos = jp.broadcast_to(init_q0, (B, nq))
 
         qvel = jp.zeros((B, nv), dtype=jp.float32)
@@ -252,9 +258,92 @@ class StereoPickCube(panda.PandaBase):
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
         return data
 
+    # -------------------------
+    # Rendering (always non-jit)
+    # -------------------------
+
+    def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
+        # Matches probed signature: render(token, state, model)
+        _, rgb, _ = self._render_fn(render_token, data_batched)
+
+        # Handle either [2, B, H, W, 4] or [B, 2, H, W, 4]
+        if rgb.shape[0] == 2:
+            left = rgb[0]
+            right = rgb[1]
+        else:
+            left = rgb[:, 0]
+            right = rgb[:, 1]
+
+        left = left[..., :3].astype(jp.float32) / 255.0
+        right = right[..., :3].astype(jp.float32) / 255.0
+
+        pixels = jp.concatenate([left, right], axis=2)  # [B, H, 2W, 3]
+        return pixels
+
+    def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
+        pixels = self.render_pixels(info["render_token"], data)
+        if "brightness" in info:
+            pixels = adjust_brightness(pixels, info["brightness"])
+        return info, pixels
+
+    def render_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
+        """Public non-jit rendering hook for wrappers: returns pixels [B,H,2W,3]."""
+        _, obs = self._get_obs(data, info)
+        return obs
+
+    # -------------------------
+    # Physics (JIT-friendly)
+    # -------------------------
+
+    def _ensure_render_token(self, data: mjx.Data, debug: bool) -> None:
+        """Initialize renderer token once per process (non-jit)."""
+        if self._render_token is not None:
+            return
+
+        if debug:
+            backend = jax.lib.xla_bridge.get_backend()
+            print("[diag] jax/jaxlib:", jax.__version__, jaxlib.__version__)
+            print("[diag] backend:", backend.platform, "|", backend.platform_version)
+            print("[diag] jaxlib file:", jaxlib.__file__, "mtime:", os.path.getmtime(jaxlib.__file__))
+
+            for name in [
+                "madrona_mjx._madrona_mjx_batch_renderer",
+                "madrona_mjx._madrona_mjx_visualizer",
+                "_madrona_mjx_batch_renderer",
+                "_madrona_mjx_visualizer",
+            ]:
+                spec = importlib.util.find_spec(name)
+                print("[diag]", name, "->", getattr(spec, "origin", None))
+
+            eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
+            print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype)
+            print("[diag] calling renderer.init ...")
+            print("init mj_model type:", type(self._mj_model), "has geom_quat:", hasattr(self._mj_model, "geom_quat"))
+            print("init mjx_model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
+
+        # Matches probed signature: init(state, model)
+        self._render_token, _, _ = self.renderer.init(data, self._mj_model)
+        jax.block_until_ready(self._render_token)
+
+        if debug:
+            print("[diag] render_token:", type(self._render_token),
+                  "dtype:", getattr(self._render_token, "dtype", None),
+                  "shape:", getattr(self._render_token, "shape", None))
+
+            # One-time smoke render (exactly like your original).
+            _, rgb, _ = self.renderer.render(self._render_token, data, self._mj_model)
+            jax.block_until_ready(rgb)
+            print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
+
+            canary = jp.zeros((1,), dtype=jp.float32)
+            jax.block_until_ready(canary)
+            print("[diag] post-render canary ok")
+
     def reset_physics(self, rng: jax.Array) -> State:
-        """Resets B worlds (B == render_batch_size) and initializes/caches the Madrona render token (no rendering)."""
-        # ---- Normalize RNG shape: [B, 2] ----
+        """Resets B worlds (B == render_batch_size) and ensures the render token exists.
+
+        Returns a State whose obs is a small placeholder. Use render_obs(...) to get pixels.
+        """
         if rng.ndim == 1:
             rng = rng[None, :]
         if rng.shape[0] != self.render_batch_size:
@@ -262,25 +351,22 @@ class StereoPickCube(panda.PandaBase):
 
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
 
-        # Keep device placement stable with the incoming rng
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
             m = self._mjx_model
             B = int(rng.shape[0])
 
             if debug:
-                print(f"[pick_env] reset: B={B} render_batch_size={self.render_batch_size}")
+                print(f"[pick_env] reset_physics: B={B} render_batch_size={self.render_batch_size}")
                 if dev is not None:
-                    print(f"[pick_env] reset device: {dev}")
+                    print(f"[pick_env] reset_physics device: {dev}")
 
-            # Split per-world RNG: main, box, target, brightness
             keys = jax.vmap(lambda k: jax.random.split(k, 4))(rng)
             rng_main = keys[:, 0, :]
             rng_box = keys[:, 1, :]
             rng_target = keys[:, 2, :]
             rng_brightness = keys[:, 3, :]
 
-            # Sample box + target positions (both [B, 3])
             min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
             max_box = jp.array([0.2, 0.2, 0.0], dtype=jp.float32)
             min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
@@ -293,85 +379,35 @@ class StereoPickCube(panda.PandaBase):
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)
 
-            # Build a batched Data tree and set showpiece qpos values
             data = self._make_batched_data(B)
 
-            # Set object position into qpos (batched)
             data = data.replace(
                 qpos=data.qpos.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
             )
 
-            # Set target mocap (batched).
             target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
             target_quat = jp.broadcast_to(target_quat0, (B, 4))
 
             mpos = data.mocap_pos
             mquat = data.mocap_quat
 
-            # Ensure mocap arrays are batched: [B, nmocap, 3] and [B, nmocap, 4]
-            if mpos.ndim == 2:  # (nmocap, 3)
+            if mpos.ndim == 2:
                 mpos = jp.broadcast_to(mpos, (B,) + mpos.shape)
-            if mquat.ndim == 2:  # (nmocap, 4)
+            if mquat.ndim == 2:
                 mquat = jp.broadcast_to(mquat, (B,) + mquat.shape)
 
             mpos = mpos.at[:, 0, :].set(target_pos)
             mquat = mquat.at[:, 0, :].set(target_quat)
             data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
 
-            # Forward so x* fields exist for rendering/rewards on the first step.
             data = jax.vmap(lambda d: mjx.forward(m, d))(data)
 
-            # Sample per-world brightness once per episode (shape [B, 1, 1, 1] for broadcasting).
             bmin, bmax = self._config.obs_noise.brightness
             brightness = jax.vmap(
                 lambda k: jax.random.uniform(k, (1,), minval=bmin, maxval=bmax)
             )(rng_brightness).reshape((B, 1, 1, 1))
 
-            # ---- Renderer init once (token cached across resets) ----
-            if self._render_token is None:
-                if debug:
-                    backend = jax.lib.xla_bridge.get_backend()
-                    print("[diag] jax/jaxlib:", jax.__version__, jaxlib.__version__)
-                    print("[diag] backend:", backend.platform, "|", backend.platform_version)
-                    print("[diag] jaxlib file:", jaxlib.__file__, "mtime:", os.path.getmtime(jaxlib.__file__))
-
-                    for name in [
-                        "madrona_mjx._madrona_mjx_batch_renderer",
-                        "madrona_mjx._madrona_mjx_visualizer",
-                        "_madrona_mjx_batch_renderer",
-                        "_madrona_mjx_visualizer",
-                    ]:
-                        spec = importlib.util.find_spec(name)
-                        print("[diag]", name, "->", getattr(spec, "origin", None))
-
-                    eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
-                    print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype)
-                    print("[diag] calling renderer.init ...")
-                    print("init mj_model type:", type(self._mj_model), "has geom_quat:", hasattr(self._mj_model, "geom_quat"))
-                    print("init mjx_model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
-
-                # CONSISTENT API USE: init(state_batched, mujoco_model)
-                self._render_token, _, _ = self._render_init_fn(data)
-                jax.block_until_ready(self._render_token)
-
-                if debug:
-                    print("[diag] render_token:", type(self._render_token),
-                          "dtype:", getattr(self._render_token, "dtype", None),
-                          "shape:", getattr(self._render_token, "shape", None))
-
-                    # CONSISTENT API USE: render(token, state_batched, mujoco_model)
-                    try:
-                        pix = self._render_pixels_fn(self._render_token, data, brightness)
-                        jax.block_until_ready(pix)
-                        print("[diag] smoke render ok:", pix.shape, pix.dtype)
-                    except Exception as e:
-                        print("[diag] smoke render FAILED:", type(e).__name__, e)
-                        raise
-
-                    canary = jp.zeros((1,), dtype=jp.float32)
-                    jax.block_until_ready(canary)
-                    print("[diag] post-render canary ok")
-
+            self._ensure_render_token(data, debug)
             render_token = self._render_token
 
             metrics = {
@@ -387,30 +423,15 @@ class StereoPickCube(panda.PandaBase):
                 "brightness": brightness,
             }
 
-
-            # Tiny placeholder obs to keep physics state lightweight; render separately via render_obs().
+            # Placeholder obs to keep physics state small.
             obs = jp.zeros((B, 1), dtype=jp.float32)
             reward = jp.zeros((B,), dtype=jp.float32)
             done = jp.zeros((B,), dtype=jp.float32)
 
             return State(data, obs, reward, done, metrics, info)
 
-
-    def render_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-        """Render float32 pixels in [0,1] with shape [B, H, 2W, 3]."""
-        token = info["render_token"]
-        brightness = info.get("brightness", None)
-        if brightness is None:
-            B = data.qpos.shape[0]
-            brightness = jp.ones((B, 1, 1, 1), dtype=jp.float32)
-        return self._render_pixels_fn(token, data, brightness)
-
-    def reset(self, rng: jax.Array) -> State:
-        """Compatibility reset: returns a state whose obs are pixels."""
-        state = self.reset_physics(rng)
-        pixels = self.render_obs(state.data, state.info)
-        return state.replace(obs=pixels)
-    def step(self, state: State, action: jax.Array) -> State:
+    def step_physics(self, state: State, action: jax.Array) -> State:
+        """JIT-friendly physics step. Does NOT render."""
         action_scale = self._config.action_scale
         delta = action * action_scale
         ctrl = state.data.ctrl + delta
@@ -422,50 +443,65 @@ class StereoPickCube(panda.PandaBase):
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in raw_rewards.items()}
         total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
-        box_pos = data.xpos[self._obj_body]
-        out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
-        out_of_bounds |= box_pos[2] < 0.0
+        box_pos = _batched_body_xpos(data, self._obj_body)
+        if box_pos.ndim == 2:
+            out_of_bounds = jp.any(jp.abs(box_pos) > 1.0, axis=1) | (box_pos[:, 2] < 0.0)
+        else:
+            out_of_bounds = jp.any(jp.abs(box_pos) > 1.0) | (box_pos[2] < 0.0)
 
-        metrics = dict(state.metrics)
-        metrics.update(
-            out_of_bounds=out_of_bounds.astype(jp.float32),
-            **{k: v for k, v in raw_rewards.items()},
-        )
+        new_metrics = dict(state.metrics)
+        new_metrics["out_of_bounds"] = out_of_bounds.astype(jp.float32)
+        for k, v in raw_rewards.items():
+            new_metrics[k] = v
 
-        done = out_of_bounds | jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
+        done = out_of_bounds | _any_nan(data.qpos) | _any_nan(data.qvel)
 
+        # Keep obs small in physics state.
+        obs = state.obs
 
         return state.replace(
             data=data,
-            obs=state.obs,
+            obs=obs,
             reward=total_reward,
             done=done.astype(jp.float32),
-            metrics=metrics,
+            metrics=new_metrics,
             info=info,
         )
 
+    # -------------------------
+    # Public API (same as before)
+    # -------------------------
+
+    def reset(self, rng: jax.Array) -> State:
+        """Public reset: physics reset + non-jit rendering -> pixels in obs."""
+        st = self.reset_physics(rng)
+        obs = self.render_obs(st.data, st.info)
+        return st.replace(obs=obs)
 
     def step(self, state: State, action: jax.Array) -> State:
-        """Compatibility step: runs physics then renders pixels into obs."""
-        state = self.step_physics(state, action)
-        pixels = self.render_obs(state.data, state.info)
-        return state.replace(obs=pixels)
+        """Public step: physics step + non-jit rendering -> pixels in obs."""
+        st = self.step_physics(state, action)
+        obs = self.render_obs(st.data, st.info)
+        return st.replace(obs=obs)
+
+    # -------------------------
+    # Rewards (unchanged, except robust body indexing)
+    # -------------------------
+
     def _get_reward(self, data: mjx.Data, info: dict[str, Any]):
-        box_pos = data.xpos[self._obj_body]
+        box_pos = _batched_body_xpos(data, self._obj_body)
         target_pos = info["target_pos"]
 
-        gripper_pos = data.xpos[self._hand_body]
-        d_gripper_box = jp.linalg.norm(gripper_pos - box_pos)
-        d_box_target = jp.linalg.norm(box_pos - target_pos)
+        gripper_pos = _batched_body_xpos(data, self._hand_body)
+        d_gripper_box = jp.linalg.norm(gripper_pos - box_pos, axis=-1)
+        d_box_target = jp.linalg.norm(box_pos - target_pos, axis=-1)
 
         reached_box = jp.minimum(info["reached_box"] + (d_gripper_box < 0.05), 1.0)
         info = {**info, "reached_box": reached_box}
 
-        # reward components
         gripper_box = 1.0 - jp.tanh(5.0 * d_gripper_box)
         box_target = reached_box * (1.0 - jp.tanh(5.0 * d_box_target))
 
-        # Penalize collision with the floor.
         floor_coll = jp.zeros_like(gripper_box)
         for sensor_id in self._floor_hand_found_sensor:
             floor_coll = floor_coll + (
@@ -473,7 +509,6 @@ class StereoPickCube(panda.PandaBase):
             ).astype(jp.float32)
         no_floor_collision = jp.where(floor_coll > 0, 0.0, 1.0)
 
-        # Penalize collision with box (hand-box contact sensor).
         hand_box = (
             data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
         )
@@ -487,27 +522,10 @@ class StereoPickCube(panda.PandaBase):
             robot_target_qpos=jp.zeros_like(gripper_box),
         )
         return info, raw_rewards
-    def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
-        """Low-level render helper (no RNG / info plumbing).
-
-        This uses the same jitted custom-call path as `render_obs`.
-        """
-        B = data_batched.qpos.shape[0]
-        brightness = jp.ones((B, 1, 1, 1), dtype=jp.float32)
-        return self._render_pixels_fn(render_token, data_batched, brightness)
-
-    def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
-        pixels = self.render_pixels(info["render_token"], data)
-        # Optional per-world brightness (default range is [1, 1], so this is a no-op unless configured).
-        if "brightness" in info:
-            pixels = adjust_brightness(pixels, info["brightness"])
-        return info, pixels
 
     def modify_model(self, mj_model: mujoco.MjModel):
-        # Expand floor size to non-zero so Madrona can render it
         mj_model.geom_size[mj_model.geom("floor").id, :2] = [5.0, 5.0]
 
-        # Make the finger pads white for increased visibility
         mesh_id = mj_model.mesh("finger_1").id
         geoms = [
             idx

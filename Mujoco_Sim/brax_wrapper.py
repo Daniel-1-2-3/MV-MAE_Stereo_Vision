@@ -12,7 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Wrappers for MuJoCo Playground environments that interop with torch."""
+
+"""Wrappers for MuJoCo Playground environments that interop with torch.
+
+This wrapper is optimized for your StereoPickCube:
+
+- Physics step is JIT'd (env.step_physics).
+- Rendering is NOT JIT'd and runs exactly like your smoke test path
+  (renderer.render called from Python, pixels returned as a JAX array).
+- The physics state stored inside the wrapper stays small (no pixel obs),
+  so you don't drag [B,H,2W,3] through the physics JIT every step.
+"""
 
 from collections import deque
 import functools
@@ -80,10 +90,12 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
 class RSLRLBraxWrapper(VecEnv):
     """Wrapper for MJX envs (JAX) that interop with torch/RSL-RL VecEnv.
 
-    Assumptions for your current pick_env:
-      - reset takes keys [B,2] and returns env_state.obs as pixels tensor [B,H,2W,3]
-      - step takes (state, action[B,act_dim]) and returns same
-      - env_state.info has 'truncation' [B] (0/1)
+    Assumptions for your StereoPickCube:
+      - env.reset_physics(keys [B,2]) -> State with small placeholder obs
+      - env.step_physics(State, action[B,act_dim]) -> State (no rendering)
+      - env.render_obs(data, info) -> pixels [B,H,2W,3]
+      - env.reset / env.step still exist and return pixels in obs for other users,
+        but this wrapper bypasses them for performance.
     """
 
     def __init__(
@@ -104,11 +116,9 @@ class RSLRLBraxWrapper(VecEnv):
         self._raw_env = env
         self.render_callback = render_callback
 
-        # ---- cfg plumbing (fix: never touch self.env before assignment) ----
         cfg = getattr(env, "_config", None) or getattr(env, "cfg", None)
         self.cfg = cfg if cfg is not None else {}
 
-        # ---- device / key ----
         self.seed = int(seed)
         self.batch_size = int(num_actors)
         self.num_envs = int(num_actors)
@@ -128,70 +138,65 @@ class RSLRLBraxWrapper(VecEnv):
         else:
             self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-        # split key into two for reset and randomization
         key_reset, key_randomization = jax.random.split(self.key)
         self.key_reset = jax.random.split(key_reset, self.batch_size)
 
-        # Optional domain randomization hook (kept as-is)
         if randomization_fn is not None:
             randomization_rng = jax.random.split(key_randomization, self.batch_size)
             self.v_randomization_fn = functools.partial(randomization_fn, rng=randomization_rng)
         else:
             self.v_randomization_fn = None
 
-        # ---- renderer hook (some codepaths expect this) ----
-        # pick_env exposes render_pixels(token, data) but wrapper usually doesn't call it directly.
-        self._render_pixels_fn = getattr(env, "render_pixels", None)
-
-        # ---- Observation metadata (do NOT eval_shape(reset)) ----
-        # We trust env to expose these attributes; else we fall back to placeholders.
+        # ---- Observation metadata (no eval_shape(reset)) ----
         H = int(getattr(env, "render_height", 0) or 0)
         W = int(getattr(env, "render_width", 0) or 0)
         C = 3
         if H > 0 and W > 0:
-            self.num_obs = H * (2 * W) * C  # metadata only
-            print(f"obs (env_state.obs) expected shape: [B, {H}, {2*W}, {C}]")
+            self.num_obs = H * (2 * W) * C
+            print(f"obs expected shape: [B, {H}, {2*W}, {C}]")
         else:
-            # Don’t break if attrs missing; num_obs used as metadata only.
             self.num_obs = 0
             print("obs shape metadata unknown (env has no render_height/render_width).")
 
-        # ---- Action space ----
         self.num_actions = int(getattr(env, "action_size"))
         self.max_episode_length = int(episode_length)
 
-        # stats queue
         self.success_queue = deque(maxlen=100)
 
-        # ---- JIT step; keep reset unjitted ----
-        print("JITing step")
-        # ---- JIT physics step only; render separately to avoid compiling Madrona custom calls inside the main step JIT ----
-        self.reset_fn = getattr(env, "reset_physics", env.reset)
-        self.step_fn = jax.jit(getattr(env, "step_physics", env.step))
-        self._use_separate_render = hasattr(env, "render_obs") and hasattr(env, "step_physics") and hasattr(env, "reset_physics")
+        # ---- Split physics and rendering ----
+        if not hasattr(env, "step_physics") or not hasattr(env, "reset_physics") or not hasattr(env, "render_obs"):
+            raise RuntimeError(
+                "Env must provide reset_physics / step_physics / render_obs for fast split execution."
+            )
 
-        print("Done JITing step")
+        self.reset_physics_fn = env.reset_physics  # keep unjitted (called infrequently)
+        self.step_physics_fn = jax.jit(env.step_physics)  # hot path: JIT physics
+        self.render_obs_fn = env.render_obs  # ALWAYS non-jit
 
+        print("JITing physics step (render stays non-jit)")
+        _ = self.step_physics_fn  # force attribute creation
+        print("Done JITing physics step")
+
+        # Store physics-only state (small obs).
         self.env_state = None
+
+    def _render_pixels(self):
+        # Non-jit render. Pixels are computed lazily; sync happens in _jax_to_torch.
+        return self.render_obs_fn(self.env_state.data, self.env_state.info)
 
     def step(self, action):
         if torch is None:
             raise ImportError("torch is required")
 
-        # action: torch tensor [B, num_actions]
         action = torch.clip(action, -1.0, 1.0)
         action = _torch_to_jax(action)
 
-        self.env_state = self.step_fn(self.env_state, action)
+        # JIT'd physics
+        self.env_state = self.step_physics_fn(self.env_state, action)
 
-        # ---- Observations ----
-        # For your pick_env: env_state.obs is pixels tensor [B,H,2W,3]
-        # Render pixels (jitted inside env) without carrying them through the physics state.
-        pixels = (
-            self.env.render_obs(self.env_state.data, self.env_state.info)
-            if getattr(self, "_use_separate_render", False)
-            else self.env_state.obs
-        )
+        # Non-jit render (smoke-test style)
+        pixels = self._render_pixels()
+
         obs_t = _jax_to_torch(pixels)
         obs = {"state": obs_t}
 
@@ -201,7 +206,6 @@ class RSLRLBraxWrapper(VecEnv):
         info = self.env_state.info
         trunc = info.get("truncation", None)
         if trunc is None:
-            # Keep code robust; but your env should provide it.
             trunc = jax.numpy.zeros_like(self.env_state.done)
         truncation = _jax_to_torch(trunc)
 
@@ -211,10 +215,8 @@ class RSLRLBraxWrapper(VecEnv):
             "log": {},
         }
 
-        # ---- Optional success metric (fix: avoid UnboundLocalError) ----
         last_episode_success_count = []
         if "last_episode_success_count" in info:
-            # only collect where done is true
             lec = _jax_to_torch(info["last_episode_success_count"])
             try:
                 lec_done = lec[done > 0].float().tolist()
@@ -229,37 +231,23 @@ class RSLRLBraxWrapper(VecEnv):
             float(np.mean(self.success_queue)) if len(self.success_queue) > 0 else 0.0
         )
 
-        # ---- Metrics passthrough ----
         for k, v in self.env_state.metrics.items():
             if k not in info_ret["log"]:
                 info_ret["log"][k] = _jax_to_torch(v).float().mean().item()
 
         if TensorDict is None:
-            # Fallback: return plain dict if tensordict not installed
             return obs, reward, done, info_ret
 
         obs_td = TensorDict(obs, batch_size=[self.num_envs])
         return obs_td, reward, done, info_ret
 
     def reset(self):
-        # Fresh per-env keys each reset
         self.key, key_reset = jax.random.split(self.key)
         self.key_reset = jax.random.split(key_reset, self.batch_size)
 
-        self.env_state = self.reset_fn(self.key_reset)
+        self.env_state = self.reset_physics_fn(self.key_reset)
 
-        # Render pixels (jitted inside env) without carrying them through the physics state.
-
-        pixels = (
-
-            self.env.render_obs(self.env_state.data, self.env_state.info)
-
-            if getattr(self, "_use_separate_render", False)
-
-            else self.env_state.obs
-
-        )
-
+        pixels = self._render_pixels()
         obs_t = _jax_to_torch(pixels)
         obs = {"state": obs_t}
 
