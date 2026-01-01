@@ -37,7 +37,6 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
 import jaxlib
-import madrona_mjx # type: ignore
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
@@ -315,13 +314,16 @@ class StereoPickCube(panda.PandaBase):
                     print("[diag] jaxlib file:", jaxlib.__file__, "mtime:", os.path.getmtime(jaxlib.__file__))
 
                     # Find the actual compiled .so for madrona_mjx (not just __init__.py)
-                    import importlib
-                    for name in ["_madrona_mjx_batch_renderer", "_madrona_mjx_visualizer"]:
-                        try:
-                            m = importlib.import_module(name)
-                            print("[diag]", name, "->", m.__file__)
-                        except Exception as e:
-                            print("[diag]", name, "FAILED:", e)
+                    import importlib.util
+
+                    for name in [
+                        "madrona_mjx._madrona_mjx_batch_renderer",
+                        "madrona_mjx._madrona_mjx_visualizer",
+                        "_madrona_mjx_batch_renderer",
+                        "_madrona_mjx_visualizer",
+                    ]:
+                        spec = importlib.util.find_spec(name)
+                        print("[diag]", name, "->", getattr(spec, "origin", None))
 
                     # Also log the dtype you pass into the renderer config (int64 here is a common footgun)
                     eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
