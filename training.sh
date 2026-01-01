@@ -242,6 +242,13 @@ print("[madrona] MADRONA_BVH_KERNEL_CACHE  :", os.environ.get("MADRONA_BVH_KERNE
 PY
 echo "==============================================="
 
+python - <<'PY'
+import inspect
+from madrona_mjx.renderer import BatchRenderer
+print("BatchRenderer.init :", inspect.signature(BatchRenderer.init))
+print("BatchRenderer.render:", inspect.signature(BatchRenderer.render))
+PY
+
 # Run training
 stdbuf -oL -eL python -u execute.py 2>&1
 echo "Training completed."
