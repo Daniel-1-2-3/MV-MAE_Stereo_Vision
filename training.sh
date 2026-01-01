@@ -239,29 +239,7 @@ from madrona_mjx.renderer import BatchRenderer
 
 print("[madrona] MADRONA_MWGPU_KERNEL_CACHE:", os.environ.get("MADRONA_MWGPU_KERNEL_CACHE"))
 print("[madrona] MADRONA_BVH_KERNEL_CACHE  :", os.environ.get("MADRONA_BVH_KERNEL_CACHE"))
-
-# Minimal tiny model: use mujoco’s built-in small XML if available; otherwise a 1-body trivial MJCF.
-xml = """
-<mujoco>
-  <worldbody>
-    <body name="b" pos="0 0 0">
-      <geom type="sphere" size="0.05" rgba="0.7 0.2 0.2 1"/>
-      <camera name="cam" pos="0 0 0.5" quat="1 0 0 0"/>
-    </body>
-  </worldbody>
-</mujoco>
-"""
-m = mujoco.MjModel.from_xml_string(xml)
-
-# One world, one cam, tiny render
-renderer = BatchRenderer(
-    m,
-    gpu_id=0,
-    num_worlds=1,
-    batch_render_view_width=8,
-    batch_render_view_height=8,
-    use_rasterizer=False,  # raytracer path
-)
+PY
 echo "==============================================="
 
 # Run training
