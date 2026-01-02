@@ -319,11 +319,15 @@ class StereoPickCube(panda.PandaBase):
             self._init_vmap = jax.vmap(
                 lambda d, m: self.renderer.init(d, m),
                 in_axes=(0, self._v_mjx_in_axes),
+                out_axes=(None, 0, 0),   # token is scalar, images are batched
             )
+
             self._render_vmap = jax.vmap(
                 lambda t, d, m: self.renderer.render(t, d, m),
-                in_axes=(0, 0, self._v_mjx_in_axes),
+                in_axes=(None, 0, self._v_mjx_in_axes),  # token is NOT mapped
+                out_axes=(None, 0, 0),                   # token stays scalar
             )
+
 
         if debug:
             backend = jax.lib.xla_bridge.get_backend()
@@ -356,6 +360,7 @@ class StereoPickCube(panda.PandaBase):
             # One-time smoke render (also vmapped). Thread token properly.
             new_token, rgb, _ = self._render_vmap(self._render_token, data_batched, self._v_mjx_model)
             self._render_token = new_token
+            print("render_token value:", jax.device_get(self._render_token).item())
             jax.block_until_ready(rgb)
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
 
