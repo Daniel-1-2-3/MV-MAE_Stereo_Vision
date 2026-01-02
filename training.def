@@ -51,15 +51,24 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
     python -m pip install --no-index --find-links "$WHL" -r "$REQ"
 
     echo "=== [4b] Ensure pip doesn't later override torch/torchvision from PyPI ==="
-    # Your requirements include torch + torchvision. Those MUST come from your wheelhouse
-    # (GPU-enabled builds) to avoid accidentally ending up with CPU-only wheels.
-    # We keep build offline for bulk deps and only allow network for JAX/Madrona.
     export PIP_NO_BUILD_ISOLATION=1
 
-    echo "=== [5] Installing JAX 0.4.36 with CUDA12 LOCAL wheels (GPU JAX) ==="
-    # Let uv talk to the network for this step
+    echo "=== [5] Installing JAX 0.4.36 + CUDA12 plugin/pjrt explicitly ==="
     unset PIP_NO_INDEX
-    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
+    uv pip install --upgrade \
+      "jax==0.4.36" \
+      "jaxlib==0.4.36" \
+      "jax-cuda12-plugin==0.4.36" \
+      "jax-cuda12-pjrt==0.4.36"
+
+    echo "=== [5b] Build-time JAX GPU sanity check (should see a CudaDevice) ==="
+    python - <<'PY'
+import os
+os.environ["JAX_PLATFORMS"] = "cuda,cpu"
+import jax
+print("jax:", jax.__version__)
+print("devices:", jax.devices())
+PY
 
     echo "=== [6] Build Madrona-MJX (geom_quat) ==="
     rm -rf /opt/madrona_mjx
@@ -78,14 +87,21 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
     # Editable install so Python can import madrona_mjx
     uv pip install -e .
 
-    # Make compiled extension modules importable + ensure runtime finds Madrona libs
-    SITE_DIR="$(python -c 'import site; print(site.getsitepackages()[0])')"
-    echo "[post] site-packages: ${SITE_DIR}"
-    cp -v /opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so "${SITE_DIR}/"
-    cp -v /opt/madrona_mjx/build/_madrona_mjx_visualizer*.so "${SITE_DIR}/"
+    # IMPORTANT: DO NOT copy _madrona_* into site-packages (prevents nanobind double-load).
+    # Keep extensions only under madrona_mjx package imports.
 
     echo "/opt/madrona_mjx/build" > /etc/ld.so.conf.d/madrona_mjx.conf
     ldconfig
+
+    echo "=== [6b] Build-time Madrona import sanity check (package-only) ==="
+    python - <<'PY'
+import importlib.util
+import madrona_mjx, madrona_mjx.renderer
+print("madrona_mjx:", madrona_mjx.__file__)
+print("renderer   :", madrona_mjx.renderer.__file__)
+print("top-level _madrona batch:", importlib.util.find_spec("_madrona_mjx_batch_renderer"))
+print("pkg _madrona batch      :", importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer").origin)
+PY
 
     echo "=== [7] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
@@ -93,6 +109,9 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
+# Strongly encourage GPU first; you can still fall back to CPU
+export JAX_PLATFORMS="cuda,cpu"
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 EOS
     chmod 644 /.singularity.d/env/99-autovenv.sh
 
@@ -105,6 +124,7 @@ EOS
     export WANDB_API_KEY=${WANDB_API_KEY:-}
     export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
     export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+    export JAX_PLATFORMS="cuda,cpu"
 
 %runscript
     if command -v nvidia-smi >/dev/null 2>&1; then
@@ -122,21 +142,3 @@ EOS
 
     echo "[MVMAE] Running training script..."
     exec python -m MV_MAE_Implementation.execute "$@"
-
-%help
-    Offline MV-MAE / DrQv2 / MJX + Madrona container.
-    - Bulk deps (torch, mujoco, etc.) from local wheelhouse.
-    - CUDA base image: 12.5.1 (Madrona-MJX supported range).
-    - JAX 0.4.36 with cuda12_local plugin installed from PyPI (GPU backend).
-    Dev workflow:
-      Bind your host repo root (the directory containing MV_MAE_Implementation/) to /workspace
-      and you can add/edit files without rebuilding the SIF.
-
-    Build:
-      apptainer build training.sif training.def
-
-    Run default training:
-      apptainer run --nv --bind "$PWD:/workspace" training.sif
-
-    Exec custom:
-      apptainer exec --nv --bind "$PWD:/workspace" training.sif python3
