@@ -96,6 +96,11 @@ apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
+# Force CUDA 12.5 nvJitLink (fixes undefined symbol __nvJitLinkCreate_12_5)
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
+export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12:${LD_PRELOAD:-}"
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+
 echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
