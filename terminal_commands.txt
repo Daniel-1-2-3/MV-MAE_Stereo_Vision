@@ -1,1 +1,52 @@
-use prev version
+##### Creating wheelhouse for offline build, and building the .sif file
+python3 -m venv .whvenv
+source .whvenv/bin/activate
+python -m pip install -U pip
+
+rm -rf wheelhouse
+mkdir -p wheelhouse
+
+python -m pip download \
+  --only-binary=:all: --prefer-binary \
+  --platform manylinux2014_x86_64 \
+  --implementation cp \
+  --abi cp312 \
+  --python-version 312 \
+  --index-url https://pypi.org/simple \
+  --extra-index-url https://download.pytorch.org/whl/cu121 \
+  -r requirements.txt \
+  -d wheelhouse
+
+deactivate
+
+ls -lh wheelhouse | head
+SCRATCH=/scratch/$USER/apptainer_build
+mkdir -p "$SCRATCH/cache" "$SCRATCH/tmp"
+
+export APPTAINER_CACHEDIR="$SCRATCH/cache"
+export APPTAINER_TMPDIR="$SCRATCH/tmp"
+export SINGULARITY_CACHEDIR="$APPTAINER_CACHEDIR"
+export SINGULARITY_TMPDIR="$APPTAINER_TMPDIR"
+
+# Pick version 2
+apptainer cache clean --type=all --force || true
+apptainer build training.sif training.def
+
+##### Cluster training commands
+
+### Start training
+chmod +x training.sh
+sbatch training.sh
+
+### Live updates on file, tailing the last 30 lines, update every 0.5 secs
+watch -n 0.5 'tail -n 30 training-[NUMBER].out'
+
+##### Take log files from SSH and put in local computer. Run this on regular cmd, not in wsl
+scp -r `
+  ameypore@killarney.alliancecan.ca:/home/ameypore/scratch/daniel/MV-MAE_Stereo_Vision/logs `
+  "C:\Daniel\High School\Research\MV_MAE_Implementation"
+
+##### Force pull from Github
+git fetch origin
+git reset --hard origin/main
+git clean -fd

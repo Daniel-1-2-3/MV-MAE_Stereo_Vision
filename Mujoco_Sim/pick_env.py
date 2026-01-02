@@ -320,69 +320,67 @@ class StereoPickCube(panda.PandaBase):
     def reset_physics(self, rng: jax.Array) -> State:
         """Single-world reset. Intended to be vmapped externally for batch."""
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
-        dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
-        with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
-            m = self._mjx_model
-            rng, rng_box, rng_target, rng_brightness = jax.random.split(rng, 4)
+        m = self._mjx_model
+        rng, rng_box, rng_target, rng_brightness = jax.random.split(rng, 4)
 
-            min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
-            max_box = jp.array([0.2, 0.2, 0.0], dtype=jp.float32)
-            min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
-            max_tgt = jp.array([0.2, 0.2, 0.4], dtype=jp.float32)
-            base = jp.asarray(self._init_obj_pos, dtype=jp.float32)
+        min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
+        max_box = jp.array([0.2, 0.2, 0.0], dtype=jp.float32)
+        min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
+        max_tgt = jp.array([0.2, 0.2, 0.4], dtype=jp.float32)
+        base = jp.asarray(self._init_obj_pos, dtype=jp.float32)
 
-            def _sample_pos(key, mn, mx):
-                return jax.random.uniform(key, (3,), minval=mn, maxval=mx) + base
+        def _sample_pos(key, mn, mx):
+            return jax.random.uniform(key, (3,), minval=mn, maxval=mx) + base
 
-            box_pos = _sample_pos(rng_box, min_box, max_box)
-            target_pos = _sample_pos(rng_target, min_tgt, max_tgt)
+        box_pos = _sample_pos(rng_box, min_box, max_box)
+        target_pos = _sample_pos(rng_target, min_tgt, max_tgt)
 
-            data = mjx.make_data(m)
+        data = mjx.make_data(m)
 
-            # Initialize to home pose (same logic as before)
-            nq = int(m.nq)
-            nv = int(m.nv)
-            qpos0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
-            qvel0 = jp.zeros((nv,), dtype=jp.float32)
-            ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
-            data = data.replace(qpos=qpos0, qvel=qvel0, ctrl=ctrl0)
+        # Initialize to home pose (same logic as before)
+        nq = int(m.nq)
+        nv = int(m.nv)
+        qpos0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
+        qvel0 = jp.zeros((nv,), dtype=jp.float32)
+        ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
+        data = data.replace(qpos=qpos0, qvel=qvel0, ctrl=ctrl0)
 
-            # Place box
-            data = data.replace(
-                qpos=data.qpos.at[self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
-            )
+        # Place box
+        data = data.replace(
+            qpos=data.qpos.at[self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
+        )
 
-            # Set mocap target (camera / target)
-            target_quat = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
-            mpos = data.mocap_pos
-            mquat = data.mocap_quat
-            mpos = mpos.at[0, :].set(target_pos)
-            mquat = mquat.at[0, :].set(target_quat)
-            data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
+        # Set mocap target (camera / target)
+        target_quat = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
+        mpos = data.mocap_pos
+        mquat = data.mocap_quat
+        mpos = mpos.at[0, :].set(target_pos)
+        mquat = mquat.at[0, :].set(target_quat)
+        data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
 
-            data = mjx.forward(m, data)
+        data = mjx.forward(m, data)
 
-            bmin, bmax = self._config.obs_noise.brightness
-            brightness = jax.random.uniform(rng_brightness, (1,), minval=bmin, maxval=bmax).reshape((1, 1, 1))
+        bmin, bmax = self._config.obs_noise.brightness
+        brightness = jax.random.uniform(rng_brightness, (1,), minval=bmin, maxval=bmax).reshape((1, 1, 1))
 
-            metrics = {
-                "out_of_bounds": jp.array(0.0, dtype=jp.float32),
-                **{k: jp.array(0.0, dtype=jp.float32) for k in self._config.reward_config.scales.keys()},
-            }
-            info = {
-                "rng": rng,
-                "target_pos": target_pos,
-                "reached_box": jp.array(0.0, dtype=jp.float32),
-                "truncation": jp.array(0.0, dtype=jp.float32),
-                "brightness": brightness,
-            }
+        metrics = {
+            "out_of_bounds": jp.array(0.0, dtype=jp.float32),
+            **{k: jp.array(0.0, dtype=jp.float32) for k in self._config.reward_config.scales.keys()},
+        }
+        info = {
+            "rng": rng,
+            "target_pos": target_pos,
+            "reached_box": jp.array(0.0, dtype=jp.float32),
+            "truncation": jp.array(0.0, dtype=jp.float32),
+            "brightness": brightness,
+        }
 
-            # Placeholder obs to keep physics state small.
-            obs = jp.zeros((1,), dtype=jp.float32)
-            reward = jp.array(0.0, dtype=jp.float32)
-            done = jp.array(0.0, dtype=jp.float32)
+        # Placeholder obs to keep physics state small.
+        obs = jp.zeros((1,), dtype=jp.float32)
+        reward = jp.array(0.0, dtype=jp.float32)
+        done = jp.array(0.0, dtype=jp.float32)
 
-            return State(data, obs, reward, done, metrics, info)
+        return State(data, obs, reward, done, metrics, info)
 
     def step_physics(self, state: State, action: jax.Array) -> State:
         """Single-world physics step. Intended to be vmapped externally for batch."""
