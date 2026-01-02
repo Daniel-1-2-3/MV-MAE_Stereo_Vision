@@ -125,13 +125,11 @@ def _batched_body_xpos(data: mjx.Data, body_id: int) -> jax.Array:
         return xpos[:, body_id, :]
     return xpos[body_id]
 
-
 def _any_nan(x: jax.Array) -> jax.Array:
     if x.ndim <= 1:
         return jp.any(jp.isnan(x))
     axes = tuple(range(1, x.ndim))
     return jp.any(jp.isnan(x), axis=axes)
-
 
 def _broadcast_tree_to_batch(tree, B: int):
     """Broadcast a pytree of arrays/scalars to a leading batch dim B."""
@@ -218,6 +216,9 @@ class StereoPickCube(panda.PandaBase):
 
         # ---- Task post init ----
         self._post_init(obj_name="box", keyframe="low_home")
+        
+        _hand_geom_id = self._mj_model.geom("hand_capsule").id
+        self._hand_body = int(self._mj_model.geom_bodyid[_hand_geom_id])
 
         # ---- Floor collision geom ids ----
         self._floor_hand_geom_ids = [
