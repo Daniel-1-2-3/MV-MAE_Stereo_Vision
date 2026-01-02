@@ -146,13 +146,33 @@ print("pkg viz       :", None if s_pkg_vz is None else s_pkg_vz.origin)
 PY
 echo "=========================================================="
 
-echo "=== [CONTAINER] list any top-level _madrona_* sitting in site-packages ==="
+echo "=== [CONTAINER] auto-disable any TOP-LEVEL _madrona_* in site-packages ==="
 python - <<'"'"'PY'"'"'
-import site, glob, os
-paths = []
+import site, glob, os, time, importlib.util
+ts = time.strftime("%Y%m%d_%H%M%S")
+moved = []
 for sp in site.getsitepackages():
-  paths += glob.glob(os.path.join(sp, "_madrona_mjx_*"))
-print("\n".join(paths) if paths else "(none)")
+  for pat in ("_madrona_mjx_batch_renderer*.so", "_madrona_mjx_visualizer*.so"):
+    for p in glob.glob(os.path.join(sp, pat)):
+      newp = p + f".disabled_{ts}"
+      os.rename(p, newp)
+      moved.append((p, newp))
+if not moved:
+  print("(none found to disable)")
+else:
+  for old, new in moved:
+    print("disabled:", old)
+    print("      ->:", new)
+
+s_top = importlib.util.find_spec("_madrona_mjx_batch_renderer")
+s_pkg = importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer")
+print("after disable | top-level batch:", None if s_top is None else s_top.origin)
+print("after disable | pkg batch     :", None if s_pkg is None else s_pkg.origin)
+
+s_top_vz = importlib.util.find_spec("_madrona_mjx_visualizer")
+s_pkg_vz = importlib.util.find_spec("madrona_mjx._madrona_mjx_visualizer")
+print("after disable | top-level viz :", None if s_top_vz is None else s_top_vz.origin)
+print("after disable | pkg viz       :", None if s_pkg_vz is None else s_pkg_vz.origin)
 PY
 echo "======================================================================="
 
