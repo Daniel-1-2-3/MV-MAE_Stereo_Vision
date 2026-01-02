@@ -50,7 +50,6 @@ except ImportError:
 def _jax_to_torch(tensor):
     """Zero-copy JAX->Torch via DLPack (device stays on GPU)."""
     import torch.utils.dlpack as tpack  # pytype: disable=import-error # pylint: disable=import-outside-toplevel
-    tensor = jax.block_until_ready(tensor)
     return tpack.from_dlpack(tensor)
 
 
@@ -237,28 +236,8 @@ class RSLRLBraxWrapper(VecEnv):
         info_ret = {
             "time_outs": truncation,
             "observations": {"critic": None},
-            "log": {},
+            "log": {},  # keep empty in hot path
         }
-
-        last_episode_success_count = []
-        if "last_episode_success_count" in info:
-            lec = _jax_to_torch(info["last_episode_success_count"])
-            try:
-                lec_done = lec[done > 0].float().tolist()
-            except Exception:
-                lec_done = []
-            last_episode_success_count = lec_done
-
-        if len(last_episode_success_count) > 0:
-            self.success_queue.extend(last_episode_success_count)
-
-        info_ret["log"]["last_episode_success_count"] = (
-            float(np.mean(self.success_queue)) if len(self.success_queue) > 0 else 0.0
-        )
-
-        for k, v in self.env_state.metrics.items():
-            if k not in info_ret["log"]:
-                info_ret["log"][k] = _jax_to_torch(v).float().mean().item()
 
         if TensorDict is None:
             return obs, reward, done, info_ret

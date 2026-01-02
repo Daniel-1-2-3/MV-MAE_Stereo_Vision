@@ -108,7 +108,7 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 export PYTHONUNBUFFERED=1
 export JAX_TRACEBACK_FILTERING=off
-export PICK_ENV_DEBUG=1
+export PICK_ENV_DEBUG=0
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 
 echo "=== [CONTAINER] preflight env snapshot ==="
