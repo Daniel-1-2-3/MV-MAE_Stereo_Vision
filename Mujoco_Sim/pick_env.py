@@ -15,15 +15,15 @@
 
 """Bring a box to a target and orientation.
 
-Key design for stability + speed:
+This version mirrors the *working* approach you showed:
 
-- Physics is JIT-friendly and does NOT render (see reset_physics / step_physics).
-- Rendering is always executed outside the physics JIT (see render_obs).
-- Public API remains the same: reset(...) and step(...), returning pixels in State.obs.
+- **Env physics is single-world** (reset_physics / step_physics take one world).
+- **Batching happens outside the env** via `jax.vmap` in the wrapper.
+- **Renderer is never traced** into the physics JIT: rendering happens from Python
+  using the exact `renderer.init` / `renderer.render` call pattern.
 
-This prevents the Madrona renderer custom-call from being traced/compiled as part of the
-big physics step, which is a common cause of the PJRT/XLA "cuModuleGetFunction invalid argument"
-failure and repeated backend_config warnings.
+Public reset/step still exist for convenience; they render by temporarily broadcasting
+a single world to `render_batch_size` and returning only the first image (slow path).
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ import os
 from pathlib import Path
 
 # Reduce noisy XLA logging (includes the "backend config ... non UTF-8" warnings).
-# This does not fix the underlying cause, but keeps logs readable.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("GLOG_minloglevel", "3")
 
@@ -52,7 +51,6 @@ from mujoco.mjx._src import math
 from Custom_Mujoco_Playground._src import mjx_env
 from Custom_Mujoco_Playground._src.mjx_env import State
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
-from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_kinematics
 
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
@@ -135,6 +133,17 @@ def _any_nan(x: jax.Array) -> jax.Array:
     return jp.any(jp.isnan(x), axis=axes)
 
 
+def _broadcast_tree_to_batch(tree, B: int):
+    """Broadcast a pytree of arrays/scalars to a leading batch dim B."""
+    def _bcast(x):
+        if not hasattr(x, "ndim"):
+            return x
+        if x.ndim == 0:
+            return jp.broadcast_to(x, (B,))
+        return jp.broadcast_to(x, (B,) + x.shape)
+    return jax.tree_util.tree_map(_bcast, tree)
+
+
 class StereoPickCube(panda.PandaBase):
     """Bring a box to a target."""
 
@@ -146,7 +155,7 @@ class StereoPickCube(panda.PandaBase):
         render_width: int = 64,
         render_height: int = 64,
     ):
-        # ---- Render params ----
+        # ---- Render params (num_worlds for Madrona) ----
         self.render_batch_size = int(render_batch_size)
         self.render_width = int(render_width)
         self.render_height = int(render_height)
@@ -197,7 +206,7 @@ class StereoPickCube(panda.PandaBase):
         ]
         self._floor_geom_id = self._mj_model.geom("floor").id
 
-        # ---- Renderer: create now, init token lazily in reset_physics() ----
+        # ---- Renderer: create now, init token lazily (outside jit) ----
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
@@ -226,37 +235,6 @@ class StereoPickCube(panda.PandaBase):
             use_rasterizer=bool(self._config.vision_config.use_rasterizer),
             viz_gpu_hdls=None,
         )
-
-    def _make_batched_data(self, B: int) -> mjx.Data:
-        """Create a batched mjx.Data with leading batch axis B and overwrite qpos/qvel/ctrl."""
-        m = self._mjx_model
-
-        data0 = mjx.make_data(m)
-
-        def _batch_leaf(x):
-            if not hasattr(x, "ndim"):
-                return x
-            if x.ndim == 0:
-                return jp.broadcast_to(x, (B,))
-            if x.shape[0] == B:
-                return x
-            return jp.broadcast_to(x, (B,) + x.shape)
-
-        data = jax.tree_util.tree_map(_batch_leaf, data0)
-
-        nq = int(m.nq)
-        nv = int(m.nv)
-
-        init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
-        qpos = jp.broadcast_to(init_q0, (B, nq))
-
-        qvel = jp.zeros((B, nv), dtype=jp.float32)
-
-        ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
-        ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
-
-        data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
-        return data
 
     # -------------------------
     # Rendering (always non-jit)
@@ -287,15 +265,11 @@ class StereoPickCube(panda.PandaBase):
         return info, pixels
 
     def render_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-        """Public non-jit rendering hook for wrappers: returns pixels [B,H,2W,3]."""
+        """Public non-jit rendering hook: returns pixels [B,H,2W,3]."""
         _, obs = self._get_obs(data, info)
         return obs
 
-    # -------------------------
-    # Physics (JIT-friendly)
-    # -------------------------
-
-    def _ensure_render_token(self, data: mjx.Data, debug: bool) -> None:
+    def _ensure_render_token(self, data_batched: mjx.Data, debug: bool) -> None:
         """Initialize renderer token once per process (non-jit)."""
         if self._render_token is not None:
             return
@@ -322,7 +296,7 @@ class StereoPickCube(panda.PandaBase):
             print("init mjx_model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
 
         # Matches probed signature: init(state, model)
-        self._render_token, _, _ = self.renderer.init(data, self._mj_model)
+        self._render_token, _, _ = self.renderer.init(data_batched, self._mj_model)
         jax.block_until_ready(self._render_token)
 
         if debug:
@@ -330,8 +304,8 @@ class StereoPickCube(panda.PandaBase):
                   "dtype:", getattr(self._render_token, "dtype", None),
                   "shape:", getattr(self._render_token, "shape", None))
 
-            # One-time smoke render (exactly like your original).
-            _, rgb, _ = self.renderer.render(self._render_token, data, self._mj_model)
+            # One-time smoke render
+            _, rgb, _ = self.renderer.render(self._render_token, data_batched, self._mj_model)
             jax.block_until_ready(rgb)
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
 
@@ -339,38 +313,17 @@ class StereoPickCube(panda.PandaBase):
             jax.block_until_ready(canary)
             print("[diag] post-render canary ok")
 
+    # -------------------------
+    # Physics (single-world, JIT-friendly)
+    # -------------------------
+
     def reset_physics(self, rng: jax.Array) -> State:
-        """Resets B worlds (B == render_batch_size) and ensures the render token exists.
-
-        Returns a State whose obs is a small placeholder. Use render_obs(...) to get pixels.
-        """
-        if rng.ndim == 1:
-            rng = rng[None, :]
-        if rng.shape[0] != self.render_batch_size:
-            rng = jax.random.split(rng[0], self.render_batch_size)
-
+        """Single-world reset. Intended to be vmapped externally for batch."""
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
-
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
             m = self._mjx_model
-            # Force B to be a concrete Python int (NOT a tracer)
-            B = rng.shape[0]
-            if hasattr(B, "dtype") or hasattr(B, "aval"):
-                B = int(B.item())
-            else:
-                B = int(B)
-
-            if debug:
-                print(f"[pick_env] reset_physics: B={B} render_batch_size={self.render_batch_size}")
-                if dev is not None:
-                    print(f"[pick_env] reset_physics device: {dev}")
-
-            keys = jax.vmap(lambda k: jax.random.split(k, 4))(rng)
-            rng_main = keys[:, 0, :]
-            rng_box = keys[:, 1, :]
-            rng_target = keys[:, 2, :]
-            rng_brightness = keys[:, 3, :]
+            rng, rng_box, rng_target, rng_brightness = jax.random.split(rng, 4)
 
             min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
             max_box = jp.array([0.2, 0.2, 0.0], dtype=jp.float32)
@@ -381,60 +334,58 @@ class StereoPickCube(panda.PandaBase):
             def _sample_pos(key, mn, mx):
                 return jax.random.uniform(key, (3,), minval=mn, maxval=mx) + base
 
-            box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)
-            target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)
+            box_pos = _sample_pos(rng_box, min_box, max_box)
+            target_pos = _sample_pos(rng_target, min_tgt, max_tgt)
 
-            data = self._make_batched_data(B)
+            data = mjx.make_data(m)
 
+            # Initialize to home pose (same logic as before)
+            nq = int(m.nq)
+            nv = int(m.nv)
+            qpos0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
+            qvel0 = jp.zeros((nv,), dtype=jp.float32)
+            ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
+            data = data.replace(qpos=qpos0, qvel=qvel0, ctrl=ctrl0)
+
+            # Place box
             data = data.replace(
-                qpos=data.qpos.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
+                qpos=data.qpos.at[self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
             )
 
-            target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
-            target_quat = jp.broadcast_to(target_quat0, (B, 4))
-
+            # Set mocap target (camera / target)
+            target_quat = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
             mpos = data.mocap_pos
             mquat = data.mocap_quat
-
-            if mpos.ndim == 2:
-                mpos = jp.broadcast_to(mpos, (B,) + mpos.shape)
-            if mquat.ndim == 2:
-                mquat = jp.broadcast_to(mquat, (B,) + mquat.shape)
-
-            mpos = mpos.at[:, 0, :].set(target_pos)
-            mquat = mquat.at[:, 0, :].set(target_quat)
+            mpos = mpos.at[0, :].set(target_pos)
+            mquat = mquat.at[0, :].set(target_quat)
             data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
 
-            data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+            data = mjx.forward(m, data)
 
             bmin, bmax = self._config.obs_noise.brightness
-            brightness = jax.vmap(
-                lambda k: jax.random.uniform(k, (1,), minval=bmin, maxval=bmax)
-            )(rng_brightness).reshape((B, 1, 1, 1))
-
-            self._ensure_render_token(data, debug)
+            brightness = jax.random.uniform(rng_brightness, (1,), minval=bmin, maxval=bmax).reshape((1, 1, 1))
 
             metrics = {
-                "out_of_bounds": jp.zeros((B,), dtype=jp.float32),
-                **{k: jp.zeros((B,), dtype=jp.float32) for k in self._config.reward_config.scales.keys()},
+                "out_of_bounds": jp.array(0.0, dtype=jp.float32),
+                **{k: jp.array(0.0, dtype=jp.float32) for k in self._config.reward_config.scales.keys()},
             }
             info = {
-                "rng": rng_main,
+                "rng": rng,
                 "target_pos": target_pos,
-                "reached_box": jp.zeros((B,), dtype=jp.float32),
-                "truncation": jp.zeros((B,), dtype=jp.float32),
+                "reached_box": jp.array(0.0, dtype=jp.float32),
+                "truncation": jp.array(0.0, dtype=jp.float32),
                 "brightness": brightness,
             }
 
             # Placeholder obs to keep physics state small.
-            obs = jp.zeros((int(B), 1), dtype=jp.float32)
-            reward = jp.zeros((int(B),), dtype=jp.float32)
-            done = jp.zeros((int(B),), dtype=jp.float32)
+            obs = jp.zeros((1,), dtype=jp.float32)
+            reward = jp.array(0.0, dtype=jp.float32)
+            done = jp.array(0.0, dtype=jp.float32)
 
             return State(data, obs, reward, done, metrics, info)
 
     def step_physics(self, state: State, action: jax.Array) -> State:
-        """JIT-friendly physics step. Does NOT render."""
+        """Single-world physics step. Intended to be vmapped externally for batch."""
         action_scale = self._config.action_scale
         delta = action * action_scale
         ctrl = state.data.ctrl + delta
@@ -446,18 +397,15 @@ class StereoPickCube(panda.PandaBase):
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in raw_rewards.items()}
         total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
-        box_pos = _batched_body_xpos(data, self._obj_body)
-        if box_pos.ndim == 2:
-            out_of_bounds = jp.any(jp.abs(box_pos) > 1.0, axis=1) | (box_pos[:, 2] < 0.0)
-        else:
-            out_of_bounds = jp.any(jp.abs(box_pos) > 1.0) | (box_pos[2] < 0.0)
+        box_pos = _batched_body_xpos(data, self._obj_body)  # [3] in single-world
+        out_of_bounds = jp.any(jp.abs(box_pos) > 1.0) | (box_pos[2] < 0.0)
 
         new_metrics = dict(state.metrics)
         new_metrics["out_of_bounds"] = out_of_bounds.astype(jp.float32)
         for k, v in raw_rewards.items():
             new_metrics[k] = v
 
-        done = out_of_bounds | _any_nan(data.qpos) | _any_nan(data.qvel)
+        done = out_of_bounds | jp.any(jp.isnan(data.qpos)) | jp.any(jp.isnan(data.qvel))
 
         # Keep obs small in physics state.
         obs = state.obs
@@ -472,21 +420,44 @@ class StereoPickCube(panda.PandaBase):
         )
 
     # -------------------------
-    # Public API (same as before)
+    # Public API (slow path, keeps compatibility)
     # -------------------------
 
     def reset(self, rng: jax.Array) -> State:
-        """Public reset: physics reset + non-jit rendering -> pixels in obs."""
-        st = self.reset_physics(rng)
-        print('finished reset physics')
-        obs = self.render_obs(st.data, st.info)
-        return st.replace(obs=obs)
+        """Public reset: single-world physics + broadcasted render -> pixels in obs (slow)."""
+        st1 = self.reset_physics(rng)
+
+        # Broadcast a single world to num_worlds for renderer, then return only world 0 image.
+        B = self.render_batch_size
+        data_b = _broadcast_tree_to_batch(st1.data, B)
+        info_b = _broadcast_tree_to_batch(st1.info, B)
+        # brightness should be [B,1,1,1] for adjust_brightness
+        if "brightness" in info_b:
+            b = info_b["brightness"]
+            if b.ndim == 3:
+                info_b["brightness"] = b.reshape((B, 1, 1, 1))
+
+        debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
+        self._ensure_render_token(data_b, debug)
+        obs_b = self.render_obs(data_b, info_b)  # [B,H,2W,3]
+        return st1.replace(obs=obs_b[0])
 
     def step(self, state: State, action: jax.Array) -> State:
-        """Public step: physics step + non-jit rendering -> pixels in obs."""
-        st = self.step_physics(state, action)
-        obs = self.render_obs(st.data, st.info)
-        return st.replace(obs=obs)
+        """Public step: single-world physics + broadcasted render -> pixels in obs (slow)."""
+        st1 = self.step_physics(state, action)
+
+        B = self.render_batch_size
+        data_b = _broadcast_tree_to_batch(st1.data, B)
+        info_b = _broadcast_tree_to_batch(st1.info, B)
+        if "brightness" in info_b:
+            b = info_b["brightness"]
+            if b.ndim == 3:
+                info_b["brightness"] = b.reshape((B, 1, 1, 1))
+
+        debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
+        self._ensure_render_token(data_b, debug)
+        obs_b = self.render_obs(data_b, info_b)
+        return st1.replace(obs=obs_b[0])
 
     # -------------------------
     # Rewards (unchanged, except robust body indexing)

@@ -15,19 +15,18 @@
 
 """Wrappers for MuJoCo Playground environments that interop with torch.
 
-This wrapper is optimized for your StereoPickCube:
+This version mirrors the *working* approach you showed:
 
-- Physics step is JIT'd (env.step_physics).
-- Rendering is NOT JIT'd and runs exactly like your smoke test path
-  (renderer.render called from Python, pixels returned as a JAX array).
-- The physics state stored inside the wrapper stays small (no pixel obs),
-  so you don't drag [B,H,2W,3] through the physics JIT every step.
+- The environment's physics methods are **single-world**.
+- The wrapper does the batching with `jax.vmap`.
+- Only the **batched physics step** is JIT'd.
+- Rendering happens from Python via `env.render_obs(...)` and is never traced into XLA.
 """
 
 from collections import deque
 import functools
 import os
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, Callable
 
 import jax
 import numpy as np
@@ -90,12 +89,16 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
 class RSLRLBraxWrapper(VecEnv):
     """Wrapper for MJX envs (JAX) that interop with torch/RSL-RL VecEnv.
 
-    Assumptions for your StereoPickCube:
-      - env.reset_physics(keys [B,2]) -> State with small placeholder obs
-      - env.step_physics(State, action[B,act_dim]) -> State (no rendering)
-      - env.render_obs(data, info) -> pixels [B,H,2W,3]
-      - env.reset / env.step still exist and return pixels in obs for other users,
-        but this wrapper bypasses them for performance.
+    Expected env interface (single-world physics):
+      - env.reset_physics(key[2]) -> State (single-world, small placeholder obs)
+      - env.step_physics(State, action[act_dim]) -> State (single-world, no rendering)
+      - env.render_obs(data_batched, info_batched) -> pixels [B,H,2W,3]
+      - env._ensure_render_token(data_batched, debug) -> initializes renderer token (non-jit)
+
+    This wrapper:
+      - vmaps reset_physics / step_physics to create a batch of size B
+      - jits only the vmapped step_physics (hot path)
+      - renders outside jit
     """
 
     def __init__(
@@ -123,6 +126,13 @@ class RSLRLBraxWrapper(VecEnv):
         self.batch_size = int(num_actors)
         self.num_envs = int(num_actors)
 
+        # The Madrona renderer is constructed with a fixed num_worlds.
+        # To mirror the working setup, ensure wrapper batch size matches env.render_batch_size.
+        if hasattr(env, "render_batch_size") and int(getattr(env, "render_batch_size")) != self.batch_size:
+            raise ValueError(
+                f"num_actors (batch_size)={self.batch_size} must equal env.render_batch_size={int(getattr(env, 'render_batch_size'))} for Madrona."
+            )
+
         self.key = jax.random.PRNGKey(self.seed)
 
         if device_rank is not None:
@@ -147,7 +157,7 @@ class RSLRLBraxWrapper(VecEnv):
         else:
             self.v_randomization_fn = None
 
-        # ---- Observation metadata (no eval_shape(reset)) ----
+        # ---- Observation metadata ----
         H = int(getattr(env, "render_height", 0) or 0)
         W = int(getattr(env, "render_width", 0) or 0)
         C = 3
@@ -166,22 +176,37 @@ class RSLRLBraxWrapper(VecEnv):
         # ---- Split physics and rendering ----
         if not hasattr(env, "step_physics") or not hasattr(env, "reset_physics") or not hasattr(env, "render_obs"):
             raise RuntimeError(
-                "Env must provide reset_physics / step_physics / render_obs for fast split execution."
+                "Env must provide reset_physics / step_physics / render_obs for split execution."
             )
 
-        self.reset_physics_fn = env.reset_physics  # keep unjitted (called infrequently)
-        self.step_physics_fn = jax.jit(env.step_physics)  # hot path: JIT physics
+        # Batched reset: vmap single-world reset over keys[B,2]
+        def _reset_batched(keys):
+            return jax.vmap(self.env.reset_physics)(keys)
+
+        # Batched step: vmap single-world step over state/action
+        def _step_batched(state, action):
+            return jax.vmap(self.env.step_physics, in_axes=(0, 0))(state, action)
+
+        self.reset_physics_fn = _reset_batched  # keep unjitted (called infrequently)
+        self.step_physics_fn = jax.jit(_step_batched)  # hot path: JIT vmapped physics
         self.render_obs_fn = env.render_obs  # ALWAYS non-jit
 
-        print("JITing physics step (render stays non-jit)")
+        print("JITing batched physics step (render stays non-jit)")
         _ = self.step_physics_fn  # force attribute creation
-        print("Done JITing physics step")
+        print("Done JITing batched physics step")
 
         # Store physics-only state (small obs).
         self.env_state = None
 
+    def _ensure_renderer(self):
+        # Initialize renderer token once, using current batched state.
+        if hasattr(self.env, "_ensure_render_token") and self.env_state is not None:
+            debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
+            self.env._ensure_render_token(self.env_state.data, debug)  # pylint: disable=protected-access
+
     def _render_pixels(self):
         # Non-jit render. Pixels are computed lazily; sync happens in _jax_to_torch.
+        self._ensure_renderer()
         return self.render_obs_fn(self.env_state.data, self.env_state.info)
 
     def step(self, action):
@@ -191,7 +216,7 @@ class RSLRLBraxWrapper(VecEnv):
         action = torch.clip(action, -1.0, 1.0)
         action = _torch_to_jax(action)
 
-        # JIT'd physics
+        # JIT'd batched physics
         self.env_state = self.step_physics_fn(self.env_state, action)
 
         # Non-jit render (smoke-test style)
@@ -258,18 +283,3 @@ class RSLRLBraxWrapper(VecEnv):
 
     def get_observations(self):
         return self.reset()
-
-    def render(self, mode="human"):  # pylint: disable=unused-argument
-        if self.render_callback is not None:
-            self.render_callback(self.env.env.env, self.env_state)
-        else:
-            raise ValueError("No render callback specified")
-
-    def get_number_of_agents(self):
-        return 1
-
-    def get_env_info(self):
-        info = {}
-        info["action_space"] = self.action_space  # pytype: disable=attribute-error
-        info["observation_space"] = self.observation_space  # pytype: disable=attribute-error
-        return info
