@@ -275,12 +275,16 @@ class StereoPickCube(panda.PandaBase):
 
     def render_pixels(self, data_batched: mjx.Data) -> jax.Array:
         if self._render_token is None:
+            print('token again')
             self._ensure_render_token(data_batched, debug=False)
 
         # IMPORTANT: call the renderer custom call standalone
+        print('entered render_pixels')
         new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
+        print('render done')
 
         pixels = self._postprocess_rgb(rgb)
+        print('postprocess done')
 
         self._render_token = new_token
         return pixels
@@ -300,6 +304,7 @@ class StereoPickCube(panda.PandaBase):
 
     def render_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
         """Public non-jit rendering hook: returns pixels [B,H,2W,3]."""
+        print('entered render obs')
         _, obs = self._get_obs(data, info)
         return obs
 
@@ -469,6 +474,7 @@ class StereoPickCube(panda.PandaBase):
 
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
         self._ensure_render_token(data_b, debug)
+        print('ensure render token done')
         obs_b = self.render_obs(data_b, info_b)  # [B,H,2W,3]
         return st1.replace(obs=obs_b[0])
 
