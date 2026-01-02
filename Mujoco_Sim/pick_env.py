@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Union
 
-import contextlib
 import importlib.util
 import os
 from pathlib import Path
@@ -46,7 +45,6 @@ import mujoco
 import numpy as np
 from ml_collections import config_dict
 from mujoco import mjx
-from mujoco.mjx._src import math
 
 from Custom_Mujoco_Playground._src import mjx_env
 from Custom_Mujoco_Playground._src.mjx_env import State
@@ -125,11 +123,6 @@ def _batched_body_xpos(data: mjx.Data, body_id: int) -> jax.Array:
         return xpos[:, body_id, :]
     return xpos[body_id]
 
-def _any_nan(x: jax.Array) -> jax.Array:
-    if x.ndim <= 1:
-        return jp.any(jp.isnan(x))
-    axes = tuple(range(1, x.ndim))
-    return jp.any(jp.isnan(x), axis=axes)
 
 def _broadcast_tree_to_batch(tree, B: int):
     """Broadcast a pytree of arrays/scalars to a leading batch dim B."""
@@ -140,26 +133,6 @@ def _broadcast_tree_to_batch(tree, B: int):
             return jp.broadcast_to(x, (B,))
         return jp.broadcast_to(x, (B,) + x.shape)
     return jax.tree_util.tree_map(_bcast, tree)
-
-
-def _batch_model_for_vmap(model, B: int):
-    """Create a per-world batched MJX model + matching in_axes pytree for vmap.
-
-    Important: we ONLY batch array leaves with ndim>=1. Scalars / 0d stay static (in_axes=None).
-    """
-    def _bcast(x):
-        if hasattr(x, "ndim") and x.ndim >= 1:
-            return jp.broadcast_to(x, (B,) + x.shape)
-        return x
-
-    def _in_axes(x):
-        if hasattr(x, "ndim") and x.ndim >= 1:
-            return 0
-        return None
-
-    model_b = jax.tree_util.tree_map(_bcast, model)
-    in_axes = jax.tree_util.tree_map(_in_axes, model)
-    return model_b, in_axes
 
 
 class StereoPickCube(panda.PandaBase):
@@ -216,55 +189,37 @@ class StereoPickCube(panda.PandaBase):
 
         # ---- Task post init ----
         self._post_init(obj_name="box", keyframe="low_home")
-        
-        # ---- REQUIRED: ids used by rewards ----
 
-        # Hand body id (used by _get_reward)
+        # ---- REQUIRED: ids used by rewards ----
         _hand_geom_id = self._mj_model.geom("hand_capsule").id
         self._hand_body = int(self._mj_model.geom_bodyid[_hand_geom_id])
 
-        # Floor collision geom ids (kept; you already had these)
-        self._floor_hand_geom_ids = [
-            self._mj_model.geom(geom).id
-            for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
-        ]
-        self._floor_geom_id = self._mj_model.geom("floor").id
-
-        # Sensor ids used by _get_reward (floor contact + hand-box contact)
-        # We resolve by name so this doesn't depend on hardcoding exact ids.
         sensor_names = [self._mj_model.sensor(i).name for i in range(self._mj_model.nsensor)]
 
-        def _find_sensor_ids(any_terms, must_terms=()):
-            ids = []
-            for i, n in enumerate(sensor_names):
-                nl = n.lower()
-                if any(t in nl for t in any_terms) and all(t in nl for t in must_terms):
-                    ids.append(i)
-            return ids
-
-        # Floor-hand sensors: look for sensors mentioning floor AND (hand/finger/gripper)
         floor_ids = []
         for i, n in enumerate(sensor_names):
             nl = n.lower()
             if ("floor" in nl) and (("hand" in nl) or ("finger" in nl) or ("gripper" in nl)):
                 floor_ids.append(i)
 
-        # Fallbacks if floor ids are named differently
         if not floor_ids:
-            # Common patterns: "touch_floor_*" / "*_floor_touch"
-            floor_ids = _find_sensor_ids(any_terms=("floor",), must_terms=())
+            # fallback: any floor sensor at all
+            for i, n in enumerate(sensor_names):
+                if "floor" in n.lower():
+                    floor_ids.append(i)
 
-        # Hand-box sensor: look for sensor mentioning (box/cube/object) AND (hand/finger/gripper)
         box_hand_ids = []
         for i, n in enumerate(sensor_names):
             nl = n.lower()
             if (("box" in nl) or ("cube" in nl) or ("object" in nl)) and (("hand" in nl) or ("finger" in nl) or ("gripper" in nl)):
                 box_hand_ids.append(i)
 
-        # Fallback: if you only have a single "hand_touch" style sensor, at least don't crash
-        # (keeps logic structure; if your XML truly lacks these sensors, rewards can't use them anyway)
         if not box_hand_ids:
-            box_hand_ids = _find_sensor_ids(any_terms=("hand", "finger", "gripper"), must_terms=())
+            # fallback: any hand/finger/gripper touch-like sensor
+            for i, n in enumerate(sensor_names):
+                nl = n.lower()
+                if ("hand" in nl) or ("finger" in nl) or ("gripper" in nl):
+                    box_hand_ids.append(i)
 
         self._floor_hand_found_sensor = [int(i) for i in floor_ids]
         self._box_hand_found_sensor = int(box_hand_ids[0]) if box_hand_ids else -1
@@ -281,11 +236,18 @@ class StereoPickCube(panda.PandaBase):
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
-        # ---- Renderer vmap wrappers (LAZY, created on first init) ----
-        self._v_mjx_model = None
-        self._v_mjx_in_axes = None
-        self._init_vmap = None
-        self._render_vmap = None
+        # JIT-compiled render+postprocess (kept separate from physics jit)
+        self._render_call_jit = jax.jit(self._render_call)
+
+    # ---- IMPORTANT: prevent base-class observation_size from tracing reset() ----
+    @property
+    def observation_shape(self) -> tuple[int, int, int]:
+        return (int(self.render_height), int(2 * self.render_width), 3)
+
+    @property
+    def observation_size(self) -> int:
+        h, w, c = self.observation_shape
+        return int(h * w * c)
 
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
@@ -315,35 +277,32 @@ class StereoPickCube(panda.PandaBase):
     # -------------------------
 
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
-        # Ensure wrappers exist (they are created inside _ensure_render_token)
-        if self._render_vmap is None or self._v_mjx_model is None:
-            # This should normally be called by reset/step before rendering
+        # Ensure token exists (non-jit)
+        if self._render_token is None:
             self._ensure_render_token(data_batched, debug=False)
 
-        # Correct: vmap render over (token_i, data_i, model_i)
-        new_token, rgb, _depth = self._render_vmap(render_token, data_batched, self._v_mjx_model)
-
-        # Thread token for side-effect sequencing
+        # Single compiled call: (token, data) -> (token, pixels)
+        new_token, pixels = self._render_call_jit(self._render_token, data_batched)
         self._render_token = new_token
-
-        # Expect rgb as [B, num_cams, H, W, 4] (or occasionally [num_cams, B, ...])
-        B = int(getattr(data_batched.geom_xpos, "shape", [0])[0])
-
-        # Handle camera/world axis swap defensively
-        if rgb.ndim == 5 and rgb.shape[0] == 2 and rgb.shape[1] == B:
-            # [2, B, H, W, 4]
-            left = rgb[0]
-            right = rgb[1]
-        else:
-            # [B, 2, H, W, 4] expected
-            left = rgb[:, 0]
-            right = rgb[:, 1]
-
-        left = left[..., :3].astype(jp.float32) / 255.0
-        right = right[..., :3].astype(jp.float32) / 255.0
-
-        pixels = jp.concatenate([left, right], axis=2)  # [B, H, 2W, 3]
         return pixels
+
+
+    def _render_call(self, render_token: jax.Array, data_batched: mjx.Data) -> tuple[jax.Array, jax.Array]:
+        """Pure JAX render function: safe to jit (no Python side effects).
+
+        Returns:
+            new_token: token output from renderer.render
+            pixels: float32 pixels in [0,1], shape [B, H, 2W, 3]
+        """
+        new_token, rgb, _depth = self.renderer.render(render_token, data_batched, self._mjx_model)
+
+        # Expected rgb shape: [B, 2, H, W, 4] uint8
+        left = rgb[:, 0, :, :, :3].astype(jp.float32)
+        right = rgb[:, 1, :, :, :3].astype(jp.float32)
+
+        pixels = jp.concatenate([left, right], axis=2) / 255.0  # [B, H, 2W, 3]
+        return new_token, pixels
+
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
         pixels = self.render_pixels(self._render_token, data)
@@ -358,27 +317,23 @@ class StereoPickCube(panda.PandaBase):
 
     def _ensure_render_token(self, data_batched: mjx.Data, debug: bool) -> None:
         """Initialize renderer token once per process (non-jit)."""
-        if self._render_token is not None and self._init_vmap is not None and self._render_vmap is not None:
+        if self._render_token is not None:
             return
 
-        # Build per-world model + vmap wrappers once
-        if self._init_vmap is None or self._render_vmap is None or self._v_mjx_model is None:
-            B = int(self.render_batch_size)
-            self._v_mjx_model, self._v_mjx_in_axes = _batch_model_for_vmap(self._mjx_model, B)
-
-            # vmap over worlds: init(state_i, model_i) and render(token_i, state_i, model_i)
-            self._init_vmap = jax.vmap(
-                lambda d, m: self.renderer.init(d, m),
-                in_axes=(0, self._v_mjx_in_axes),
-                out_axes=(None, 0, 0),   # token is scalar, images are batched
+        # Sanity: Madrona renderer num_worlds must match the batched data leading dim.
+        bshape = getattr(data_batched.geom_xpos, "shape", None)
+        if bshape is None or len(bshape) < 1:
+            raise ValueError("render requires batched mjx.Data with leading dim = num_worlds")
+        B = int(bshape[0])
+        if B != int(self.render_batch_size):
+            raise ValueError(
+                f"Batched data has B={B} worlds but StereoPickCube(render_batch_size)={int(self.render_batch_size)}. "
+                "Make them equal (usually set render_batch_size=num_envs)."
             )
 
-            self._render_vmap = jax.vmap(
-                lambda t, d, m: self.renderer.render(t, d, m),
-                in_axes=(None, 0, self._v_mjx_in_axes),  # token is NOT mapped
-                out_axes=(None, 0, 0),                   # token stays scalar
-            )
-
+        # ONE batched init call (data_batched leading dim must equal num_worlds)
+        render_token, _init_rgb, _init_depth = self.renderer.init(data_batched, self._mjx_model)
+        self._render_token = render_token
 
         if debug:
             backend = jax.lib.xla_bridge.get_backend()
@@ -397,21 +352,15 @@ class StereoPickCube(panda.PandaBase):
 
             eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
             print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype)
-            print("[diag] calling renderer.init(vmap) ...")
             print("init mj_model type:", type(self._mj_model), "has geom_quat:", hasattr(self._mj_model, "geom_quat"))
             print("init mjx_model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
             print("[diag] data.geom_xpos shape:", getattr(data_batched.geom_xpos, "shape", None))
+            # Do NOT .item() / device_get here (that breaks under tracing). Just print shape/dtype.
+            print("[diag] render_token shape/dtype:", getattr(self._render_token, "shape", None), getattr(self._render_token, "dtype", None))
 
-        # Correct: vmap init across worlds, and pass MJX model (batched)
-        render_token, _init_rgb, _init_depth = self._init_vmap(data_batched, self._v_mjx_model)
-        self._render_token = render_token
-        jax.block_until_ready(self._render_token)
-
-        if debug:
-            # One-time smoke render (also vmapped). Thread token properly.
-            new_token, rgb, _ = self._render_vmap(self._render_token, data_batched, self._v_mjx_model)
+            # smoke render is OK in real execution (non-jit); keep it lightweight
+            new_token, rgb, _ = self.renderer.render(self._render_token, data_batched, self._mjx_model)
             self._render_token = new_token
-            print("render_token value:", jax.device_get(self._render_token).item())
             jax.block_until_ready(rgb)
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
 
@@ -421,7 +370,6 @@ class StereoPickCube(panda.PandaBase):
 
     def reset_physics(self, rng: jax.Array) -> State:
         """Single-world reset. Intended to be vmapped externally for batch."""
-        debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
         m = self._mjx_model
         rng, rng_box, rng_target, rng_brightness = jax.random.split(rng, 4)
 
@@ -439,7 +387,6 @@ class StereoPickCube(panda.PandaBase):
 
         data = mjx.make_data(m)
 
-        # Initialize to home pose (same logic as before)
         nq = int(m.nq)
         nv = int(m.nv)
         qpos0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]
@@ -452,12 +399,10 @@ class StereoPickCube(panda.PandaBase):
             qpos=data.qpos.at[self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
         )
 
-        # Set mocap target (camera / target)
+        # Set mocap target
         target_quat = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
-        mpos = data.mocap_pos
-        mquat = data.mocap_quat
-        mpos = mpos.at[0, :].set(target_pos)
-        mquat = mquat.at[0, :].set(target_quat)
+        mpos = data.mocap_pos.at[0, :].set(target_pos)
+        mquat = data.mocap_quat.at[0, :].set(target_quat)
         data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
 
         data = mjx.forward(m, data)
@@ -480,7 +425,7 @@ class StereoPickCube(panda.PandaBase):
         # Placeholder obs to keep physics state small.
         obs = jp.zeros((1,), dtype=jp.float32)
         reward = jp.array(0.0, dtype=jp.float32)
-        done = jp.array(0.0, dtype=jp.float32)
+        done = jp.array(False)
 
         return State(data, obs, reward, done, metrics, info)
 
@@ -497,7 +442,7 @@ class StereoPickCube(panda.PandaBase):
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in raw_rewards.items()}
         total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
-        box_pos = _batched_body_xpos(data, self._obj_body)  # [3] in single-world
+        box_pos = _batched_body_xpos(data, self._obj_body)  # [3] single-world
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0) | (box_pos[2] < 0.0)
 
         new_metrics = dict(state.metrics)
@@ -507,12 +452,9 @@ class StereoPickCube(panda.PandaBase):
 
         done = out_of_bounds | jp.any(jp.isnan(data.qpos)) | jp.any(jp.isnan(data.qvel))
 
-        # Keep obs small in physics state.
-        obs = state.obs
-
         return state.replace(
             data=data,
-            obs=obs,
+            obs=state.obs,  # keep placeholder obs
             reward=total_reward,
             done=done.astype(jp.float32),
             metrics=new_metrics,
@@ -527,14 +469,14 @@ class StereoPickCube(panda.PandaBase):
         """Public reset: single-world physics + broadcasted render -> pixels in obs (slow)."""
         st1 = self.reset_physics(rng)
 
-        # Broadcast a single world to num_worlds for renderer, then return only world 0 image.
         B = self.render_batch_size
         data_b = _broadcast_tree_to_batch(st1.data, B)
         info_b = _broadcast_tree_to_batch(st1.info, B)
+
         # brightness should be [B,1,1,1] for adjust_brightness
         if "brightness" in info_b:
             b = info_b["brightness"]
-            if b.ndim == 3:
+            if hasattr(b, "ndim") and b.ndim == 3:
                 info_b["brightness"] = b.reshape((B, 1, 1, 1))
 
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
@@ -549,9 +491,10 @@ class StereoPickCube(panda.PandaBase):
         B = self.render_batch_size
         data_b = _broadcast_tree_to_batch(st1.data, B)
         info_b = _broadcast_tree_to_batch(st1.info, B)
+
         if "brightness" in info_b:
             b = info_b["brightness"]
-            if b.ndim == 3:
+            if hasattr(b, "ndim") and b.ndim == 3:
                 info_b["brightness"] = b.reshape((B, 1, 1, 1))
 
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
@@ -560,7 +503,7 @@ class StereoPickCube(panda.PandaBase):
         return st1.replace(obs=obs_b[0])
 
     # -------------------------
-    # Rewards (unchanged, except robust body indexing)
+    # Rewards
     # -------------------------
 
     def _get_reward(self, data: mjx.Data, info: dict[str, Any]):

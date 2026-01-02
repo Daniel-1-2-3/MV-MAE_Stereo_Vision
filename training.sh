@@ -92,8 +92,13 @@ set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
 # ---- CUDA / nvJitLink: make dynamic linking unambiguous ----
+# Put targets dir FIRST, then lib64, then madrona build.
 export LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib64:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
+
+# Force the exact nvJitLink we built against (prevents host/driver copy from being chosen)
 export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12"
+
+# JAX needs to find the toolkit, too
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 # -----------------------------------------------------------
 
@@ -141,6 +146,9 @@ print("devices:", jax.devices())
 PY
 echo "==================================="
 
+# ------------------------------
+# ADDED: JAX/JAXLIB + plugin probe
+# ------------------------------
 echo "=== [CONTAINER] JAX/JAXLIB/plugin version probe ==="
 python - <<'"'"'PY'"'"'
 import jax, jaxlib
@@ -160,23 +168,6 @@ except Exception as e:
     print("print_environment_info failed:", e)
 PY
 echo "===================================================="
-
-# ------------------------------
-# ADDED (1): JAX CUDA/cuDNN build info
-# ------------------------------
-echo "=== [CONTAINER] JAX CUDA/cuDNN build info ==="
-python - <<'"'"'PY'"'"'
-import jax, jaxlib
-from jaxlib import version
-print("jax:", jax.__version__)
-print("jaxlib:", jaxlib.__version__)
-print("jaxlib file:", jaxlib.__file__)
-print("cuda version (jaxlib):", getattr(version, "__cuda_version__", None))
-print("cudnn version (jaxlib):", getattr(version, "__cudnn_version__", None))
-print("default backend:", jax.default_backend())
-print("devices:", jax.devices())
-PY
-echo "============================================"
 # ------------------------------
 
 echo "=== [CONTAINER] Madrona spec check (MUST NOT double-load) ==="
@@ -215,57 +206,6 @@ echo "========================================="
 echo "=== [CONTAINER] ldd check for what libmadmjx_mgr.so actually binds ==="
 ldd -v /opt/madrona_mjx/build/libmadmjx_mgr.so | grep -E "nvJitLink|Version|libmadmjx_mgr" || true
 echo "==============================================================="
-
-# ------------------------------
-# ADDED (2): Minimal Madrona batched render repro (fail-fast)
-# ------------------------------
-echo "=== [CONTAINER] Madrona minimal batched render repro ==="
-python - <<'"'"'PY'"'"'
-import os
-import jax
-import jax.numpy as jp
-import mujoco
-from mujoco import mjx
-import numpy as np
-
-from ml_collections import config_dict
-
-# Import your env and renderer
-from Mujoco_Sim.pick_env import StereoPickCube  # adjust if module path differs
-
-def main():
-    # Match your job env defaults as closely as possible
-    B = int(os.environ.get("MADRONA_REPRO_B", "32"))
-    H = int(os.environ.get("MADRONA_REPRO_H", "64"))
-    W = int(os.environ.get("MADRONA_REPRO_W", "64"))
-    iters = int(os.environ.get("MADRONA_REPRO_ITERS", "200"))
-
-    env = StereoPickCube(render_batch_size=B, render_width=W, render_height=H)
-
-    # Create a batched mjx.Data by vmapping the single-world reset_physics
-    keys = jax.random.split(jax.random.PRNGKey(0), B)
-    states = jax.vmap(env.reset_physics)(keys)
-    data_b = states.data
-
-    # Init token once (non-jit path) and render repeatedly
-    env._ensure_render_token(data_b, debug=True)
-    tok = env._render_token
-
-    # Smoke many frames, ensure shapes stay constant
-    for i in range(iters):
-        tok, rgb, depth = env.renderer.render(tok, data_b, env._mjx_model)
-        # Ensure execution actually happens now
-        jax.block_until_ready(rgb)
-        if i in (0, 1, 2, 9, iters - 1):
-            print(f"[repro] iter={i} rgb={rgb.shape} {rgb.dtype} depth={getattr(depth,'shape',None)}")
-
-    print("[repro] OK: completed", iters, "renders")
-
-if __name__ == "__main__":
-    main()
-PY
-echo "========================================================"
-# ------------------------------
 
 echo "=== [CONTAINER] starting training ==="
 stdbuf -oL -eL python -u execute.py 2>&1
