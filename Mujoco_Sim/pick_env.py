@@ -316,11 +316,16 @@ class StereoPickCube(panda.PandaBase):
 
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
         # Ensure token exists
+        # Ensure token exists
         if self._render_token is None:
             self._ensure_render_token(data_batched, debug=False)
 
-        # One batched render call (this is the fast path Madrona expects)
+        # IMPORTANT: use the freshly-created token (render_token arg may be stale/None)
+        render_token = self._render_token
+
+        # One batched render call (fast path)
         new_token, rgb, _depth = self.renderer.render(render_token, data_batched, self._mjx_model)
+
         self._render_token = new_token
 
         # Expect rgb as [B, num_cams, H, W, 4] (or occasionally [num_cams, B, ...])
@@ -355,7 +360,7 @@ class StereoPickCube(panda.PandaBase):
 
     def _ensure_render_token(self, data_batched: mjx.Data, debug: bool) -> None:
         """Initialize renderer token once per process (non-jit)."""
-        if self._render_token is not None and self._init_vmap is not None and self._render_vmap is not None:
+        if self._render_token is not None:
             return
         
         # Correct: ONE batched init call (data_batched must have leading dim == num_worlds)
@@ -385,10 +390,10 @@ class StereoPickCube(panda.PandaBase):
             print("[diag] data.geom_xpos shape:", getattr(data_batched.geom_xpos, "shape", None))
 
         if debug:
-            # One-time smoke render (also vmapped). Thread token properly.
-            new_token, rgb, _ = self._render_vmap(self._render_token, data_batched, self._v_mjx_model)
+            new_token, rgb, _ = self.renderer.render(self._render_token, data_batched, self._mjx_model)
             self._render_token = new_token
             print("render_token value:", jax.device_get(self._render_token).item())
+            jax.block_until_ready(rgb)  # debug-only is fine
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
 
     # -------------------------
