@@ -55,11 +55,7 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
 
     echo "=== [5] Installing JAX 0.4.36 + CUDA12 plugin/pjrt explicitly ==="
     unset PIP_NO_INDEX
-    uv pip install --upgrade \
-      "jax==0.4.36" \
-      "jaxlib==0.4.36" \
-      "jax-cuda12-plugin==0.4.36" \
-      "jax-cuda12-pjrt==0.4.36"
+    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
 
     echo "=== [5b] Build-time JAX sanity check (NO GPU) ==="
     python3 - <<'PY'

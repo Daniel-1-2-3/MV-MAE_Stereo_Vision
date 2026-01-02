@@ -55,7 +55,6 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
 
-
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
 
@@ -211,7 +210,7 @@ class StereoPickCube(panda.PandaBase):
         self._render_token: Optional[jax.Array] = None
 
         # Non-jitted render helper (matches probed signature: render(token, state, model))
-        self._render_fn = lambda token, data: self.renderer.render(token, data, self._mj_model)
+        self._render_one = lambda token, data: self.renderer.render(token, data, self._mjx_model)
 
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
@@ -241,10 +240,13 @@ class StereoPickCube(panda.PandaBase):
     # -------------------------
 
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
-        # Matches probed signature: render(token, state, model)
-        _, rgb, _ = self._render_fn(render_token, data_batched)
+        # Render under vmap so renderer sees single-world mjx.Data and batching rule packs worlds.
+        rgb = jax.vmap(
+            lambda d: self._render_one(render_token, d)[1],
+            in_axes=0,
+        )(data_batched)
 
-        # Handle either [2, B, H, W, 4] or [B, 2, H, W, 4]
+        # Expect rgb as [B, num_cams, H, W, 4] (or occasionally [num_cams, B, ...])
         if rgb.shape[0] == 2:
             left = rgb[0]
             right = rgb[1]
@@ -296,22 +298,21 @@ class StereoPickCube(panda.PandaBase):
             print("init mjx_model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
 
         # Matches probed signature: init(state, model)
-        self._render_token, _, _ = self.renderer.init(data_batched, self._mj_model)
+        # IMPORTANT: data_batched is batched [B,...] (wrapper vmaps physics).
+        # Call renderer on single-world slices under vmap (this matches your working smoke test pattern).
+        self._render_token, _, _ = jax.vmap(
+            lambda d: self.renderer.init(d, self._mjx_model),
+            in_axes=0,
+        )(data_batched)
         jax.block_until_ready(self._render_token)
 
         if debug:
-            print("[diag] render_token:", type(self._render_token),
-                  "dtype:", getattr(self._render_token, "dtype", None),
-                  "shape:", getattr(self._render_token, "shape", None))
-
-            # One-time smoke render
-            _, rgb, _ = self.renderer.render(self._render_token, data_batched, self._mj_model)
+            rgb = jax.vmap(
+                lambda d: self.renderer.render(self._render_token, d, self._mjx_model)[1],
+                in_axes=0,
+            )(data_batched)
             jax.block_until_ready(rgb)
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
-
-            canary = jp.zeros((1,), dtype=jp.float32)
-            jax.block_until_ready(canary)
-            print("[diag] post-render canary ok")
 
     # -------------------------
     # Physics (single-world, JIT-friendly)
