@@ -61,13 +61,11 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
       "jax-cuda12-plugin==0.4.36" \
       "jax-cuda12-pjrt==0.4.36"
 
-    echo "=== [5b] Build-time JAX GPU sanity check (should see a CudaDevice) ==="
+    echo "=== [5b] Build-time JAX sanity check (NO GPU) ==="
     python3 - <<'PY'
-import os
-os.environ["JAX_PLATFORMS"] = "cuda,cpu"
-import jax
+import jax, jaxlib
 print("jax:", jax.__version__)
-print("devices:", jax.devices())
+print("jaxlib:", jaxlib.__version__)
 PY
 
     echo "=== [6] Build Madrona-MJX (geom_quat) ==="
@@ -121,7 +119,7 @@ print("top-level viz  :", None if top_vz is None else top_vz.origin)
 assert top_br is None and top_vz is None, "FATAL: top-level _madrona_* still present"
 print("removed files:", removed)
 PY
-echo "==========================================================================="
+    echo "==========================================================================="
 
     # IMPORTANT: DO NOT copy _madrona_* into site-packages (prevents nanobind double-load).
     # Keep extensions only under madrona_mjx package imports.
@@ -129,15 +127,34 @@ echo "==========================================================================
     echo "/opt/madrona_mjx/build" > /etc/ld.so.conf.d/madrona_mjx.conf
     ldconfig
 
-    echo "=== [6b] Build-time Madrona import sanity check (package-only) ==="
+    echo "=== [6b] Build-time Madrona sanity check (NO GPU / NO libcuda) ==="
     python3 - <<'PY'
-import importlib.util
-import madrona_mjx, madrona_mjx.renderer
-print("madrona_mjx:", madrona_mjx.__file__)
-print("renderer   :", madrona_mjx.renderer.__file__)
-print("top-level _madrona batch:", importlib.util.find_spec("_madrona_mjx_batch_renderer"))
-print("pkg _madrona batch      :", importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer").origin)
+import site, glob, os, importlib.util
+
+sp = site.getsitepackages()[0]
+print("site-packages:", sp)
+
+# 1) Must NOT have top-level nanobind modules in site-packages
+tops = []
+for pat in ("_madrona_mjx_batch_renderer*.so", "_madrona_mjx_visualizer*.so"):
+    tops += glob.glob(os.path.join(sp, pat))
+print("top-level _madrona_* in site-packages:", tops if tops else "(none)")
+assert not tops, "FATAL: top-level _madrona_* present (double-load risk)"
+
+# 2) Must have the built package extension present in /opt/madrona_mjx/build
+pkg_br = glob.glob("/opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so")
+pkg_vz = glob.glob("/opt/madrona_mjx/build/_madrona_mjx_visualizer*.so")
+print("pkg build batch:", pkg_br[:1] if pkg_br else "(missing)")
+print("pkg build viz  :", pkg_vz[:1] if pkg_vz else "(missing)")
+assert pkg_br and pkg_vz, "FATAL: built madrona extensions missing from /opt/madrona_mjx/build"
+
+# 3) Check python can locate the package source (won't import GPU libs)
+spec = importlib.util.find_spec("madrona_mjx")
+print("madrona_mjx spec:", None if spec is None else spec.origin)
+assert spec is not None, "FATAL: madrona_mjx not importable as a package (spec not found)"
 PY
+    echo "=============================================================="
+
 
     echo "=== [7] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
