@@ -236,8 +236,8 @@ class StereoPickCube(panda.PandaBase):
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
-        # JIT-compiled render+postprocess (kept separate from physics jit)
-        self._render_call_jit = jax.jit(self._render_call)
+        # Optional: jit only the postprocess, NOT the renderer custom call
+        self._postprocess_jit = jax.jit(self._postprocess_rgb)
 
     # ---- IMPORTANT: prevent base-class observation_size from tracing reset() ----
     @property
@@ -276,36 +276,28 @@ class StereoPickCube(panda.PandaBase):
     # Rendering (always non-jit)
     # -------------------------
 
-    def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
-        # Ensure token exists (non-jit)
+    def render_pixels(self, data_batched: mjx.Data) -> jax.Array:
         if self._render_token is None:
             self._ensure_render_token(data_batched, debug=False)
 
-        # Single compiled call: (token, data) -> (token, pixels)
-        new_token, pixels = self._render_call_jit(self._render_token, data_batched)
+        # IMPORTANT: call the renderer custom call standalone
+        new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
+
+        # Postprocess separately (can be jitted, but it must NOT include the custom call)
+        pixels = self._postprocess_jit(rgb) if hasattr(self, "_postprocess_jit") else self._postprocess_rgb(rgb)
+
         self._render_token = new_token
         return pixels
 
-
-    def _render_call(self, render_token: jax.Array, data_batched: mjx.Data) -> tuple[jax.Array, jax.Array]:
-        """Pure JAX render function: safe to jit (no Python side effects).
-
-        Returns:
-            new_token: token output from renderer.render
-            pixels: float32 pixels in [0,1], shape [B, H, 2W, 3]
-        """
-        new_token, rgb, _depth = self.renderer.render(render_token, data_batched, self._mjx_model)
-
-        # Expected rgb shape: [B, 2, H, W, 4] uint8
+    @staticmethod
+    def _postprocess_rgb(rgb: jax.Array) -> jax.Array:
+        # rgb: [B, 2, H, W, 4] uint8
         left = rgb[:, 0, :, :, :3].astype(jp.float32)
         right = rgb[:, 1, :, :, :3].astype(jp.float32)
-
-        pixels = jp.concatenate([left, right], axis=2) / 255.0  # [B, H, 2W, 3]
-        return new_token, pixels
-
+        return jp.concatenate([left, right], axis=2) / 255.0  # [B,H,2W,3]
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
-        pixels = self.render_pixels(self._render_token, data)
+        pixels = self.render_pixels(data)
         if "brightness" in info:
             pixels = adjust_brightness(pixels, info["brightness"])
         return info, pixels
