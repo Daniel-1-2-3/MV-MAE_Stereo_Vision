@@ -146,6 +146,30 @@ print("devices:", jax.devices())
 PY
 echo "==================================="
 
+# ------------------------------
+# ADDED: JAX/JAXLIB + plugin probe
+# ------------------------------
+echo "=== [CONTAINER] JAX/JAXLIB/plugin version probe ==="
+python - <<'"'"'PY'"'"'
+import jax, jaxlib
+print("jax   =", jax.__version__)
+print("jaxlib=", jaxlib.__version__)
+try:
+    import jax_cuda12_plugin, jax_cuda12_pjrt
+    print("jax_cuda12_plugin =", jax_cuda12_plugin.__version__)
+    print("jax_cuda12_pjrt   =", jax_cuda12_pjrt.__version__)
+except Exception as e:
+    print("cuda12 plugin/pjrt not importable:", e)
+
+print("\nENV INFO:")
+try:
+    jax.print_environment_info()
+except Exception as e:
+    print("print_environment_info failed:", e)
+PY
+echo "===================================================="
+# ------------------------------
+
 echo "=== [CONTAINER] Madrona spec check (MUST NOT double-load) ==="
 python - <<'"'"'PY'"'"'
 import importlib.util
