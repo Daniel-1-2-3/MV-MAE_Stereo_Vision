@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mjxs_mvmae
 #SBATCH --nodes=1
-#SBATCH --exclude=kn117,kn118,kn203
+#SBATCH --exclude=kn117
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
@@ -91,10 +91,16 @@ apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
-# Prefer container CUDA libs (nvJitLink symbol must match the toolkit you built against)
-export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
-unset LD_PRELOAD
+# ---- CUDA / nvJitLink: make dynamic linking unambiguous ----
+# Put targets dir FIRST, then lib64, then madrona build.
+export LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib64:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
+
+# Force the exact nvJitLink we built against (prevents host/driver copy from being chosen)
+export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12"
+
+# JAX needs to find the toolkit, too
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+# -----------------------------------------------------------
 
 # JAX runtime knobs
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -142,7 +148,7 @@ echo "==================================="
 
 echo "=== [CONTAINER] Madrona spec check (MUST NOT double-load) ==="
 python - <<'"'"'PY'"'"'
-import importlib.util, sys
+import importlib.util
 
 def show(name):
     spec = importlib.util.find_spec(name)
@@ -158,14 +164,13 @@ print("pkg batch     :", pkg_br)
 print("top-level viz :", top_vz)
 print("pkg viz       :", pkg_vz)
 
-# With your rebuilt def, top-level SHOULD be None. If not, fail immediately.
 if top_br is not None or top_vz is not None:
     raise SystemExit("FATAL: top-level _madrona_* exists -> double-load risk. Rebuild/clean image.")
 PY
 echo "============================================================"
 
 echo "=== [CONTAINER] nvJitLink symbol check ==="
-python - <<'PY'
+python - <<'"'"'PY'"'"'
 import ctypes
 p = "/usr/local/cuda/lib64/libnvJitLink.so.12"
 lib = ctypes.CDLL(p)
@@ -173,6 +178,10 @@ print("loaded:", p)
 print("has __nvJitLinkCreate_12_5:", hasattr(lib, "__nvJitLinkCreate_12_5"))
 PY
 echo "========================================="
+
+echo "=== [CONTAINER] ldd check for what libmadmjx_mgr.so actually binds ==="
+ldd -v /opt/madrona_mjx/build/libmadmjx_mgr.so | grep -E "nvJitLink|Version|libmadmjx_mgr" || true
+echo "==============================================================="
 
 echo "=== [CONTAINER] starting training ==="
 stdbuf -oL -eL python -u execute.py 2>&1
