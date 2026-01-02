@@ -236,9 +236,6 @@ class StereoPickCube(panda.PandaBase):
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
-        # Optional: jit only the postprocess, NOT the renderer custom call
-        self._postprocess_jit = jax.jit(self._postprocess_rgb)
-
     # ---- IMPORTANT: prevent base-class observation_size from tracing reset() ----
     @property
     def observation_shape(self) -> tuple[int, int, int]:
@@ -283,8 +280,7 @@ class StereoPickCube(panda.PandaBase):
         # IMPORTANT: call the renderer custom call standalone
         new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
 
-        # Postprocess separately (can be jitted, but it must NOT include the custom call)
-        pixels = self._postprocess_jit(rgb) if hasattr(self, "_postprocess_jit") else self._postprocess_rgb(rgb)
+        pixels = self._postprocess_rgb(rgb)
 
         self._render_token = new_token
         return pixels
@@ -400,7 +396,7 @@ class StereoPickCube(panda.PandaBase):
         data = mjx.forward(m, data)
 
         bmin, bmax = self._config.obs_noise.brightness
-        brightness = jax.random.uniform(rng_brightness, (1,), minval=bmin, maxval=bmax).reshape((1, 1, 1))
+        brightness = jax.random.uniform(rng_brightness, (1,), minval=bmin, maxval=bmax).reshape((1, 1, 1, 1))
 
         metrics = {
             "out_of_bounds": jp.array(0.0, dtype=jp.float32),
