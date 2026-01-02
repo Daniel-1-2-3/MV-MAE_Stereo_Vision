@@ -55,6 +55,7 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
 
+
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
 
@@ -143,6 +144,26 @@ def _broadcast_tree_to_batch(tree, B: int):
     return jax.tree_util.tree_map(_bcast, tree)
 
 
+def _batch_model_for_vmap(model, B: int):
+    """Create a per-world batched MJX model + matching in_axes pytree for vmap.
+
+    Important: we ONLY batch array leaves with ndim>=1. Scalars / 0d stay static (in_axes=None).
+    """
+    def _bcast(x):
+        if hasattr(x, "ndim") and x.ndim >= 1:
+            return jp.broadcast_to(x, (B,) + x.shape)
+        return x
+
+    def _in_axes(x):
+        if hasattr(x, "ndim") and x.ndim >= 1:
+            return 0
+        return None
+
+    model_b = jax.tree_util.tree_map(_bcast, model)
+    in_axes = jax.tree_util.tree_map(_in_axes, model)
+    return model_b, in_axes
+
+
 class StereoPickCube(panda.PandaBase):
     """Bring a box to a target."""
 
@@ -209,8 +230,11 @@ class StereoPickCube(panda.PandaBase):
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
-        # Non-jitted render helper (matches probed signature: render(token, state, model))
-        self._render_one = lambda token, data: self.renderer.render(token, data, self._mjx_model)
+        # ---- Renderer vmap wrappers (LAZY, created on first init) ----
+        self._v_mjx_model = None
+        self._v_mjx_in_axes = None
+        self._init_vmap = None
+        self._render_vmap = None
 
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
@@ -240,17 +264,27 @@ class StereoPickCube(panda.PandaBase):
     # -------------------------
 
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
-        # Render under vmap so renderer sees single-world mjx.Data and batching rule packs worlds.
-        rgb = jax.vmap(
-            lambda d: self._render_one(render_token, d)[1],
-            in_axes=0,
-        )(data_batched)
+        # Ensure wrappers exist (they are created inside _ensure_render_token)
+        if self._render_vmap is None or self._v_mjx_model is None:
+            # This should normally be called by reset/step before rendering
+            self._ensure_render_token(data_batched, debug=False)
+
+        # Correct: vmap render over (token_i, data_i, model_i)
+        new_token, rgb, _depth = self._render_vmap(render_token, data_batched, self._v_mjx_model)
+
+        # Thread token for side-effect sequencing
+        self._render_token = new_token
 
         # Expect rgb as [B, num_cams, H, W, 4] (or occasionally [num_cams, B, ...])
-        if rgb.shape[0] == 2:
+        B = int(getattr(data_batched.geom_xpos, "shape", [0])[0])
+
+        # Handle camera/world axis swap defensively
+        if rgb.ndim == 5 and rgb.shape[0] == 2 and rgb.shape[1] == B:
+            # [2, B, H, W, 4]
             left = rgb[0]
             right = rgb[1]
         else:
+            # [B, 2, H, W, 4] expected
             left = rgb[:, 0]
             right = rgb[:, 1]
 
@@ -273,8 +307,23 @@ class StereoPickCube(panda.PandaBase):
 
     def _ensure_render_token(self, data_batched: mjx.Data, debug: bool) -> None:
         """Initialize renderer token once per process (non-jit)."""
-        if self._render_token is not None:
+        if self._render_token is not None and self._init_vmap is not None and self._render_vmap is not None:
             return
+
+        # Build per-world model + vmap wrappers once
+        if self._init_vmap is None or self._render_vmap is None or self._v_mjx_model is None:
+            B = int(self.render_batch_size)
+            self._v_mjx_model, self._v_mjx_in_axes = _batch_model_for_vmap(self._mjx_model, B)
+
+            # vmap over worlds: init(state_i, model_i) and render(token_i, state_i, model_i)
+            self._init_vmap = jax.vmap(
+                lambda d, m: self.renderer.init(d, m),
+                in_axes=(0, self._v_mjx_in_axes),
+            )
+            self._render_vmap = jax.vmap(
+                lambda t, d, m: self.renderer.render(t, d, m),
+                in_axes=(0, 0, self._v_mjx_in_axes),
+            )
 
         if debug:
             backend = jax.lib.xla_bridge.get_backend()
@@ -293,24 +342,20 @@ class StereoPickCube(panda.PandaBase):
 
             eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
             print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype)
-            print("[diag] calling renderer.init ...")
+            print("[diag] calling renderer.init(vmap) ...")
             print("init mj_model type:", type(self._mj_model), "has geom_quat:", hasattr(self._mj_model, "geom_quat"))
             print("init mjx_model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
+            print("[diag] data.geom_xpos shape:", getattr(data_batched.geom_xpos, "shape", None))
 
-        # Matches probed signature: init(state, model)
-        # IMPORTANT: data_batched is batched [B,...] (wrapper vmaps physics).
-        # Call renderer on single-world slices under vmap (this matches your working smoke test pattern).
-        self._render_token, _, _ = jax.vmap(
-            lambda d: self.renderer.init(d, self._mjx_model),
-            in_axes=0,
-        )(data_batched)
+        # Correct: vmap init across worlds, and pass MJX model (batched)
+        render_token, _init_rgb, _init_depth = self._init_vmap(data_batched, self._v_mjx_model)
+        self._render_token = render_token
         jax.block_until_ready(self._render_token)
 
         if debug:
-            rgb = jax.vmap(
-                lambda d: self.renderer.render(self._render_token, d, self._mjx_model)[1],
-                in_axes=0,
-            )(data_batched)
+            # One-time smoke render (also vmapped). Thread token properly.
+            new_token, rgb, _ = self._render_vmap(self._render_token, data_batched, self._v_mjx_model)
+            self._render_token = new_token
             jax.block_until_ready(rgb)
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
 
