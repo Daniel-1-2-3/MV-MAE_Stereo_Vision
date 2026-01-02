@@ -91,7 +91,7 @@ def main():
     )
     print("wrappeed")
 
-    runner = DrQv2Agent(brax_env, num_envs=num_envs)
+    runner = DrQv2Agent(brax_env, num_envs=num_envs, episode_length=episode_length)
     print("made agent")
 
     start_time = datetime.now()

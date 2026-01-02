@@ -316,6 +316,17 @@ class StereoPickCube(panda.PandaBase):
         if self._render_token is not None:
             return
 
+        # Sanity: Madrona renderer num_worlds must match the batched data leading dim.
+        bshape = getattr(data_batched.geom_xpos, "shape", None)
+        if bshape is None or len(bshape) < 1:
+            raise ValueError("render requires batched mjx.Data with leading dim = num_worlds")
+        B = int(bshape[0])
+        if B != int(self.render_batch_size):
+            raise ValueError(
+                f"Batched data has B={B} worlds but StereoPickCube(render_batch_size)={int(self.render_batch_size)}. "
+                "Make them equal (usually set render_batch_size=num_envs)."
+            )
+
         # ONE batched init call (data_batched leading dim must equal num_worlds)
         render_token, _init_rgb, _init_depth = self.renderer.init(data_batched, self._mjx_model)
         self._render_token = render_token
@@ -410,7 +421,7 @@ class StereoPickCube(panda.PandaBase):
         # Placeholder obs to keep physics state small.
         obs = jp.zeros((1,), dtype=jp.float32)
         reward = jp.array(0.0, dtype=jp.float32)
-        done = jp.array(0.0, dtype=jp.float32)
+        done = jp.array(False)
 
         return State(data, obs, reward, done, metrics, info)
 
