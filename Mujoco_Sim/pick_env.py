@@ -217,15 +217,65 @@ class StereoPickCube(panda.PandaBase):
         # ---- Task post init ----
         self._post_init(obj_name="box", keyframe="low_home")
         
+        # ---- REQUIRED: ids used by rewards ----
+
+        # Hand body id (used by _get_reward)
         _hand_geom_id = self._mj_model.geom("hand_capsule").id
         self._hand_body = int(self._mj_model.geom_bodyid[_hand_geom_id])
 
-        # ---- Floor collision geom ids ----
+        # Floor collision geom ids (kept; you already had these)
         self._floor_hand_geom_ids = [
             self._mj_model.geom(geom).id
             for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
         ]
         self._floor_geom_id = self._mj_model.geom("floor").id
+
+        # Sensor ids used by _get_reward (floor contact + hand-box contact)
+        # We resolve by name so this doesn't depend on hardcoding exact ids.
+        sensor_names = [self._mj_model.sensor(i).name for i in range(self._mj_model.nsensor)]
+
+        def _find_sensor_ids(any_terms, must_terms=()):
+            ids = []
+            for i, n in enumerate(sensor_names):
+                nl = n.lower()
+                if any(t in nl for t in any_terms) and all(t in nl for t in must_terms):
+                    ids.append(i)
+            return ids
+
+        # Floor-hand sensors: look for sensors mentioning floor AND (hand/finger/gripper)
+        floor_ids = []
+        for i, n in enumerate(sensor_names):
+            nl = n.lower()
+            if ("floor" in nl) and (("hand" in nl) or ("finger" in nl) or ("gripper" in nl)):
+                floor_ids.append(i)
+
+        # Fallbacks if floor ids are named differently
+        if not floor_ids:
+            # Common patterns: "touch_floor_*" / "*_floor_touch"
+            floor_ids = _find_sensor_ids(any_terms=("floor",), must_terms=())
+
+        # Hand-box sensor: look for sensor mentioning (box/cube/object) AND (hand/finger/gripper)
+        box_hand_ids = []
+        for i, n in enumerate(sensor_names):
+            nl = n.lower()
+            if (("box" in nl) or ("cube" in nl) or ("object" in nl)) and (("hand" in nl) or ("finger" in nl) or ("gripper" in nl)):
+                box_hand_ids.append(i)
+
+        # Fallback: if you only have a single "hand_touch" style sensor, at least don't crash
+        # (keeps logic structure; if your XML truly lacks these sensors, rewards can't use them anyway)
+        if not box_hand_ids:
+            box_hand_ids = _find_sensor_ids(any_terms=("hand", "finger", "gripper"), must_terms=())
+
+        self._floor_hand_found_sensor = [int(i) for i in floor_ids]
+        self._box_hand_found_sensor = int(box_hand_ids[0]) if box_hand_ids else -1
+
+        if os.environ.get("PICK_ENV_DEBUG", "0") == "1":
+            print("[diag] nsensor:", self._mj_model.nsensor)
+            print("[diag] floor sensors:", [(i, sensor_names[i]) for i in self._floor_hand_found_sensor])
+            if self._box_hand_found_sensor >= 0:
+                print("[diag] box-hand sensor:", (self._box_hand_found_sensor, sensor_names[self._box_hand_found_sensor]))
+            else:
+                print("[diag] box-hand sensor: NOT FOUND (set to -1)")
 
         # ---- Renderer: create now, init token lazily (outside jit) ----
         self.renderer: BatchRenderer = self._create_renderer()
@@ -534,9 +584,12 @@ class StereoPickCube(panda.PandaBase):
             ).astype(jp.float32)
         no_floor_collision = jp.where(floor_coll > 0, 0.0, 1.0)
 
-        hand_box = (
-            data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
-        )
+        if self._box_hand_found_sensor >= 0:
+            hand_box = (
+                data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
+            )
+        else:
+            hand_box = jp.array(False)
         no_box_collision = jp.where(hand_box, 0.0, 1.0)
 
         raw_rewards = dict(
