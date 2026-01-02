@@ -26,7 +26,7 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
     echo "=== [2] Creating Python venv ==="
     python3 -m venv /opt/mvmae_venv
     . /opt/mvmae_venv/bin/activate
-    python -m pip install -U pip setuptools wheel uv
+    python3 -m pip install -U pip setuptools wheel uv
 
     echo "=== [3] Configure offline wheelhouse for bulk deps ==="
     export TMPDIR=/opt/pip-tmp
@@ -48,7 +48,7 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
     fi
 
     echo "=== [4] Installing Python deps (offline from wheelhouse) ==="
-    python -m pip install --no-index --find-links "$WHL" -r "$REQ"
+    python3 -m pip install --no-index --find-links "$WHL" -r "$REQ"
 
     echo "=== [4b] Ensure pip doesn't later override torch/torchvision from PyPI ==="
     export PIP_NO_BUILD_ISOLATION=1
@@ -62,7 +62,7 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
       "jax-cuda12-pjrt==0.4.36"
 
     echo "=== [5b] Build-time JAX GPU sanity check (should see a CudaDevice) ==="
-    python - <<'PY'
+    python3 - <<'PY'
 import os
 os.environ["JAX_PLATFORMS"] = "cuda,cpu"
 import jax
@@ -89,17 +89,16 @@ PY
 
     echo "=== [6c] Remove any TOP-LEVEL _madrona_* from site-packages (must not exist) ==="
     python3 - <<'PY'
-import site, glob, os, sys
+import site, glob, os, sys, importlib.util
 
 paths = []
-# cover getsitepackages + fallback to sys.path scan
 try:
     paths += site.getsitepackages()
 except Exception:
     pass
 paths += [p for p in sys.path if p and ("site-packages" in p or "dist-packages" in p)]
-
 paths = list(dict.fromkeys(paths))  # dedupe, preserve order
+
 print("candidate python package dirs:")
 for p in paths:
     print("  -", p)
@@ -115,7 +114,6 @@ for sp in paths:
             except FileNotFoundError:
                 pass
 
-import importlib.util
 top_br = importlib.util.find_spec("_madrona_mjx_batch_renderer")
 top_vz = importlib.util.find_spec("_madrona_mjx_visualizer")
 print("top-level batch:", None if top_br is None else top_br.origin)
@@ -123,8 +121,7 @@ print("top-level viz  :", None if top_vz is None else top_vz.origin)
 assert top_br is None and top_vz is None, "FATAL: top-level _madrona_* still present"
 print("removed files:", removed)
 PY
-    echo "==========================================================================="
-
+echo "==========================================================================="
 
     # IMPORTANT: DO NOT copy _madrona_* into site-packages (prevents nanobind double-load).
     # Keep extensions only under madrona_mjx package imports.
@@ -133,7 +130,7 @@ PY
     ldconfig
 
     echo "=== [6b] Build-time Madrona import sanity check (package-only) ==="
-    python - <<'PY'
+    python3 - <<'PY'
 import importlib.util
 import madrona_mjx, madrona_mjx.renderer
 print("madrona_mjx:", madrona_mjx.__file__)
@@ -180,4 +177,4 @@ EOS
     fi
 
     echo "[MVMAE] Running training script..."
-    exec python -m MV_MAE_Implementation.execute "$@"
+    exec python3 -m MV_MAE_Implementation.execute "$@"
