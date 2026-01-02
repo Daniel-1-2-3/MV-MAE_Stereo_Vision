@@ -13,13 +13,14 @@ python -m pip download \
   --abi cp312 \
   --python-version 312 \
   --index-url https://pypi.org/simple \
-  --extra-index-url https://download.pytorch.org/whl/cu121 \
+  --extra-index-url https://download.pytorch.org/whl/cu124 \
   -r requirements.txt \
   -d wheelhouse
 
 deactivate
 
 ls -lh wheelhouse | head
+
 SCRATCH=/scratch/$USER/apptainer_build
 mkdir -p "$SCRATCH/cache" "$SCRATCH/tmp"
 
@@ -28,7 +29,6 @@ export APPTAINER_TMPDIR="$SCRATCH/tmp"
 export SINGULARITY_CACHEDIR="$APPTAINER_CACHEDIR"
 export SINGULARITY_TMPDIR="$APPTAINER_TMPDIR"
 
-# Pick version 2
 apptainer cache clean --type=all --force || true
 apptainer build training.sif training.def
 

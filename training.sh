@@ -66,6 +66,7 @@ echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 echo "=========================="
 
+# Probe 1: EGL + Torch (fast, catches GL issues early)
 apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
@@ -84,14 +85,24 @@ PY
 echo "====================================="
 '
 
+# Probe 2 + Training
 apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
-# Force CUDA toolkit libs first; force nvJitLink from container
+# Prefer container CUDA libs (nvJitLink symbol must match the toolkit you built against)
 export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12:${LD_PRELOAD:-}"
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+
+# JAX runtime knobs
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
+export PYTHONUNBUFFERED=1
+export JAX_TRACEBACK_FILTERING=off
+export PICK_ENV_DEBUG=1
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 
 echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
@@ -103,24 +114,13 @@ echo "XLA_FLAGS=${XLA_FLAGS:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 echo "=========================================="
 
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_ALLOCATOR=platform
-export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
-export PYTHONUNBUFFERED=1
-export JAX_TRACEBACK_FILTERING=off
-export PICK_ENV_DEBUG=1
-export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
+echo "=== [CONTAINER] nvidia-smi ==="
+nvidia-smi -L || true
+nvidia-smi || true
+echo "============================="
 
-if command -v nvidia-smi >/dev/null 2>&1; then
-  echo "=== [CONTAINER] nvidia-smi ==="
-  nvidia-smi -L || true
-  nvidia-smi || true
-  echo "============================="
-  ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
-else
-  ACTUAL_GPU=""
-fi
-
+# Cache paths (good for Madrona compile)
+ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
 GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
 [[ -z "${GPU_MODEL:-}" ]] && GPU_MODEL="unknown"
 GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
@@ -131,50 +131,47 @@ export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
 echo "MADRONA_MWGPU_KERNEL_CACHE=$MADRONA_MWGPU_KERNEL_CACHE"
 echo "MADRONA_BVH_KERNEL_CACHE=$MADRONA_BVH_KERNEL_CACHE"
 
-echo "=== [CONTAINER] top-level vs package Madrona spec check ==="
+echo "=== [CONTAINER] JAX device check ==="
 python - <<'"'"'PY'"'"'
-import importlib.util
-s_top = importlib.util.find_spec("_madrona_mjx_batch_renderer")
-s_pkg = importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer")
-print("top-level batch:", None if s_top is None else s_top.origin)
-print("pkg batch     :", None if s_pkg is None else s_pkg.origin)
-
-s_top_vz = importlib.util.find_spec("_madrona_mjx_visualizer")
-s_pkg_vz = importlib.util.find_spec("madrona_mjx._madrona_mjx_visualizer")
-print("top-level viz :", None if s_top_vz is None else s_top_vz.origin)
-print("pkg viz       :", None if s_pkg_vz is None else s_pkg_vz.origin)
+import jax
+print("jax:", jax.__version__)
+print("devices:", jax.devices())
 PY
-echo "=========================================================="
+echo "==================================="
 
-echo "=== [CONTAINER] auto-disable any TOP-LEVEL _madrona_* in site-packages ==="
+echo "=== [CONTAINER] Madrona spec check (MUST NOT double-load) ==="
 python - <<'"'"'PY'"'"'
-import site, glob, os, time, importlib.util
-ts = time.strftime("%Y%m%d_%H%M%S")
-moved = []
-for sp in site.getsitepackages():
-  for pat in ("_madrona_mjx_batch_renderer*.so", "_madrona_mjx_visualizer*.so"):
-    for p in glob.glob(os.path.join(sp, pat)):
-      newp = p + f".disabled_{ts}"
-      os.rename(p, newp)
-      moved.append((p, newp))
-if not moved:
-  print("(none found to disable)")
-else:
-  for old, new in moved:
-    print("disabled:", old)
-    print("      ->:", new)
+import importlib.util, sys
 
-s_top = importlib.util.find_spec("_madrona_mjx_batch_renderer")
-s_pkg = importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer")
-print("after disable | top-level batch:", None if s_top is None else s_top.origin)
-print("after disable | pkg batch     :", None if s_pkg is None else s_pkg.origin)
+def show(name):
+    spec = importlib.util.find_spec(name)
+    return None if spec is None else spec.origin
 
-s_top_vz = importlib.util.find_spec("_madrona_mjx_visualizer")
-s_pkg_vz = importlib.util.find_spec("madrona_mjx._madrona_mjx_visualizer")
-print("after disable | top-level viz :", None if s_top_vz is None else s_top_vz.origin)
-print("after disable | pkg viz       :", None if s_pkg_vz is None else s_pkg_vz.origin)
+top_br = show("_madrona_mjx_batch_renderer")
+pkg_br = show("madrona_mjx._madrona_mjx_batch_renderer")
+top_vz = show("_madrona_mjx_visualizer")
+pkg_vz = show("madrona_mjx._madrona_mjx_visualizer")
+
+print("top-level batch:", top_br)
+print("pkg batch     :", pkg_br)
+print("top-level viz :", top_vz)
+print("pkg viz       :", pkg_vz)
+
+# With your rebuilt def, top-level SHOULD be None. If not, fail immediately.
+if top_br is not None or top_vz is not None:
+    raise SystemExit("FATAL: top-level _madrona_* exists -> double-load risk. Rebuild/clean image.")
 PY
-echo "======================================================================="
+echo "============================================================"
+
+echo "=== [CONTAINER] nvJitLink symbol check ==="
+python - <<'PY'
+import ctypes
+p = "/usr/local/cuda/lib64/libnvJitLink.so.12"
+lib = ctypes.CDLL(p)
+print("loaded:", p)
+print("has __nvJitLinkCreate_12_5:", hasattr(lib, "__nvJitLinkCreate_12_5"))
+PY
+echo "========================================="
 
 echo "=== [CONTAINER] starting training ==="
 stdbuf -oL -eL python -u execute.py 2>&1

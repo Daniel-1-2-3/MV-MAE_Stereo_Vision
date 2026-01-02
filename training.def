@@ -87,6 +87,45 @@ PY
     # Editable install so Python can import madrona_mjx
     uv pip install -e .
 
+    echo "=== [6c] Remove any TOP-LEVEL _madrona_* from site-packages (must not exist) ==="
+    python3 - <<'PY'
+import site, glob, os, sys
+
+paths = []
+# cover getsitepackages + fallback to sys.path scan
+try:
+    paths += site.getsitepackages()
+except Exception:
+    pass
+paths += [p for p in sys.path if p and ("site-packages" in p or "dist-packages" in p)]
+
+paths = list(dict.fromkeys(paths))  # dedupe, preserve order
+print("candidate python package dirs:")
+for p in paths:
+    print("  -", p)
+
+removed = 0
+for sp in paths:
+    for pat in ("_madrona_mjx_batch_renderer*.so", "_madrona_mjx_visualizer*.so"):
+        for f in glob.glob(os.path.join(sp, pat)):
+            try:
+                os.remove(f)
+                print("removed:", f)
+                removed += 1
+            except FileNotFoundError:
+                pass
+
+import importlib.util
+top_br = importlib.util.find_spec("_madrona_mjx_batch_renderer")
+top_vz = importlib.util.find_spec("_madrona_mjx_visualizer")
+print("top-level batch:", None if top_br is None else top_br.origin)
+print("top-level viz  :", None if top_vz is None else top_vz.origin)
+assert top_br is None and top_vz is None, "FATAL: top-level _madrona_* still present"
+print("removed files:", removed)
+PY
+    echo "==========================================================================="
+
+
     # IMPORTANT: DO NOT copy _madrona_* into site-packages (prevents nanobind double-load).
     # Keep extensions only under madrona_mjx package imports.
 
