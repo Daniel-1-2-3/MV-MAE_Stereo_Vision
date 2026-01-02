@@ -236,6 +236,9 @@ class StereoPickCube(panda.PandaBase):
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
+        # JIT-compiled render+postprocess (kept separate from physics jit)
+        self._render_call_jit = jax.jit(self._render_call)
+
     # ---- IMPORTANT: prevent base-class observation_size from tracing reset() ----
     @property
     def observation_shape(self) -> tuple[int, int, int]:
@@ -278,27 +281,28 @@ class StereoPickCube(panda.PandaBase):
         if self._render_token is None:
             self._ensure_render_token(data_batched, debug=False)
 
-        # IMPORTANT: use the stored token (arg may be stale / None)
-        render_token = self._render_token
-
-        # Fast path: ONE batched render call
-        new_token, rgb, _depth = self.renderer.render(render_token, data_batched, self._mjx_model)
+        # Single compiled call: (token, data) -> (token, pixels)
+        new_token, pixels = self._render_call_jit(self._render_token, data_batched)
         self._render_token = new_token
-
-        B = int(getattr(data_batched.geom_xpos, "shape", [0])[0])
-
-        # Handle camera/world axis swap defensively
-        if rgb.ndim == 5 and rgb.shape[0] == 2 and rgb.shape[1] == B:
-            left = rgb[0]
-            right = rgb[1]
-        else:
-            left = rgb[:, 0]
-            right = rgb[:, 1]
-
-        left = left[..., :3].astype(jp.float32) / 255.0
-        right = right[..., :3].astype(jp.float32) / 255.0
-        pixels = jp.concatenate([left, right], axis=2)  # [B, H, 2W, 3]
         return pixels
+
+
+    def _render_call(self, render_token: jax.Array, data_batched: mjx.Data) -> tuple[jax.Array, jax.Array]:
+        """Pure JAX render function: safe to jit (no Python side effects).
+
+        Returns:
+            new_token: token output from renderer.render
+            pixels: float32 pixels in [0,1], shape [B, H, 2W, 3]
+        """
+        new_token, rgb, _depth = self.renderer.render(render_token, data_batched, self._mjx_model)
+
+        # Expected rgb shape: [B, 2, H, W, 4] uint8
+        left = rgb[:, 0, :, :, :3].astype(jp.float32)
+        right = rgb[:, 1, :, :, :3].astype(jp.float32)
+
+        pixels = jp.concatenate([left, right], axis=2) / 255.0  # [B, H, 2W, 3]
+        return new_token, pixels
+
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
         pixels = self.render_pixels(self._render_token, data)
