@@ -12,24 +12,14 @@ python -m pip download \
   --implementation cp \
   --abi cp312 \
   --python-version 312 \
-  --index-url https://download.pytorch.org/whl/cu121 \
-  torch torchvision \
-  -d wheelhouse
-
-python -m pip download \
-  --only-binary=:all: --prefer-binary \
-  --platform manylinux2014_x86_64 \
-  --implementation cp \
-  --abi cp312 \
-  --python-version 312 \
   --index-url https://pypi.org/simple \
+  --extra-index-url https://download.pytorch.org/whl/cu121 \
   -r requirements.txt \
-  --no-deps \
   -d wheelhouse
 
-ls -lh wheelhouse | head
 deactivate
 
+ls -lh wheelhouse | head
 SCRATCH=/scratch/$USER/apptainer_build
 mkdir -p "$SCRATCH/cache" "$SCRATCH/tmp"
 
@@ -38,8 +28,8 @@ export APPTAINER_TMPDIR="$SCRATCH/tmp"
 export SINGULARITY_CACHEDIR="$APPTAINER_CACHEDIR"
 export SINGULARITY_TMPDIR="$APPTAINER_TMPDIR"
 
+# Pick version 2
 apptainer cache clean --type=all --force || true
-rm -f training.sif
 apptainer build training.sif training.def
 
 ##### Cluster training commands
