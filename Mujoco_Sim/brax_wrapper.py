@@ -12,253 +12,233 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
-"""Wrappers for MuJoCo Playground environments that interop with torch.
-
-This version mirrors the *working* approach you showed:
-
-- The environment's physics methods are **single-world**.
-- The wrapper does the batching with `jax.vmap`.
-- Only the **batched physics step** is JIT'd.
-- Rendering happens from Python via `env.render_obs(...)` and is never traced into XLA.
-"""
+"""Wrappers for MuJoCo Playground environments that interop with torch."""
 
 from collections import deque
 import functools
 import os
-from typing import Any, Optional, Dict, Callable
+from typing import Any
 
 import jax
 import numpy as np
 
 try:
-    from rsl_rl.env import VecEnv  # pytype: disable=import-error
+  from rsl_rl.env import VecEnv  # pytype: disable=import-error
 except ImportError:
-    VecEnv = object
-
+  VecEnv = object
 try:
-    import torch  # pytype: disable=import-error
+  import torch  # pytype: disable=import-error
 except ImportError:
-    torch = None
+  torch = None
 
+from Custom_Mujoco_Playground._src import wrapper
 try:
-    from tensordict import TensorDict  # pytype: disable=import-error
+  from tensordict import TensorDict  # pytype: disable=import-error
 except ImportError:
-    TensorDict = None
+  TensorDict = None
 
 
 def _jax_to_torch(tensor):
-    """Zero-copy JAX->Torch via DLPack (device stays on GPU)."""
-    import torch.utils.dlpack as tpack  # pytype: disable=import-error # pylint: disable=import-outside-toplevel
-    return tpack.from_dlpack(tensor)
+  import torch.utils.dlpack as tpack  # pytype: disable=import-error # pylint: disable=import-outside-toplevel
+
+  tensor = tpack.from_dlpack(tensor)
+  return tensor
 
 
 def _torch_to_jax(tensor):
-    """Zero-copy Torch->JAX via DLPack (device stays on GPU)."""
-    from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
-    return from_dlpack(tensor)
+  from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
+
+  tensor = from_dlpack(tensor)
+  return tensor
 
 
 def get_load_path(root, load_run=-1, checkpoint=-1):
-    try:
-        runs = os.listdir(root)
-        runs.sort()
-        if "exported" in runs:
-            runs.remove("exported")
-        last_run = os.path.join(root, runs[-1])
-    except Exception as exc:
-        raise ValueError("No runs in this directory: " + root) from exc
+  try:
+    runs = os.listdir(root)
+    # TODO sort by date to handle change of month
+    runs.sort()
+    if "exported" in runs:
+      runs.remove("exported")
+    last_run = os.path.join(root, runs[-1])
+  except Exception as exc:
+    raise ValueError("No runs in this directory: " + root) from exc
+  if load_run == -1 or load_run == "-1":
+    load_run = last_run
+  else:
+    load_run = os.path.join(root, load_run)
 
-    if load_run == -1 or load_run == "-1":
-        load_run = last_run
-    else:
-        load_run = os.path.join(root, load_run)
+  if checkpoint == -1:
+    models = [file for file in os.listdir(load_run) if "model" in file]
+    models.sort(key=lambda m: m.zfill(15))
+    model = models[-1]
+  else:
+    model = f"model_{checkpoint}.pt"
 
-    if checkpoint == -1:
-        models = [file for file in os.listdir(load_run) if "model" in file]
-        models.sort(key=lambda m: m.zfill(15))
-        model = models[-1]
-    else:
-        model = f"model_{checkpoint}.pt"
-
-    load_path = os.path.join(load_run, model)
-    return load_path
+  load_path = os.path.join(load_run, model)
+  return load_path
 
 
 class RSLRLBraxWrapper(VecEnv):
-    """Wrapper for MJX envs (JAX) that interop with torch/RSL-RL VecEnv.
+  """Wrapper for Brax environments that interop with torch."""
 
-    Expected env interface (single-world physics):
-      - env.reset_physics(key[2]) -> State (single-world, small placeholder obs)
-      - env.step_physics(State, action[act_dim]) -> State (single-world, no rendering)
-      - env.render_obs(data_batched, info_batched) -> pixels [B,H,2W,3]
-      - env._ensure_render_token(data_batched, debug) -> initializes renderer token (non-jit)
+  def __init__(
+      self,
+      env,
+      num_actors,
+      seed,
+      episode_length,
+      action_repeat,
+      randomization_fn=None,
+      render_callback=None,
+      device_rank=None,
+  ):
+    import torch  # pytype: disable=import-error # pylint: disable=redefined-outer-name,unused-import,import-outside-toplevel
 
-    This wrapper:
-      - vmaps reset_physics / step_physics to create a batch of size B
-      - jits only the vmapped step_physics (hot path)
-      - renders outside jit
-    """
+    # Patches
+    cfg = getattr(env, "_config", None) or getattr(env, "cfg", None) or getattr(self.env, "cfg", None)
+    self.cfg = cfg if cfg is not None else {}
+    if not hasattr(self, "device"):
+      self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+      
+    self.seed = seed
+    self.batch_size = num_actors
+    self.num_envs = num_actors
 
-    def __init__(
-        self,
+    self.key = jax.random.PRNGKey(self.seed)
+
+    if device_rank is not None:
+      gpu_devices = jax.devices("gpu")
+      self.key = jax.device_put(self.key, gpu_devices[device_rank])
+      self.device = f"cuda:{device_rank}"
+      print(f"Device -- {gpu_devices[device_rank]}")
+      print(f"Key device -- {self.key.devices()}")
+
+    # split key into two for reset and randomization
+    key_reset, key_randomization = jax.random.split(self.key)
+
+    self.key_reset = jax.random.split(key_reset, self.batch_size)
+
+    if randomization_fn is not None:
+      randomization_rng = jax.random.split(key_randomization, self.batch_size)
+      v_randomization_fn = functools.partial(
+          randomization_fn, rng=randomization_rng
+      )
+    else:
+      v_randomization_fn = None
+
+    self.env = wrapper.wrap_for_brax_training(
         env,
-        num_actors,
-        seed,
-        episode_length,
-        action_repeat,
-        randomization_fn=None,
-        render_callback=None,
-        device_rank=None,
-    ):
-        if torch is None:
-            raise ImportError("torch is required for RSLRLBraxWrapper")
+        episode_length=episode_length,
+        action_repeat=action_repeat,
+        randomization_fn=v_randomization_fn,
+    )
+    raw = self.env.env.env.unwrapped  # this matches how render() accesses it
+    self._raw_env = raw
+    self._render_pixels_fn = jax.jit(raw.render_pixels)
+    self.render_callback = render_callback
 
-        self.env = env
-        self._raw_env = env
-        self.render_callback = render_callback
+    self.asymmetric_obs = False
+    obs_shape = self.env.env.unwrapped.observation_size
+    print(f"obs_shape: {obs_shape}")
 
-        cfg = getattr(env, "_config", None) or getattr(env, "cfg", None)
-        self.cfg = cfg if cfg is not None else {}
+    if isinstance(obs_shape, dict):
+      print("Asymmetric observation space")
+      self.asymmetric_obs = True
+      self.num_obs = obs_shape["state"]
+      self.num_privileged_obs = obs_shape["privileged_state"]
+    else:
+      self.num_obs = obs_shape
+      self.num_privileged_obs = None
 
-        self.seed = int(seed)
-        self.batch_size = int(num_actors)
-        self.num_envs = int(num_actors)
+    self.num_actions = self.env.env.unwrapped.action_size
 
-        # The Madrona renderer is constructed with a fixed num_worlds.
-        # To mirror the working setup, ensure wrapper batch size matches env.render_batch_size.
-        if hasattr(env, "render_batch_size") and int(getattr(env, "render_batch_size")) != self.batch_size:
-            raise ValueError(
-                f"num_actors (batch_size)={self.batch_size} must equal env.render_batch_size={int(getattr(env, 'render_batch_size'))} for Madrona."
-            )
+    self.max_episode_length = episode_length
 
-        self.key = jax.random.PRNGKey(self.seed)
+    # todo -- specific to leap environment
+    self.success_queue = deque(maxlen=100)
 
-        if device_rank is not None:
-            gpu_devices = jax.devices("gpu")
-            if not gpu_devices:
-                raise RuntimeError("device_rank was set but no GPU devices are visible to JAX.")
-            if device_rank < 0 or device_rank >= len(gpu_devices):
-                raise ValueError(f"device_rank={device_rank} out of range for {len(gpu_devices)} GPUs.")
-            self.key = jax.device_put(self.key, gpu_devices[device_rank])
-            self.device = f"cuda:{device_rank}"
-            print(f"Device -- {gpu_devices[device_rank]}")
-            print(f"Key device -- {self.key.devices()}")
-        else:
-            self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    print("JITing reset and step")
+    self.reset_fn = jax.jit(self.env.reset)
+    self.step_fn = jax.jit(self.env.step)
+    print("Done JITing reset and step")
+    self.env_state = None
 
-        key_reset, key_randomization = jax.random.split(self.key)
-        self.key_reset = jax.random.split(key_reset, self.batch_size)
+  def step(self, action):
+    action = torch.clip(action, -1.0, 1.0)  # pytype: disable=attribute-error
+    action = _torch_to_jax(action)
+    self.env_state = self.step_fn(self.env_state, action)
+    pixels = self._render_pixels_fn(self.env_state.data)  # [B, H, 2W, 3] uint8
+    self.env_state = self.env_state.replace(obs=pixels)
+    
+    critic_obs = None
+    if self.asymmetric_obs:
+      obs = _jax_to_torch(self.env_state.obs["state"])
+      critic_obs = _jax_to_torch(self.env_state.obs["privileged_state"])
+      obs = {"state": obs, "privileged_state": critic_obs}
+    else:
+      obs = _jax_to_torch(self.env_state.obs)
+      obs = {"state": obs}
+    reward = _jax_to_torch(self.env_state.reward)
+    done = _jax_to_torch(self.env_state.done)
+    info = self.env_state.info
+    truncation = _jax_to_torch(info["truncation"])
 
-        if randomization_fn is not None:
-            randomization_rng = jax.random.split(key_randomization, self.batch_size)
-            self.v_randomization_fn = functools.partial(randomization_fn, rng=randomization_rng)
-        else:
-            self.v_randomization_fn = None
+    info_ret = {
+        "time_outs": truncation,
+        "observations": {"critic": critic_obs},
+        "log": {},
+    }
 
-        # ---- Observation metadata ----
-        H = int(getattr(env, "render_height", 0) or 0)
-        W = int(getattr(env, "render_width", 0) or 0)
-        C = 3
-        if H > 0 and W > 0:
-            self.num_obs = H * (2 * W) * C
-            print(f"obs expected shape: [B, {H}, {2*W}, {C}]")
-        else:
-            self.num_obs = 0
-            print("obs shape metadata unknown (env has no render_height/render_width).")
+    if "last_episode_success_count" in info:
+      last_episode_success_count = (
+          _jax_to_torch(info["last_episode_success_count"])[done > 0]  # pylint: disable=unsubscriptable-object
+          .float()
+          .tolist()
+      )
+      if len(last_episode_success_count) > 0:
+        self.success_queue.extend(last_episode_success_count)
+      info_ret["log"]["last_episode_success_count"] = np.mean(
+          self.success_queue
+      )
 
-        self.num_actions = int(getattr(env, "action_size"))
-        self.max_episode_length = int(episode_length)
+    for k, v in self.env_state.metrics.items():
+      if k not in info_ret["log"]:
+        info_ret["log"][k] = _jax_to_torch(v).float().mean().item()
 
-        self.success_queue = deque(maxlen=100)
+    obs = TensorDict(obs, batch_size=[self.num_envs])
+    return obs, reward, done, info_ret
 
-        # ---- Split physics and rendering ----
-        if not hasattr(env, "step_physics") or not hasattr(env, "reset_physics") or not hasattr(env, "render_obs"):
-            raise RuntimeError(
-                "Env must provide reset_physics / step_physics / render_obs for split execution."
-            )
+  def reset(self):
+    # todo add random init like in collab examples?
+    self.env_state = self.reset_fn(self.key_reset)
+    pixels = self._render_pixels_fn(self.env_state.data)
+    self.env_state = self.env_state.replace(obs=pixels)
 
-        # Batched reset: vmap single-world reset over keys[B,2]
-        def _reset_batched(keys):
-            return jax.vmap(self.env.reset_physics)(keys)
+    if self.asymmetric_obs:
+      obs = _jax_to_torch(self.env_state.obs["state"])
+      critic_obs = _jax_to_torch(self.env_state.obs["privileged_state"])
+      obs = {"state": obs, "privileged_state": critic_obs}
+    else:
+      obs = _jax_to_torch(self.env_state.obs)
+      obs = {"state": obs}
+    return TensorDict(obs, batch_size=[self.num_envs])
 
-        # Batched step: vmap single-world step over state/action
-        def _step_batched(state, action):
-            return jax.vmap(self.env.step_physics, in_axes=(0, 0))(state, action)
+  def get_observations(self):
+   return self.reset()
 
-        self.reset_physics_fn = _reset_batched  # keep unjitted (called infrequently)
-        self.step_physics_fn = jax.jit(_step_batched)  # hot path: JIT vmapped physics
-        self.render_obs_fn = env.render_obs  # ALWAYS non-jit
+  def render(self, mode="human"):  # pylint: disable=unused-argument
+    if self.render_callback is not None:
+      self.render_callback(self.env.env.env, self.env_state)
+    else:
+      raise ValueError("No render callback specified")
 
-        print("JITing batched physics step (render stays non-jit)")
-        _ = self.step_physics_fn  # force attribute creation
-        print("Done JITing batched physics step")
+  def get_number_of_agents(self):
+    return 1
 
-        # Store physics-only state (small obs).
-        self.env_state = None
-
-    def _ensure_renderer(self):
-        # Initialize renderer token once, using current batched state.
-        if hasattr(self.env, "_ensure_render_token") and self.env_state is not None:
-            debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
-            self.env._ensure_render_token(self.env_state.data, debug)  # pylint: disable=protected-access
-
-    def _render_pixels(self):
-        # Non-jit render. Pixels are computed lazily; sync happens in _jax_to_torch.
-        self._ensure_renderer()
-        return self.render_obs_fn(self.env_state.data, self.env_state.info)
-
-    def step(self, action):
-        if torch is None:
-            raise ImportError("torch is required")
-
-        action = torch.clip(action, -1.0, 1.0)
-        action = _torch_to_jax(action)
-
-        # JIT'd batched physics
-        self.env_state = self.step_physics_fn(self.env_state, action)
-
-        # Non-jit render (smoke-test style)
-        pixels = self._render_pixels()
-
-        obs_t = _jax_to_torch(pixels)
-        obs = {"state": obs_t}
-
-        reward = _jax_to_torch(self.env_state.reward)
-        done = _jax_to_torch(self.env_state.done)
-
-        info = self.env_state.info
-        trunc = info.get("truncation", None)
-        if trunc is None:
-            trunc = jax.numpy.zeros_like(self.env_state.done)
-        truncation = _jax_to_torch(trunc)
-
-        info_ret = {
-            "time_outs": truncation,
-            "observations": {"critic": None},
-            "log": {},  # keep empty in hot path
-        }
-
-        if TensorDict is None:
-            return obs, reward, done, info_ret
-
-        obs_td = TensorDict(obs, batch_size=[self.num_envs])
-        return obs_td, reward, done, info_ret
-
-    def reset(self):
-        self.key, key_reset = jax.random.split(self.key)
-        self.key_reset = jax.random.split(key_reset, self.batch_size)
-
-        self.env_state = self.reset_physics_fn(self.key_reset)
-
-        pixels = self._render_pixels()
-        obs_t = _jax_to_torch(pixels)
-        obs = {"state": obs_t}
-
-        if TensorDict is None:
-            return obs
-
-        return TensorDict(obs, batch_size=[self.num_envs])
-
-    def get_observations(self):
-        return self.reset()
+  def get_env_info(self):
+    info = {}
+    info["action_space"] = self.action_space  # pytype: disable=attribute-error
+    info["observation_space"] = (
+        self.observation_space  # pytype: disable=attribute-error
+    )
+    return info
