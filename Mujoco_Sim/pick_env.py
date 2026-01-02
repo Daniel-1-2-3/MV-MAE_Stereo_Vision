@@ -15,28 +15,35 @@
 
 """Bring a box to a target and orientation.
 
-Fast + parallelizable structure:
+Matches your intended architecture:
 
-- Physics is **single-world**: reset_physics / step_physics operate on one mjx.Data.
-- Batching happens **outside** the env via `jax.vmap` (in your wrapper) and is then `jax.jit`'d.
-- Rendering is **batched** but happens **outside** the physics JIT:
-  - renderer.init(data_batched, mjx_model) exactly once (token cached)
-  - renderer.render(token, data_batched, mjx_model) each time you want pixels
+FAST PATH (training / parallel):
+- reset_physics(rng_single) -> State (single-world)
+- step_physics(state_single, action_single) -> State (single-world)
+- Wrapper does:
+    reset_batched = jax.vmap(env.reset_physics, in_axes=0, out_axes=0)
+    step_batched  = jax.vmap(env.step_physics,  in_axes=(0,0), out_axes=0)
+    step_batched  = jax.jit(step_batched, donate_argnums=(0,))
+  Rendering is called OUTSIDE the physics JIT:
+    pixels = env.render_pixels_batched(state_batched.data, state_batched.info)
 
-This preserves the "smoke render fixed the CUDA error" pattern:
-- init uses correctly batched data matching num_worlds
-- optional one-time smoke render in debug mode
+SLOW PATH (public compatibility):
+- reset(rng_single) and step(state_single, action_single) do:
+    single-world physics -> broadcast to render_batch_size -> render -> return pixels for world 0
+  This is intentionally slow; do NOT use it in training.
+
+Renderer init safety:
+- renderer.init(data_batched, mjx_model) is called once with correctly batched data matching num_worlds
+- optional smoke render in debug mode (keeps your “fixed CUDA error after smoke” behavior)
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Union
-
 import importlib.util
 import os
 from pathlib import Path
 
-# Reduce noisy XLA logging.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("GLOG_minloglevel", "3")
 
@@ -51,13 +58,8 @@ from mujoco import mjx
 from Custom_Mujoco_Playground._src import mjx_env
 from Custom_Mujoco_Playground._src.mjx_env import State
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
-
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
 
-
-# -------------------------
-# Assets / config
-# -------------------------
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
@@ -76,7 +78,7 @@ def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
 def default_vision_config() -> config_dict.ConfigDict:
     return config_dict.create(
         gpu_id=0,
-        render_batch_size=1024,   # default; you should override to num_envs in wrapper
+        render_batch_size=1024,
         render_width=64,
         render_height=64,
         use_rasterizer=False,
@@ -106,7 +108,6 @@ def default_config():
         ),
         vision=True,
         vision_config=default_vision_config(),
-        # If brightness range is [1,1], we completely skip brightness math.
         obs_noise=config_dict.create(brightness=[1.0, 1.0]),
         impl="jax",
         nconmax=24 * 2048,
@@ -114,10 +115,6 @@ def default_config():
     )
     return config
 
-
-# -------------------------
-# Helpers
-# -------------------------
 
 def _broadcast_tree_to_batch(tree, B: int):
     """Broadcast a pytree of arrays/scalars to a leading batch dim B."""
@@ -130,27 +127,23 @@ def _broadcast_tree_to_batch(tree, B: int):
     return jax.tree_util.tree_map(_bcast, tree)
 
 
-def _maybe_apply_brightness_uint8(pixels_u8: jax.Array, info_batched: Dict[str, Any]) -> jax.Array:
-    """Optionally apply brightness to uint8 pixels.
-
-    Done in uint8-friendly way: convert to float32 only if needed.
-    If brightness not present, returns pixels unchanged.
-    """
+def _normalize_brightness_shape(info_batched: Dict[str, Any], B: int) -> Dict[str, Any]:
+    """Ensure brightness is [B,1,1,1] if present."""
     if "brightness" not in info_batched:
-        return pixels_u8
+        return info_batched
     b = info_batched["brightness"]
-    # Expect b shaped [B,1,1,1] or [B,1,1]; normalize to [B,1,1,1]
-    if hasattr(b, "ndim") and b.ndim == 3:
-        b = b.reshape((b.shape[0], 1, 1, 1))
-    # Convert once: float32, multiply, clamp, back to uint8
-    x = pixels_u8.astype(jp.float32) * b
-    x = jp.clip(x, 0.0, 255.0)
-    return x.astype(jp.uint8)
+    # Accept [1,1,1] (single-world) or [B,1,1,1] (batched)
+    if hasattr(b, "ndim"):
+        if b.ndim == 3:
+            info_batched = dict(info_batched)
+            info_batched["brightness"] = jp.broadcast_to(b, (B, 1, 1, 1))
+        elif b.ndim == 4 and b.shape[0] == B:
+            pass
+        elif b.ndim == 1 and b.shape[0] == B:
+            info_batched = dict(info_batched)
+            info_batched["brightness"] = b.reshape((B, 1, 1, 1))
+    return info_batched
 
-
-# -------------------------
-# Env
-# -------------------------
 
 class StereoPickCube(panda.PandaBase):
     """Bring a box to a target."""
@@ -168,7 +161,7 @@ class StereoPickCube(panda.PandaBase):
         self.render_width = int(render_width)
         self.render_height = int(render_height)
 
-        # Cache debug flag ONCE (do not read env vars inside jitted code)
+        # Cache debug flag ONCE (avoid env-var reads inside jitted code)
         self._debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
 
         # Base MJX env init (DO NOT call super())
@@ -209,10 +202,9 @@ class StereoPickCube(panda.PandaBase):
         # IDs used by rewards
         hand_geom_id = self._mj_model.geom("hand_capsule").id
         self._hand_body = int(self._mj_model.geom_bodyid[hand_geom_id])
-
         self._floor_geom_id = self._mj_model.geom("floor").id
 
-        # Sensors used by rewards (resolve by name; keep your robust behavior)
+        # Sensors used by rewards (resolve by name; keep robust behavior)
         sensor_names = [self._mj_model.sensor(i).name for i in range(self._mj_model.nsensor)]
 
         floor_ids = []
@@ -279,9 +271,7 @@ class StereoPickCube(panda.PandaBase):
     def ensure_render_initialized(self, data_batched: mjx.Data) -> None:
         """Initialize renderer token once with correctly batched data.
 
-        This is the critical 'fixed the smoke test CUDA error' part:
-        - data_batched must have leading dim == self.render_batch_size (== num_worlds)
-        - call renderer.init exactly once
+        Critical invariant: leading batch dim must equal self.render_batch_size (num_worlds).
         """
         if self._render_token is not None:
             return
@@ -307,28 +297,22 @@ class StereoPickCube(panda.PandaBase):
         token, rgb0, depth0 = self.renderer.init(data_batched, self._mjx_model)
         self._render_token = token
 
-        # One-time smoke render only in debug mode (keeps your previous safety check)
+        # One-time smoke render (ONLY debug): this is where your old version proved CUDA was OK.
         if self._debug:
             token2, rgb, _ = self.renderer.render(self._render_token, data_batched, self._mjx_model)
             self._render_token = token2
-            # force sync only here (one-time)
             jax.block_until_ready(rgb)
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
 
     def render_pixels_batched(self, data_batched: mjx.Data, info_batched: Dict[str, Any]) -> jax.Array:
-        """Render stereo pixels for a batched mjx.Data.
-
-        Returns uint8 pixels shaped [B, H, 2W, 3].
-        """
+        """Render stereo pixels for batched mjx.Data. Returns uint8 [B,H,2W,3]."""
         self.ensure_render_initialized(data_batched)
         assert self._render_token is not None
 
         token2, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
         self._render_token = token2
 
-        # Common shapes:
-        # - [B, num_cams, H, W, 4]
-        # - [num_cams, B, H, W, 4]  (handle swap)
+        # Handle possible camera/world axis order
         B = int(getattr(data_batched.geom_xpos, "shape", [0])[0])
 
         if rgb.ndim == 5 and rgb.shape[0] == 2 and rgb.shape[1] == B:
@@ -340,12 +324,17 @@ class StereoPickCube(panda.PandaBase):
 
         left = left[..., :3]
         right = right[..., :3]
-        pixels = jp.concatenate([left, right], axis=2)  # [B,H,2W,3], uint8-ish
+        pixels = jp.concatenate([left, right], axis=2)  # [B,H,2W,3]
 
-        # Optional brightness only if present AND differs from 1.0
+        # Optional brightness only if configured to vary
         bmin, bmax = self._config.obs_noise.brightness
         if not (float(bmin) == 1.0 and float(bmax) == 1.0):
-            pixels = _maybe_apply_brightness_uint8(pixels, info_batched)
+            info_batched = _normalize_brightness_shape(info_batched, B)
+            if "brightness" in info_batched:
+                b = info_batched["brightness"]  # [B,1,1,1]
+                x = pixels.astype(jp.float32) * b
+                x = jp.clip(x, 0.0, 255.0)
+                pixels = x.astype(jp.uint8)
 
         return pixels.astype(jp.uint8)
 
@@ -404,13 +393,13 @@ class StereoPickCube(panda.PandaBase):
             "truncation": jp.array(0.0, dtype=jp.float32),
         }
 
-        # Only include brightness if it varies (avoid extra work)
+        # Only include brightness if it varies (avoid extra per-step work)
         bmin, bmax = self._config.obs_noise.brightness
         if not (float(bmin) == 1.0 and float(bmax) == 1.0):
             brightness = jax.random.uniform(rng_brightness, (1,), minval=bmin, maxval=bmax).reshape((1, 1, 1, 1))
             info["brightness"] = brightness
 
-        # Keep obs small in physics state; wrapper supplies pixels separately
+        # Keep obs small in physics state for fast vmapped/jitted stepping
         obs = jp.zeros((1,), dtype=jp.float32)
         reward = jp.array(0.0, dtype=jp.float32)
         done = jp.array(0.0, dtype=jp.float32)
@@ -428,7 +417,7 @@ class StereoPickCube(panda.PandaBase):
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in raw_rewards.items()}
         total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
-        box_pos = data.xpos[self._obj_body, :]  # single-world (3,)
+        box_pos = data.xpos[self._obj_body, :]  # (3,)
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0) | (box_pos[2] < 0.0)
         done = out_of_bounds | jp.any(jp.isnan(data.qpos)) | jp.any(jp.isnan(data.qvel))
 
@@ -439,7 +428,7 @@ class StereoPickCube(panda.PandaBase):
 
         return state.replace(
             data=data,
-            obs=state.obs,
+            obs=state.obs,  # keep tiny
             reward=total_reward,
             done=done.astype(jp.float32),
             metrics=new_metrics,
@@ -447,11 +436,43 @@ class StereoPickCube(panda.PandaBase):
         )
 
     # -------------------------
-    # Rewards (kept close to your previous)
+    # Public API (slow path, like you did)
+    # -------------------------
+
+    def reset(self, rng: jax.Array) -> State:
+        """Public reset: single-world physics + broadcasted render -> pixels in obs (SLOW)."""
+        st1 = self.reset_physics(rng)
+
+        B = int(self.render_batch_size)
+        data_b = _broadcast_tree_to_batch(st1.data, B)
+        info_b = _broadcast_tree_to_batch(st1.info, B)
+        info_b = _normalize_brightness_shape(info_b, B)
+
+        # init token once (this is your smoke-test-safe init)
+        self.ensure_render_initialized(data_b)
+
+        # render and return only world 0 image
+        pixels_b = self.render_pixels_batched(data_b, info_b)  # [B,H,2W,3] uint8
+        return st1.replace(obs=pixels_b[0])
+
+    def step(self, state: State, action: jax.Array) -> State:
+        """Public step: single-world physics + broadcasted render -> pixels in obs (SLOW)."""
+        st1 = self.step_physics(state, action)
+
+        B = int(self.render_batch_size)
+        data_b = _broadcast_tree_to_batch(st1.data, B)
+        info_b = _broadcast_tree_to_batch(st1.info, B)
+        info_b = _normalize_brightness_shape(info_b, B)
+
+        self.ensure_render_initialized(data_b)
+        pixels_b = self.render_pixels_batched(data_b, info_b)
+        return st1.replace(obs=pixels_b[0])
+
+    # -------------------------
+    # Rewards
     # -------------------------
 
     def _get_reward(self, data: mjx.Data, info: dict[str, Any]):
-        # single-world positions
         box_pos = data.xpos[self._obj_body, :]
         target_pos = info["target_pos"]
         gripper_pos = data.xpos[self._hand_body, :]
@@ -465,7 +486,6 @@ class StereoPickCube(panda.PandaBase):
         gripper_box = 1.0 - jp.tanh(5.0 * d_gripper_box)
         box_target = reached_box * (1.0 - jp.tanh(5.0 * d_box_target))
 
-        # Sensor-based collisions (single-world)
         floor_coll = jp.array(0.0, dtype=jp.float32)
         for sensor_id in self._floor_hand_found_sensor:
             adr = self._mj_model.sensor_adr[sensor_id]
