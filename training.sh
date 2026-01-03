@@ -110,6 +110,8 @@ export PYTHONUNBUFFERED=1
 export JAX_TRACEBACK_FILTERING=off
 export PICK_ENV_DEBUG=1
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
+export CUDA_LAUNCH_BLOCKING=1
+export PICK_ENV_DEBUG=1
 
 echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
