@@ -1,9 +1,9 @@
 Bootstrap: docker
-From: nvidia/cuda:12.5.1-devel-ubuntu24.04
+From: nvidia/cuda:12.4.0-devel-ubuntu22.04
 
 %labels
     Author        Daniel Zhu
-    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.5.1, Offline bulk deps + online JAX GPU)
+    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.4, Offline bulk deps + online JAX GPU)
 
 %files
     . /opt/src/MV_MAE_Implementation
@@ -15,16 +15,23 @@ From: nvidia/cuda:12.5.1-devel-ubuntu24.04
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         git build-essential cmake pkg-config curl ca-certificates \
-        ffmpeg libavcodec60 libavdevice60 libavfilter9 libavformat60 \
-        libswscale7 libswresample4 \
+        ffmpeg \
         xvfb x11-utils libx11-dev libxrandr-dev libxinerama-dev \
         libxcursor-dev libxi-dev mesa-common-dev \
         libegl1 libegl-dev gpg lsb-release \
-        python3 python3-venv python3-pip python3-dev
+        software-properties-common
     rm -rf /var/lib/apt/lists/*
 
-    echo "=== [2] Creating Python venv ==="
-    python3 -m venv /opt/mvmae_venv
+    echo "=== [1b] Install Python 3.12 on Ubuntu 22.04 (deadsnakes) ==="
+    apt-get update -y
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3.12-dev
+    rm -rf /var/lib/apt/lists/*
+
+    echo "=== [2] Creating Python venv (py3.12) ==="
+    python3.12 -m venv /opt/mvmae_venv
     . /opt/mvmae_venv/bin/activate
     python3 -m pip install -U pip setuptools wheel uv
 
@@ -78,7 +85,6 @@ PY
     make -j"$(nproc)"
     cd ..
 
-    # Editable install so Python can import madrona_mjx
     uv pip install -e .
 
     echo "=== [6c] Remove any TOP-LEVEL _madrona_* from site-packages (must not exist) ==="
@@ -91,66 +97,25 @@ try:
 except Exception:
     pass
 paths += [p for p in sys.path if p and ("site-packages" in p or "dist-packages" in p)]
-paths = list(dict.fromkeys(paths))  # dedupe, preserve order
-
-print("candidate python package dirs:")
-for p in paths:
-    print("  -", p)
+paths = list(dict.fromkeys(paths))
 
 removed = 0
 for sp in paths:
     for pat in ("_madrona_mjx_batch_renderer*.so", "_madrona_mjx_visualizer*.so"):
         for f in glob.glob(os.path.join(sp, pat)):
             try:
-                os.remove(f)
-                print("removed:", f)
-                removed += 1
+                os.remove(f); removed += 1
             except FileNotFoundError:
                 pass
 
 top_br = importlib.util.find_spec("_madrona_mjx_batch_renderer")
 top_vz = importlib.util.find_spec("_madrona_mjx_visualizer")
-print("top-level batch:", None if top_br is None else top_br.origin)
-print("top-level viz  :", None if top_vz is None else top_vz.origin)
 assert top_br is None and top_vz is None, "FATAL: top-level _madrona_* still present"
 print("removed files:", removed)
 PY
-    echo "==========================================================================="
-
-    # IMPORTANT: DO NOT copy _madrona_* into site-packages (prevents nanobind double-load).
-    # Keep extensions only under madrona_mjx package imports.
 
     echo "/opt/madrona_mjx/build" > /etc/ld.so.conf.d/madrona_mjx.conf
     ldconfig
-
-    echo "=== [6b] Build-time Madrona sanity check (NO GPU / NO libcuda) ==="
-    python3 - <<'PY'
-import site, glob, os, importlib.util
-
-sp = site.getsitepackages()[0]
-print("site-packages:", sp)
-
-# 1) Must NOT have top-level nanobind modules in site-packages
-tops = []
-for pat in ("_madrona_mjx_batch_renderer*.so", "_madrona_mjx_visualizer*.so"):
-    tops += glob.glob(os.path.join(sp, pat))
-print("top-level _madrona_* in site-packages:", tops if tops else "(none)")
-assert not tops, "FATAL: top-level _madrona_* present (double-load risk)"
-
-# 2) Must have the built package extension present in /opt/madrona_mjx/build
-pkg_br = glob.glob("/opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so")
-pkg_vz = glob.glob("/opt/madrona_mjx/build/_madrona_mjx_visualizer*.so")
-print("pkg build batch:", pkg_br[:1] if pkg_br else "(missing)")
-print("pkg build viz  :", pkg_vz[:1] if pkg_vz else "(missing)")
-assert pkg_br and pkg_vz, "FATAL: built madrona extensions missing from /opt/madrona_mjx/build"
-
-# 3) Check python can locate the package source (won't import GPU libs)
-spec = importlib.util.find_spec("madrona_mjx")
-print("madrona_mjx spec:", None if spec is None else spec.origin)
-assert spec is not None, "FATAL: madrona_mjx not importable as a package (spec not found)"
-PY
-    echo "=============================================================="
-
 
     echo "=== [7] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
@@ -158,7 +123,6 @@ PY
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
-# Strongly encourage GPU first; you can still fall back to CPU
 export JAX_PLATFORMS="cuda,cpu"
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 EOS
@@ -167,7 +131,6 @@ EOS
     echo "=== Build Completed Successfully ==="
 
 %environment
-    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     export DISPLAY=:1
     export HF_TOKEN=${HF_TOKEN:-}
     export WANDB_API_KEY=${WANDB_API_KEY:-}

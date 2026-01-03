@@ -99,8 +99,8 @@ set -euo pipefail
 export PYTHONNOUSERSITE=1
 
 # CUDA toolkit root (used for ptxas/libdevice via XLA_FLAGS; does NOT force runtime libs)
-if [[ -d /usr/local/cuda-12.5 ]]; then
-  export CUDA_HOME=/usr/local/cuda-12.5
+if [[ -d /usr/local/cuda-12.4 ]]; then
+  export CUDA_HOME=/usr/local/cuda-12.4
 else
   export CUDA_HOME=/usr/local/cuda
 fi
