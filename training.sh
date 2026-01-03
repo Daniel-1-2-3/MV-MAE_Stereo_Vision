@@ -106,10 +106,6 @@ export JAX_TRACEBACK_FILTERING=off
 export PICK_ENV_DEBUG=1
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 
-# Optional: turn on a single sync after render inside your wrapper (NOT launch blocking)
-# (only useful if your Python code reads this env var)
-export RENDER_SYNC="${RENDER_SYNC:-0}"
-
 echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
@@ -118,7 +114,6 @@ echo "LD_PRELOAD=${LD_PRELOAD:-}"
 echo "JAX_PLATFORMS=${JAX_PLATFORMS:-}"
 echo "XLA_FLAGS=${XLA_FLAGS:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
-echo "RENDER_SYNC=${RENDER_SYNC:-}"
 echo "=========================================="
 
 echo "=== [CONTAINER] nvidia-smi ==="
@@ -146,26 +141,42 @@ print("devices:", jax.devices())
 PY
 echo "==================================="
 
-echo "=== [CONTAINER] JAX/JAXLIB/plugin version probe ==="
+# ------------------------------
+# (1) JAX/jaxlib + backend string
+# ------------------------------
+echo "=== [CONTAINER] (1) JAX/JAXLIB + backend platform_version ==="
 python - <<'"'"'PY'"'"'
 import jax, jaxlib
+from jax.lib import xla_bridge
 print("jax   =", jax.__version__)
 print("jaxlib=", jaxlib.__version__)
-try:
-    import jax_cuda12_plugin, jax_cuda12_pjrt
-    print("jax_cuda12_plugin =", jax_cuda12_plugin.__version__)
-    print("jax_cuda12_pjrt   =", jax_cuda12_pjrt.__version__)
-except Exception as e:
-    print("cuda12 plugin/pjrt not importable:", e)
-
-print("\nENV INFO:")
-try:
-    jax.print_environment_info()
-except Exception as e:
-    print("print_environment_info failed:", e)
+b = xla_bridge.get_backend()
+print("backend.platform        =", b.platform)
+print("backend.platform_version=", b.platform_version)
 PY
-echo "===================================================="
+echo "============================================================="
 
+# ------------------------------
+# (2) Which JAX CUDA plugin modules exist + their origins
+# ------------------------------
+echo "=== [CONTAINER] (2) JAX CUDA plugin module origins ==="
+python - <<'"'"'PY'"'"'
+import importlib.util
+mods = [
+  "jax_cuda12_plugin",
+  "jax_cuda12_pjrt",
+  "jaxlib.cuda_plugin_extension",
+  "jaxlib.xla_extension",
+]
+for m in mods:
+  s = importlib.util.find_spec(m)
+  print(f"{m:28s} ->", None if s is None else s.origin)
+PY
+echo "======================================================"
+
+# ------------------------------
+# Madrona import + extension origins (must be consistent) + duplicate scan
+# ------------------------------
 echo "=== [CONTAINER] Madrona import + extension origins (must be consistent) ==="
 python - <<'"'"'PY'"'"'
 import os, sys, glob, site, importlib.util
@@ -174,15 +185,9 @@ def origin(name):
     spec = importlib.util.find_spec(name)
     return None if spec is None else spec.origin
 
-# Show base package origin (helps catch “wrong madrona_mjx” on sys.path)
-try:
-    import madrona_mjx
-    print("madrona_mjx.__file__:", madrona_mjx.__file__)
-except Exception as e:
-    print("FATAL: import madrona_mjx failed:", e)
-    raise SystemExit(90)
+import madrona_mjx
+print("madrona_mjx.__file__:", madrona_mjx.__file__)
 
-# Extension module origins
 top_br = origin("_madrona_mjx_batch_renderer")
 pkg_br = origin("madrona_mjx._madrona_mjx_batch_renderer")
 top_vz = origin("_madrona_mjx_visualizer")
@@ -193,17 +198,13 @@ print("pkg batch     :", pkg_br)
 print("top-level viz :", top_vz)
 print("pkg viz       :", pkg_vz)
 
-# Hard fail if any top-level extension exists (double-load risk)
 if top_br is not None or top_vz is not None:
-    raise SystemExit("FATAL: top-level _madrona_* exists -> double-load risk. Remove stray .so from site-packages.")
-
-# Hard fail if package extension missing (your current symptom)
+    raise SystemExit("FATAL: top-level _madrona_* exists -> double-load risk.")
 if pkg_br is None:
-    raise SystemExit("FATAL: madrona_mjx._madrona_mjx_batch_renderer is NOT importable (pkg_br=None). Wrong install or missing .so.")
+    raise SystemExit("FATAL: madrona_mjx._madrona_mjx_batch_renderer not importable (None).")
 if pkg_vz is None:
-    raise SystemExit("FATAL: madrona_mjx._madrona_mjx_visualizer is NOT importable (pkg_vz=None). Wrong install or missing .so.")
+    raise SystemExit("FATAL: madrona_mjx._madrona_mjx_visualizer not importable (None).")
 
-# Look for duplicates on disk (common cause of “None” or mismatched imports)
 roots = [r for r in set(site.getsitepackages() + [site.getusersitepackages()]) if r and os.path.isdir(r)]
 pat_batch = "*_madrona_mjx_batch_renderer*.so"
 pat_viz   = "*_madrona_mjx_visualizer*.so"
@@ -218,59 +219,34 @@ for h in hits_batch: print("  ", h)
 print("viz hits  :", len(hits_viz))
 for h in hits_viz: print("  ", h)
 
-# Warn/fail if duplicates exist
-if len(hits_batch) > 1:
-    raise SystemExit("FATAL: multiple batch_renderer .so files found in site-packages -> ambiguous/double-load.")
-if len(hits_viz) > 1:
-    raise SystemExit("FATAL: multiple visualizer .so files found in site-packages -> ambiguous/double-load.")
-
-# Also search for any top-level _madrona_* .so (these are especially bad)
-pat_top = "_madrona_*.so"
-hits_top = []
-for r in roots:
-    hits_top += glob.glob(os.path.join(r, "**", pat_top), recursive=True)
-hits_top = [h for h in hits_top if "madrona_mjx" not in os.path.basename(h)] + [h for h in hits_top if os.path.basename(h).startswith("_madrona_")]
-hits_top = sorted(set(hits_top))
-if hits_top:
-    print("\nTop-level _madrona_*.so present on disk (DANGER):")
-    for h in hits_top: print("  ", h)
-    raise SystemExit("FATAL: top-level _madrona_*.so exists on disk -> remove it.")
-
-# Print the chosen origins so bash can capture them if needed
 print("\nCHOSEN_PKG_BATCH_SO=" + str(pkg_br))
 print("CHOSEN_PKG_VIZ_SO=" + str(pkg_vz))
 PY
 echo "=========================================================================="
 
-# Extract chosen .so paths for ldd checks
+# ------------------------------
+# (3) ldd on the exact imported madrona .so (link targets)
+# ------------------------------
+echo "=== [CONTAINER] (3) ldd link targets for imported madrona .so ==="
 CHOSEN_PKG_BATCH_SO="$(python - <<'"'"'PY'"'"'
 import importlib.util
-spec = importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer")
-print("" if spec is None else spec.origin)
+s = importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer")
+print("" if s is None else s.origin)
 PY
 )"
 CHOSEN_PKG_VIZ_SO="$(python - <<'"'"'PY'"'"'
 import importlib.util
-spec = importlib.util.find_spec("madrona_mjx._madrona_mjx_visualizer")
-print("" if spec is None else spec.origin)
+s = importlib.util.find_spec("madrona_mjx._madrona_mjx_visualizer")
+print("" if s is None else s.origin)
 PY
 )"
 
-echo "=== [CONTAINER] ldd check: extension .so linkage ==="
-if [[ -n "$CHOSEN_PKG_BATCH_SO" && -f "$CHOSEN_PKG_BATCH_SO" ]]; then
-  echo "--- ldd batch_renderer: $CHOSEN_PKG_BATCH_SO"
-  ldd -v "$CHOSEN_PKG_BATCH_SO" | grep -E "libcuda|libcudart|nvJitLink|libstdc\+\+|libgcc_s|libmadmjx|Version" || true
-else
-  echo "FATAL: batch_renderer .so path missing -> cannot ldd"; exit 91
-fi
+echo "--- batch so: $CHOSEN_PKG_BATCH_SO"
+ldd -v "$CHOSEN_PKG_BATCH_SO" | egrep "libcuda|libcudart|nvJitLink|nvrtc|libstdc\+\+|libgcc_s|libmadmjx|Version" || true
 
-if [[ -n "$CHOSEN_PKG_VIZ_SO" && -f "$CHOSEN_PKG_VIZ_SO" ]]; then
-  echo "--- ldd visualizer: $CHOSEN_PKG_VIZ_SO"
-  ldd -v "$CHOSEN_PKG_VIZ_SO" | grep -E "libcuda|libcudart|nvJitLink|libstdc\+\+|libgcc_s|libmadmjx|Version" || true
-else
-  echo "FATAL: visualizer .so path missing -> cannot ldd"; exit 92
-fi
-echo "===================================================="
+echo "--- viz so:   $CHOSEN_PKG_VIZ_SO"
+ldd -v "$CHOSEN_PKG_VIZ_SO" | egrep "libcuda|libcudart|nvJitLink|nvrtc|libstdc\+\+|libgcc_s|libmadmjx|Version" || true
+echo "================================================================="
 
 echo "=== [CONTAINER] nvJitLink symbol check ==="
 python - <<'"'"'PY'"'"'
@@ -283,8 +259,54 @@ PY
 echo "========================================="
 
 echo "=== [CONTAINER] ldd check for what libmadmjx_mgr.so actually binds ==="
-ldd -v /opt/madrona_mjx/build/libmadmjx_mgr.so | grep -E "nvJitLink|Version|libmadmjx_mgr|libcuda|libcudart" || true
+ldd -v /opt/madrona_mjx/build/libmadmjx_mgr.so | egrep "nvJitLink|nvrtc|libcuda|libcudart|Version|libmadmjx_mgr" || true
 echo "==============================================================="
+
+# ------------------------------
+# (4) Minimal reproducer: render once, block_until_ready, then torch.cuda.synchronize()
+#     NO DLPack conversion.
+# ------------------------------
+echo "=== [CONTAINER] (4) Render-only probe: sync immediately after renderer.render ==="
+python - <<'"'"'PY'"'"'
+import os, importlib.util
+import jax, jax.numpy as jp
+import torch
+
+B = int(os.environ.get("RENDER_PROBE_B", "32"))
+print("[probe] B =", B)
+
+# Load StereoPickCube directly from file to avoid import path weirdness
+path = "/workspace/Mujoco_Sim/pick_env.py"
+spec = importlib.util.spec_from_file_location("pick_env_mod", path)
+m = importlib.util.module_from_spec(spec)
+assert spec and spec.loader
+spec.loader.exec_module(m)
+
+StereoPickCube = getattr(m, "StereoPickCube")
+env = StereoPickCube(render_batch_size=B)
+
+# Build batched state via vmap(reset_physics)
+keys = jax.random.split(jax.random.PRNGKey(0), B)
+st_b = jax.vmap(env.reset_physics)(keys)
+data_b = st_b.data
+
+# Init token + render once
+env._ensure_render_token(data_b, debug=True)
+rgb = env.render_rgba(data_b)
+
+# Force completion on JAX side first
+jax.block_until_ready(rgb)
+print("[probe] jax.block_until_ready(rgb) OK; rgb:", getattr(rgb, "shape", None), getattr(rgb, "dtype", None))
+
+# Now force a global CUDA sync (this is where you said it fails)
+try:
+    torch.cuda.synchronize()
+    print("[probe] torch.cuda.synchronize() OK")
+except Exception as e:
+    print("[probe] torch.cuda.synchronize() FAILED:", repr(e))
+    raise
+PY
+echo "==========================================================================="
 
 echo "=== [CONTAINER] starting training ==="
 stdbuf -oL -eL python -u execute.py 2>&1
