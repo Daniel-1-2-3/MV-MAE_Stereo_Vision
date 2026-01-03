@@ -98,48 +98,22 @@ set -euo pipefail
 # Avoid user-site surprises (prevents ~/.local injection)
 export PYTHONNOUSERSITE=1
 
-# CUDA toolkit root (used for ptxas/libdevice via XLA_FLAGS; does NOT force runtime libs)
+# CUDA toolkit root (used for ptxas/libdevice via XLA_FLAGS)
 if [[ -d /usr/local/cuda-12.4 ]]; then
   export CUDA_HOME=/usr/local/cuda-12.4
 else
   export CUDA_HOME=/usr/local/cuda
 fi
 
-# --------- CHANGED: prefer ONE CUDA runtime lib family (venv nvidia/*) ----------
-# Reason: your log proves JAX is already loading libcudart from site-packages/nvidia,
-# while you were forcing nvJitLink from /usr/local/cuda -> mixed set -> CUDA poisoning.
-PY_NVIDIA_ROOT="$(python - << "PY"
-import os, sys
-for p in sys.path:
-    if p and "site-packages" in p:
-        n = os.path.join(p, "nvidia")
-        if os.path.isdir(n):
-            print(n)
-            break
-PY
-)"
-if [[ -z "${PY_NVIDIA_ROOT:-}" ]]; then
-  echo "FATAL: could not locate venv site-packages/nvidia (cannot enforce a single CUDA lib set)"
-  exit 11
-fi
-
-PIP_CUDA_LIB_DIRS=()
-for sub in cuda_runtime cuda_nvrtc nvjitlink cublas cudnn cufft curand cusolver cusparse nccl; do
-  d="$PY_NVIDIA_ROOT/$sub/lib"
-  [[ -d "$d" ]] && PIP_CUDA_LIB_DIRS+=("$d")
-done
-PIP_CUDA_LIB_PATH="$(IFS=:; echo "${PIP_CUDA_LIB_DIRS[*]}")"
-echo "PIP_CUDA_LIB_PATH=$PIP_CUDA_LIB_PATH"
-
-# CRITICAL: do not pin system nvJitLink via LD_PRELOAD (it creates dual nvJitLink loads)
+# --------- CHANGED: force SYSTEM CUDA TOOLKIT user-mode libs ONLY ----------
+# Put CUDA toolkit libs first (nvrtc/nvJitLink/cudart), then Madrona build,
+# then driver libs provided by apptainer --nv.
 unset LD_PRELOAD
+export LD_LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib:$CUDA_HOME/lib64:/opt/madrona_mjx/build:/.singularity.d/libs:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+echo "USING SYSTEM CUDA TOOLKIT LIBS (no pip nvidia/* in LD_LIBRARY_PATH)"
+# -------------------------------------------------------------------------
 
-# Put pip CUDA libs FIRST to keep libcudart/nvrtc/nvJitLink consistent in-process.
-# Keep system CUDA dirs LAST as fallback only.
-export LD_LIBRARY_PATH="${PIP_CUDA_LIB_PATH}${PIP_CUDA_LIB_PATH:+:}/opt/madrona_mjx/build:/.singularity.d/libs:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:$CUDA_HOME/targets/x86_64-linux/lib:$CUDA_HOME/lib64"
-# -------------------------------------------------------------------------------
-
-# Point XLA at the toolkit tree (ptxas/libdevice); independent of runtime-lib choice
+# Point XLA at the toolkit tree (ptxas/libdevice)
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=$CUDA_HOME"
 
 # JAX runtime knobs
@@ -156,8 +130,6 @@ echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
 echo "PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-}"
 echo "CUDA_HOME=${CUDA_HOME:-}"
-echo "PY_NVIDIA_ROOT=${PY_NVIDIA_ROOT:-}"
-echo "PIP_CUDA_LIB_PATH=${PIP_CUDA_LIB_PATH:-}"
 echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
 echo "LD_PRELOAD=${LD_PRELOAD:-}"
 echo "JAX_PLATFORMS=${JAX_PLATFORMS:-}"
@@ -203,8 +175,8 @@ print("_madrona_mjx_visualizer (top-level)     ->", origin("_madrona_mjx_visuali
 PY
 echo "======================================"
 
-# --------- CHANGED: meaningful fail-fast (import JAX so CUDA libs actually load) ----------
-echo "=== [CONTAINER] loader sanity (maps, no-mixing) ==="
+# --------- CHANGED: fail-fast if pip nvidia CUDA user-mode libs get loaded ----------
+echo "=== [CONTAINER] loader sanity (maps, system-only) ==="
 python - << "PY"
 import re, sys
 import jax
@@ -238,20 +210,15 @@ print("CUDA libs in this process:")
 for h in uniq:
   print("  ", h)
 
-pip=[h for h in uniq if "/site-packages/nvidia/" in h]
-syscuda=[h for h in uniq if "/usr/local/cuda" in h]
-
-# libcuda.so is expected from driver (/usr/local/nvidia or /.singularity.d/libs); ignore it for mixing detection.
-pip_core=[h for h in pip if "libcuda.so" not in h]
-sys_core=[h for h in syscuda if "libcuda.so" not in h]
-
-if pip_core and sys_core:
-  print("FATAL: mixed CUDA user-mode libs loaded (pip nvidia/* AND /usr/local/cuda*).")
-  print("  pip:", pip_core)
-  print("  sys:", sys_core)
+# We expect libcuda.so from driver (.singularity.d or /usr/local/nvidia). That is OK.
+bad=[h for h in uniq if "/site-packages/nvidia/" in h and "libcuda.so" not in h]
+if bad:
+  print("FATAL: pip nvidia/* CUDA user-mode libs loaded, but this run is configured for system CUDA toolkit libs only:")
+  for b in bad:
+    print("  ", b)
   sys.exit(99)
 
-print("OK: no pip/system CUDA user-mode mixing detected.")
+print("OK: system CUDA toolkit libs only (pip nvidia/* not loaded).")
 PY
 echo "========================================"
 # -------------------------------------------------------------------------------
