@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mjxs_mvmae
 #SBATCH --nodes=1
-#SBATCH --exclude=kn010
+#SBATCH --exclude=kn117
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
@@ -110,8 +110,6 @@ export PYTHONUNBUFFERED=1
 export JAX_TRACEBACK_FILTERING=off
 export PICK_ENV_DEBUG=1
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
-export CUDA_LAUNCH_BLOCKING=1
-export PICK_ENV_DEBUG=1
 
 echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
