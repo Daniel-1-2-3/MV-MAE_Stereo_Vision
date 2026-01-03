@@ -1,3 +1,6 @@
+# =========================
+# Mujoco_Sim/pick_env.py
+# =========================
 # Copyright 2025 DeepMind Technologies Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,7 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 """Bring a box to a target and orientation.
 
 This version mirrors the *working* approach you showed:
@@ -24,6 +26,20 @@ This version mirrors the *working* approach you showed:
 
 Public reset/step still exist for convenience; they render by temporarily broadcasting
 a single world to `render_batch_size` and returning only the first image (slow path).
+
+NEW (debug/probes):
+- If PICK_ENV_PROBE=1, prints very detailed stage markers around:
+  - importing / env construction (constructor)
+  - renderer.init / renderer.render
+  - immediate CUDA last-error state (peek + optional clear)
+  - lightweight JAX ops right after init/render (to detect "poisoning")
+  - /proc/self/maps CUDA library list (optional)
+- Controls:
+  - PICK_ENV_PROBE=1 enables detailed probes
+  - PROBE_CUDA_CLEAR_MODE=peek|get   (peek doesn't clear; get clears)
+  - PROBE_DUMP_MAPS=1 dumps CUDA libs from /proc/self/maps at key stages
+  - PROBE_FAIL_FAST=1 re-raises immediately after detecting nonzero CUDA error
+  - PICK_ENV_PROBE_SYNC=1 forces block_until_ready on rgb inside render_rgba/render_pixels
 """
 
 from __future__ import annotations
@@ -32,6 +48,9 @@ from typing import Any, Dict, Optional, Union
 
 import importlib.util
 import os
+import re
+import time
+import traceback
 from pathlib import Path
 
 # Reduce noisy XLA logging (includes the "backend config ... non UTF-8" warnings).
@@ -49,10 +68,155 @@ from mujoco import mjx
 from Custom_Mujoco_Playground._src import mjx_env
 from Custom_Mujoco_Playground._src.mjx_env import State
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
-import torch
 
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
+
+
+# -----------------------------
+# Probe helpers (non-jit only)
+# -----------------------------
+
+_CUDART = None
+
+
+def _probe_enabled() -> bool:
+    return os.environ.get("PICK_ENV_PROBE", "0") == "1"
+
+
+def _probe_dump_maps_enabled() -> bool:
+    return os.environ.get("PROBE_DUMP_MAPS", "0") == "1"
+
+
+def _probe_fail_fast() -> bool:
+    return os.environ.get("PROBE_FAIL_FAST", "0") == "1"
+
+
+def _probe_cuda_clear_mode() -> str:
+    # "peek" (default) does NOT clear last error, "get" clears it.
+    m = os.environ.get("PROBE_CUDA_CLEAR_MODE", "peek").strip().lower()
+    return "get" if m == "get" else "peek"
+
+
+def _probe_sync() -> bool:
+    return os.environ.get("PICK_ENV_PROBE_SYNC", "0") == "1"
+
+
+def _p(msg: str) -> None:
+    # Always flush so logs aren’t reordered vs CUDA failures
+    print(msg, flush=True)
+
+
+def _ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _dump_cuda_maps(tag: str) -> None:
+    if not _probe_dump_maps_enabled():
+        return
+    pats = [
+        r".*libcuda\.so(\.[0-9]+)*$",
+        r".*libcudart\.so(\.[0-9]+)*$",
+        r".*libnvrtc\.so(\.[0-9]+)*$",
+        r".*libnvJitLink\.so(\.[0-9]+)*$",
+        r".*libnvidia-ptxjitcompiler\.so(\.[0-9]+)*$",
+        r".*libcublas\.so(\.[0-9]+)*$",
+        r".*libcudnn\.so(\.[0-9]+)*$",
+    ]
+    seen = set()
+    uniq = []
+    try:
+        with open("/proc/self/maps", "r") as f:
+            for line in f:
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                path = parts[-1]
+                if any(re.match(p, path) for p in pats):
+                    if path not in seen:
+                        seen.add(path)
+                        uniq.append(path)
+    except Exception as e:
+        _p(f"[PICK_ENV_PROBE] [{tag}] maps read failed: {e!r}")
+        return
+
+    _p(f"[PICK_ENV_PROBE] [{tag}] CUDA libs in /proc/self/maps ({len(uniq)}):")
+    for h in uniq:
+        _p(f"  {h}")
+
+
+def _load_cudart():
+    global _CUDART
+    if _CUDART is not None:
+        return _CUDART
+    try:
+        import ctypes
+
+        for name in ("libcudart.so.12", "libcudart.so"):
+            try:
+                _CUDART = ctypes.CDLL(name)
+                # configure signatures
+                _CUDART.cudaPeekAtLastError.restype = ctypes.c_int
+                _CUDART.cudaGetLastError.restype = ctypes.c_int
+                _CUDART.cudaGetErrorString.restype = ctypes.c_char_p
+                return _CUDART
+            except Exception:
+                pass
+    except Exception:
+        pass
+    _CUDART = None
+    return None
+
+
+def _cuda_last_error(tag: str) -> tuple[int, str]:
+    lib = _load_cudart()
+    mode = _probe_cuda_clear_mode()
+    if lib is None:
+        _p(f"[PICK_ENV_PROBE] [{tag}] libcudart not loadable (ctypes).")
+        return (-999, "no libcudart")
+    try:
+        if mode == "get":
+            err = int(lib.cudaGetLastError())
+            mode_s = "Get"
+        else:
+            err = int(lib.cudaPeekAtLastError())
+            mode_s = "Peek"
+        msg = lib.cudaGetErrorString(err)
+        msg_s = msg.decode("utf-8", "ignore") if msg else ""
+        _p(f"[PICK_ENV_PROBE] [{tag}] cuda{mode_s}AtLastError -> ({err}, {msg_s!r})")
+        return (err, msg_s)
+    except Exception as e:
+        _p(f"[PICK_ENV_PROBE] [{tag}] cuda last-error query failed: {e!r}")
+        return (-998, "query failed")
+
+
+def _jax_small_op(tag: str) -> None:
+    """Lightweight JAX op to detect 'poisoned' runtime after renderer calls."""
+    try:
+        y = jax.jit(lambda: (jp.arange(4096, dtype=jp.float32) * 3).sum())()
+        jax.block_until_ready(y)
+        _p(f"[PICK_ENV_PROBE] [{tag}] PASS: small JAX op OK")
+    except Exception as e:
+        _p(f"[PICK_ENV_PROBE] [{tag}] FAIL: small JAX op -> {e!r}")
+        traceback.print_exc()
+        raise
+
+
+def _runtime_snapshot(tag: str) -> None:
+    if not _probe_enabled():
+        return
+    try:
+        backend = jax.lib.xla_bridge.get_backend()
+        _p(f"[PICK_ENV_PROBE] [{tag}] time={_ts()} pid={os.getpid()}")
+        _p(f"[PICK_ENV_PROBE] [{tag}] jax/jaxlib: {jax.__version__} {jaxlib.__version__}")
+        _p(f"[PICK_ENV_PROBE] [{tag}] backend: {backend.platform} | {backend.platform_version}")
+        _p(f"[PICK_ENV_PROBE] [{tag}] devices: {jax.devices()}")
+        _p(f"[PICK_ENV_PROBE] [{tag}] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
+        _p(f"[PICK_ENV_PROBE] [{tag}] LD_LIBRARY_PATH={os.environ.get('LD_LIBRARY_PATH','')}")
+        _p(f"[PICK_ENV_PROBE] [{tag}] XLA_FLAGS={os.environ.get('XLA_FLAGS','')}")
+        _p(f"[PICK_ENV_PROBE] [{tag}] JAX_PLATFORMS={os.environ.get('JAX_PLATFORMS','')}")
+    except Exception as e:
+        _p(f"[PICK_ENV_PROBE] [{tag}] runtime snapshot failed: {e!r}")
 
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
@@ -127,12 +291,14 @@ def _batched_body_xpos(data: mjx.Data, body_id: int) -> jax.Array:
 
 def _broadcast_tree_to_batch(tree, B: int):
     """Broadcast a pytree of arrays/scalars to a leading batch dim B."""
+
     def _bcast(x):
         if not hasattr(x, "ndim"):
             return x
         if x.ndim == 0:
             return jp.broadcast_to(x, (B,))
         return jp.broadcast_to(x, (B,) + x.shape)
+
     return jax.tree_util.tree_map(_bcast, tree)
 
 
@@ -151,6 +317,11 @@ class StereoPickCube(panda.PandaBase):
         self.render_batch_size = int(render_batch_size)
         self.render_width = int(render_width)
         self.render_height = int(render_height)
+
+        if _probe_enabled():
+            _runtime_snapshot("StereoPickCube.__init__ (begin)")
+            _dump_cuda_maps("init(begin)")
+            _cuda_last_error("init(begin)")
 
         # ---- Base MJX env init (DO NOT call super()) ----
         mjx_env.MjxEnv.__init__(self, config, config_overrides)
@@ -212,7 +383,9 @@ class StereoPickCube(panda.PandaBase):
         box_hand_ids = []
         for i, n in enumerate(sensor_names):
             nl = n.lower()
-            if (("box" in nl) or ("cube" in nl) or ("object" in nl)) and (("hand" in nl) or ("finger" in nl) or ("gripper" in nl)):
+            if (("box" in nl) or ("cube" in nl) or ("object" in nl)) and (
+                ("hand" in nl) or ("finger" in nl) or ("gripper" in nl)
+            ):
                 box_hand_ids.append(i)
 
         if not box_hand_ids:
@@ -234,8 +407,18 @@ class StereoPickCube(panda.PandaBase):
                 print("[diag] box-hand sensor: NOT FOUND (set to -1)")
 
         # ---- Renderer: create now, init token lazily (outside jit) ----
+        if _probe_enabled():
+            _p(f"[PICK_ENV_PROBE] creating BatchRenderer(num_worlds={self.render_batch_size}, HxW={self.render_height}x{self.render_width})")
+            _cuda_last_error("pre BatchRenderer()")
+            _dump_cuda_maps("pre BatchRenderer()")
+
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
+
+        if _probe_enabled():
+            _cuda_last_error("post BatchRenderer()")
+            _dump_cuda_maps("post BatchRenderer()")
+            _runtime_snapshot("StereoPickCube.__init__ (end)")
 
     # ---- IMPORTANT: prevent base-class observation_size from tracing reset() ----
     @property
@@ -254,9 +437,7 @@ class StereoPickCube(panda.PandaBase):
         self._sample_orientation = False
 
     def _create_renderer(self) -> BatchRenderer:
-        enabled_geom_groups = np.asarray(
-            self._config.vision_config.enabled_geom_groups, dtype=np.int32
-        )
+        enabled_geom_groups = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
         return BatchRenderer(
             m=self._mjx_model,
             gpu_id=int(self._config.vision_config.gpu_id),
@@ -275,30 +456,73 @@ class StereoPickCube(panda.PandaBase):
     # -------------------------
 
     def render_rgba(self, data_batched: mjx.Data) -> jax.Array:
-        """Return raw Madrona RGBA uint8 frames: [B, 2, H, W, 4].
-
-        This intentionally avoids any JAX-side postprocessing (astype/concat/div),
-        so you can fuse views + normalize on the Torch side (still on GPU).
-        """
+        """Return raw Madrona RGBA uint8 frames: [B, 2, H, W, 4]."""
         if self._render_token is None:
             self._ensure_render_token(data_batched, debug=False)
 
-        new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
-        self._render_token = new_token
+        if _probe_enabled():
+            _cuda_last_error("render_rgba(pre)")
+            _dump_cuda_maps("render_rgba(pre)")
+
+        try:
+            new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
+            self._render_token = new_token
+        except Exception as e:
+            _p(f"[PICK_ENV_PROBE] render_rgba: renderer.render EXCEPTION -> {e!r}")
+            traceback.print_exc()
+            _cuda_last_error("render_rgba(renderer.render EXC)")
+            raise
+
+        if _probe_enabled():
+            # Optionally force completion right here so the CUDA error is attributed to render, not later JAX ops.
+            if _probe_sync():
+                try:
+                    jax.block_until_ready(rgb)
+                except Exception as e:
+                    _p(f"[PICK_ENV_PROBE] render_rgba: block_until_ready(rgb) EXCEPTION -> {e!r}")
+                    traceback.print_exc()
+                    _cuda_last_error("render_rgba(post, after b_u_r EXC)")
+                    raise
+            _p(f"[PICK_ENV_PROBE] render_rgba: rgb shape={getattr(rgb,'shape',None)} dtype={getattr(rgb,'dtype',None)}")
+            err, _ = _cuda_last_error("render_rgba(post)")
+            # If renderer left a sticky CUDA error, this is the smoking gun.
+            if err != 0 and _probe_fail_fast():
+                raise RuntimeError(f"PICK_ENV_PROBE: nonzero CUDA last-error after render_rgba: {err}")
         return rgb
-    
+
     def render_pixels(self, data_batched: mjx.Data) -> jax.Array:
         if self._render_token is None:
-            print('token again')
             self._ensure_render_token(data_batched, debug=False)
 
-        # IMPORTANT: call the renderer custom call standalone
-        print('entered render_pixels')
-        new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
-        print('render done')
+        if _probe_enabled():
+            _cuda_last_error("render_pixels(pre)")
+            _dump_cuda_maps("render_pixels(pre)")
 
-        pixels = self._postprocess_rgb(rgb)
-        print('postprocess done')
+        # Standalone renderer call
+        new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
+
+        if _probe_enabled() and _probe_sync():
+            jax.block_until_ready(rgb)
+
+        if _probe_enabled():
+            _p(f"[PICK_ENV_PROBE] render_pixels: rgb shape={getattr(rgb,'shape',None)} dtype={getattr(rgb,'dtype',None)}")
+            err, _ = _cuda_last_error("render_pixels(post-render)")
+            if err != 0 and _probe_fail_fast():
+                raise RuntimeError(f"PICK_ENV_PROBE: nonzero CUDA last-error after render_pixels render: {err}")
+
+        # JAX-side postprocess (this is exactly where you used to crash)
+        try:
+            pixels = self._postprocess_rgb(rgb)
+            if _probe_enabled():
+                if _probe_sync():
+                    jax.block_until_ready(pixels)
+                _p(f"[PICK_ENV_PROBE] postprocess_rgb: pixels shape={getattr(pixels,'shape',None)} dtype={getattr(pixels,'dtype',None)}")
+                _cuda_last_error("render_pixels(post-postprocess)")
+        except Exception as e:
+            _p(f"[PICK_ENV_PROBE] render_pixels: _postprocess_rgb EXCEPTION -> {e!r}")
+            traceback.print_exc()
+            _cuda_last_error("render_pixels(postprocess EXC)")
+            raise
 
         self._render_token = new_token
         return pixels
@@ -306,10 +530,8 @@ class StereoPickCube(panda.PandaBase):
     @staticmethod
     def _postprocess_rgb(rgb: jax.Array) -> jax.Array:
         # rgb: [B, 2, H, W, 4] uint8
-
         left = rgb[:, 0, :, :, :3].astype(jp.float32)
         right = rgb[:, 1, :, :, :3].astype(jp.float32)
-        
         return jp.concatenate([left, right], axis=2) / 255.0  # [B,H,2W,3]
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
@@ -320,7 +542,6 @@ class StereoPickCube(panda.PandaBase):
 
     def render_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
         """Public non-jit rendering hook: returns pixels [B,H,2W,3]."""
-        print('entered render obs')
         _, obs = self._get_obs(data, info)
         return obs
 
@@ -329,7 +550,12 @@ class StereoPickCube(panda.PandaBase):
         if self._render_token is not None:
             return
 
-        # Sanity: Madrona renderer num_worlds must match the batched data leading dim.
+        if _probe_enabled():
+            _runtime_snapshot("_ensure_render_token(begin)")
+            _cuda_last_error("_ensure_render_token(pre-check)")
+            _dump_cuda_maps("_ensure_render_token(pre-check)")
+
+        # Sanity: Madrona renderer num_worlds must match batched data leading dim.
         bshape = getattr(data_batched.geom_xpos, "shape", None)
         if bshape is None or len(bshape) < 1:
             raise ValueError("render requires batched mjx.Data with leading dim = num_worlds")
@@ -340,9 +566,31 @@ class StereoPickCube(panda.PandaBase):
                 "Make them equal (usually set render_batch_size=num_envs)."
             )
 
-        # ONE batched init call (data_batched leading dim must equal num_worlds)
-        render_token, _init_rgb, _init_depth = self.renderer.init(data_batched, self._mjx_model)
-        self._render_token = render_token
+        if _probe_enabled():
+            _p(f"[PICK_ENV_PROBE] _ensure_render_token: B={B} expected={self.render_batch_size}")
+            _cuda_last_error("_ensure_render_token(pre-init)")
+            _jax_small_op("_ensure_render_token(pre-init small JAX op)")
+
+        # ONE batched init call
+        try:
+            render_token, _init_rgb, _init_depth = self.renderer.init(data_batched, self._mjx_model)
+            self._render_token = render_token
+        except Exception as e:
+            _p(f"[PICK_ENV_PROBE] renderer.init EXCEPTION -> {e!r}")
+            traceback.print_exc()
+            _cuda_last_error("_ensure_render_token(init EXC)")
+            raise
+
+        if _probe_enabled():
+            _p(f"[PICK_ENV_PROBE] renderer.init OK; token shape={getattr(self._render_token,'shape',None)} dtype={getattr(self._render_token,'dtype',None)}")
+            err, _ = _cuda_last_error("_ensure_render_token(post-init)")
+            _dump_cuda_maps("_ensure_render_token(post-init)")
+            # This is critical: if err != 0 here, the renderer has already left CUDA in an error state.
+            if err != 0 and _probe_fail_fast():
+                raise RuntimeError(f"PICK_ENV_PROBE: nonzero CUDA last-error right after renderer.init: {err}")
+
+            # Can JAX still run right after init?
+            _jax_small_op("_ensure_render_token(post-init small JAX op)")
 
         if debug:
             backend = jax.lib.xla_bridge.get_backend()
@@ -364,16 +612,31 @@ class StereoPickCube(panda.PandaBase):
             print("init mj_model type:", type(self._mj_model), "has geom_quat:", hasattr(self._mj_model, "geom_quat"))
             print("init mjx_model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
             print("[diag] data.geom_xpos shape:", getattr(data_batched.geom_xpos, "shape", None))
-            # Do NOT .item() / device_get here (that breaks under tracing). Just print shape/dtype.
             print("[diag] render_token shape/dtype:", getattr(self._render_token, "shape", None), getattr(self._render_token, "dtype", None))
 
-            # smoke render is OK in real execution (non-jit); keep it lightweight
+            # smoke render
             new_token, rgb, _ = self.renderer.render(self._render_token, data_batched, self._mjx_model)
             self._render_token = new_token
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
             jax.block_until_ready(rgb)
-            if os.environ.get("RENDER_SYNC", "0") == "1":
-                torch.cuda.synchronize()
+
+        if _probe_enabled():
+            # One smoke render in probe mode to attribute errors early.
+            try:
+                new_token, rgb, _ = self.renderer.render(self._render_token, data_batched, self._mjx_model)
+                self._render_token = new_token
+                if _probe_sync():
+                    jax.block_until_ready(rgb)
+                _p(f"[PICK_ENV_PROBE] smoke render OK: rgb shape={rgb.shape} dtype={rgb.dtype}")
+                err, _ = _cuda_last_error("_ensure_render_token(post-smoke-render)")
+                if err != 0 and _probe_fail_fast():
+                    raise RuntimeError(f"PICK_ENV_PROBE: nonzero CUDA last-error after smoke render: {err}")
+                _jax_small_op("_ensure_render_token(post-smoke small JAX op)")
+            except Exception as e:
+                _p(f"[PICK_ENV_PROBE] smoke render / post-smoke checks EXCEPTION -> {e!r}")
+                traceback.print_exc()
+                _cuda_last_error("_ensure_render_token(smoke EXC)")
+                raise
 
     # -------------------------
     # Physics (single-world, JIT-friendly)
@@ -406,9 +669,7 @@ class StereoPickCube(panda.PandaBase):
         data = data.replace(qpos=qpos0, qvel=qvel0, ctrl=ctrl0)
 
         # Place box
-        data = data.replace(
-            qpos=data.qpos.at[self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
-        )
+        data = data.replace(qpos=data.qpos.at[self._obj_qposadr : self._obj_qposadr + 3].set(box_pos))
 
         # Set mocap target
         target_quat = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
@@ -433,7 +694,6 @@ class StereoPickCube(panda.PandaBase):
             "brightness": brightness,
         }
 
-        # Placeholder obs to keep physics state small.
         obs = jp.zeros((1,), dtype=jp.float32)
         reward = jp.array(0.0, dtype=jp.float32)
         done = jp.array(False)
@@ -453,7 +713,7 @@ class StereoPickCube(panda.PandaBase):
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in raw_rewards.items()}
         total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
-        box_pos = _batched_body_xpos(data, self._obj_body)  # [3] single-world
+        box_pos = _batched_body_xpos(data, self._obj_body)
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0) | (box_pos[2] < 0.0)
 
         new_metrics = dict(state.metrics)
@@ -465,7 +725,7 @@ class StereoPickCube(panda.PandaBase):
 
         return state.replace(
             data=data,
-            obs=state.obs,  # keep placeholder obs
+            obs=state.obs,
             reward=total_reward,
             done=done.astype(jp.float32),
             metrics=new_metrics,
@@ -484,7 +744,6 @@ class StereoPickCube(panda.PandaBase):
         data_b = _broadcast_tree_to_batch(st1.data, B)
         info_b = _broadcast_tree_to_batch(st1.info, B)
 
-        # brightness should be [B,1,1,1] for adjust_brightness
         if "brightness" in info_b:
             b = info_b["brightness"]
             if hasattr(b, "ndim") and b.ndim == 3:
@@ -492,8 +751,7 @@ class StereoPickCube(panda.PandaBase):
 
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
         self._ensure_render_token(data_b, debug)
-        print('ensure render token done')
-        obs_b = self.render_obs(data_b, info_b)  # [B,H,2W,3]
+        obs_b = self.render_obs(data_b, info_b)
         return st1.replace(obs=obs_b[0])
 
     def step(self, state: State, action: jax.Array) -> State:
@@ -534,15 +792,11 @@ class StereoPickCube(panda.PandaBase):
 
         floor_coll = jp.zeros_like(gripper_box)
         for sensor_id in self._floor_hand_found_sensor:
-            floor_coll = floor_coll + (
-                data.sensordata[self._mj_model.sensor_adr[sensor_id]] > 0
-            ).astype(jp.float32)
+            floor_coll = floor_coll + (data.sensordata[self._mj_model.sensor_adr[sensor_id]] > 0).astype(jp.float32)
         no_floor_collision = jp.where(floor_coll > 0, 0.0, 1.0)
 
         if self._box_hand_found_sensor >= 0:
-            hand_box = (
-                data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
-            )
+            hand_box = data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
         else:
             hand_box = jp.array(False)
         no_box_collision = jp.where(hand_box, 0.0, 1.0)
@@ -560,11 +814,7 @@ class StereoPickCube(panda.PandaBase):
         mj_model.geom_size[mj_model.geom("floor").id, :2] = [5.0, 5.0]
 
         mesh_id = mj_model.mesh("finger_1").id
-        geoms = [
-            idx
-            for idx, data_id in enumerate(mj_model.geom_dataid)
-            if data_id == mesh_id
-        ]
+        geoms = [idx for idx, data_id in enumerate(mj_model.geom_dataid) if data_id == mesh_id]
         mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
         return mj_model
 
