@@ -301,11 +301,22 @@ class StereoPickCube(panda.PandaBase):
         print("rgb shape:", rgb_h.shape)
         print("rgb dtype:", rgb_h.dtype)
         print("min/max:", int(rgb_h.min()), int(rgb_h.max()))
+        
+        rgb_only = rgb_h[..., :3]
+        a_only   = rgb_h[..., 3]
+
+        print("RGB min/max:", int(rgb_only.min()), int(rgb_only.max()))
+        print("A   min/max:", int(a_only.min()), int(a_only.max()))
 
         patch = rgb_h[0, 0, :3, :3, :3]  # [3,3,3]
         print(np.array2string(patch, separator=", ", max_line_width=120))
+        img0_rgb = rgb_h[0, 0, :, :, :3]
+        nonblack = np.mean(np.any(img0_rgb != 0, axis=-1))
+        print("fraction of non-black pixels (world0 cam0):", float(nonblack))
+
         left = rgb[:, 0, :, :, :3].astype(jp.float32)
         right = rgb[:, 1, :, :, :3].astype(jp.float32)
+        
         return jp.concatenate([left, right], axis=2) / 255.0  # [B,H,2W,3]
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
