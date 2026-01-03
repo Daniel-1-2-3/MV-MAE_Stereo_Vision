@@ -67,7 +67,9 @@ echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 echo "=========================="
 
+# --------------------------------------------------------------------
 # Probe 1: EGL + Torch (fast, catches GL issues early)
+# --------------------------------------------------------------------
 apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
@@ -86,7 +88,9 @@ PY
 echo "====================================="
 '
 
+# --------------------------------------------------------------------
 # Probe 2 + Training
+# --------------------------------------------------------------------
 apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
@@ -179,7 +183,7 @@ echo "======================================================"
 # ------------------------------
 echo "=== [CONTAINER] Madrona import + extension origins (must be consistent) ==="
 python - <<'"'"'PY'"'"'
-import os, sys, glob, site, importlib.util
+import os, glob, site, importlib.util
 
 def origin(name):
     spec = importlib.util.find_spec(name)
@@ -224,6 +228,7 @@ print("CHOSEN_PKG_VIZ_SO=" + str(pkg_vz))
 PY
 echo "=========================================================================="
 
+
 # ------------------------------
 # (3) ldd on the exact imported madrona .so (link targets)
 # ------------------------------
@@ -263,49 +268,103 @@ ldd -v /opt/madrona_mjx/build/libmadmjx_mgr.so | egrep "nvJitLink|nvrtc|libcuda|
 echo "==============================================================="
 
 # ------------------------------
-# (4) Minimal reproducer: render once, block_until_ready, then torch.cuda.synchronize()
-#     NO DLPack conversion.
+# (4) DECISIVE poisoning probe:
+#     baseline JAX -> Madrona render -> JAX kernel -> Torch kernel -> DLPack crossings
+#     PLUS LD_PRELOAD A/B to isolate nvJitLink preload issues
 # ------------------------------
-echo "=== [CONTAINER] (4) Render-only probe: sync immediately after renderer.render ==="
-python - <<'"'"'PY'"'"'
+echo "=== [CONTAINER] (4) DECISIVE probe: isolate Madrona vs JAX vs Torch vs DLPack ==="
+
+run_probe () {
+  local label="$1"
+  shift
+  echo "---- PROBE RUN: $label ----"
+  "$@" python - <<'"'"'PY'"'"'
 import os, importlib.util
 import jax, jax.numpy as jp
 import torch
+from torch.utils import dlpack as tpack
 
 B = int(os.environ.get("RENDER_PROBE_B", "32"))
-print("[probe] B =", B)
+DBG = os.environ.get("RENDER_PROBE_DEBUG", "0") == "1"
+print("[probe] B =", B, "| debug =", DBG)
 
-# Load StereoPickCube directly from file to avoid import path weirdness
+print("\n[probe] === versions ===")
+print("torch:", torch.__version__)
+print("jax:", jax.__version__)
+import jaxlib
+print("jaxlib:", jaxlib.__version__)
+
+print("\n[probe] === baseline JAX (no Madrona) ===")
+x = jax.jit(lambda: (jp.arange(4096, dtype=jp.float32) * 2).sum())()
+jax.block_until_ready(x)
+print("[probe] baseline JAX OK")
+
+print("\n[probe] === baseline Torch (no Madrona) ===")
+torch.empty((1024,), device="cuda", dtype=torch.float32).fill_(1.0)
+torch.cuda.synchronize()
+print("[probe] baseline Torch OK")
+
+print("\n[probe] === load env + render ===")
 path = "/workspace/Mujoco_Sim/pick_env.py"
 spec = importlib.util.spec_from_file_location("pick_env_mod", path)
-m = importlib.util.module_from_spec(spec)
-assert spec and spec.loader
+m = importlib.util.module_from_spec(spec); assert spec and spec.loader
 spec.loader.exec_module(m)
-
 StereoPickCube = getattr(m, "StereoPickCube")
 env = StereoPickCube(render_batch_size=B)
 
-# Build batched state via vmap(reset_physics)
 keys = jax.random.split(jax.random.PRNGKey(0), B)
 st_b = jax.vmap(env.reset_physics)(keys)
 data_b = st_b.data
 
-# Init token + render once
-env._ensure_render_token(data_b, debug=True)
+# Avoid extra smoke-render unless explicitly testing it
+env._ensure_render_token(data_b, debug=DBG)
 rgb = env.render_rgba(data_b)
-
-# Force completion on JAX side first
 jax.block_until_ready(rgb)
-print("[probe] jax.block_until_ready(rgb) OK; rgb:", getattr(rgb, "shape", None), getattr(rgb, "dtype", None))
+print("[probe] render OK; rgb:", rgb.shape, rgb.dtype)
 
-# Now force a global CUDA sync (this is where you said it fails)
-try:
-    torch.cuda.synchronize()
-    print("[probe] torch.cuda.synchronize() OK")
-except Exception as e:
-    print("[probe] torch.cuda.synchronize() FAILED:", repr(e))
-    raise
+print("\n[probe] === (A1) JAX kernel AFTER render on fresh array (global poison check) ===")
+post = jax.jit(lambda t: t + jp.array(0, dtype=t.dtype))
+fresh = jp.zeros((B, 2, 64, 64, 4), dtype=jp.uint8)
+y0 = post(fresh); jax.block_until_ready(y0)
+print("[probe] PASS A1")
+
+print("\n[probe] === (A2) JAX kernel AFTER render on rgb (buffer/path check) ===")
+y = post(rgb); jax.block_until_ready(y)
+print("[probe] PASS A2")
+
+print("\n[probe] === (B) Torch CUDA AFTER render (no DLPack) ===")
+torch.empty((1024,), device="cuda", dtype=torch.uint8).zero_()
+torch.cuda.synchronize()
+print("[probe] PASS B")
+
+print("\n[probe] === (C) DLPack JAX->Torch + clone AFTER render ===")
+t = tpack.from_dlpack(rgb)          # match wrapper
+t2 = t.contiguous()
+t3 = t2.clone()
+torch.cuda.synchronize()
+print("[probe] PASS C")
+
+print("\n[probe] === (D) DLPack Torch->JAX + JAX op ===")
+tj = jax.dlpack.from_dlpack(t3)
+z = jax.jit(lambda a: a[0,0,0,0,0].astype(jp.int32) + 1)(tj)
+jax.block_until_ready(z)
+print("[probe] PASS D")
+
+print("\n[probe] ALL PASSED")
 PY
+  echo "---- END PROBE RUN: $label ----"
+}
+
+# Run 1: WITH LD_PRELOAD (current environment)
+RENDER_PROBE_DEBUG=0 run_probe "WITH LD_PRELOAD, debug=0" env
+
+# Run 2: WITHOUT LD_PRELOAD (critical A/B)
+RENDER_PROBE_DEBUG=0 run_probe "NO LD_PRELOAD, debug=0" env -u LD_PRELOAD
+
+# Optional: test the debug-smoke-render path too (your pick_env does extra work when debug=True)
+RENDER_PROBE_DEBUG=1 run_probe "WITH LD_PRELOAD, debug=1" env
+RENDER_PROBE_DEBUG=1 run_probe "NO LD_PRELOAD, debug=1" env -u LD_PRELOAD
+
 echo "==========================================================================="
 
 echo "=== [CONTAINER] starting training ==="
