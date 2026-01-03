@@ -92,9 +92,13 @@ class RSLRLBraxWrapper:
         # Non-jit renderer init + render
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
         self._raw_env._ensure_render_token(self.env_state.data, debug)
-        pixels = self._raw_env.render_obs(self.env_state.data, self.env_state.info)
+        # Render raw RGBA (uint8) and fuse views in Torch (on-GPU)
+        rgb = self._raw_env.render_rgba(self.env_state.data)
 
-        obs_t = _jax_to_torch(pixels).to(self.device)
+        rgb_t = _jax_to_torch(rgb).to(self.device)  # [B,2,H,W,4] uint8
+        left = rgb_t[:, 0, :, :, :3]               # [B,H,W,3] uint8
+        right = rgb_t[:, 1, :, :, :3]              # [B,H,W,3] uint8
+        obs_t = torch.cat([left, right], dim=2).contiguous()  # [B,H,2W,3] uint8
         return TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
 
     def step(self, action: torch.Tensor) -> Tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
@@ -108,9 +112,13 @@ class RSLRLBraxWrapper:
 
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
         self._raw_env._ensure_render_token(self.env_state.data, debug)
-        pixels = self._raw_env.render_obs(self.env_state.data, self.env_state.info)
+        # Render raw RGBA (uint8) and fuse views in Torch (on-GPU)
+        rgb = self._raw_env.render_rgba(self.env_state.data)
 
-        obs_t = _jax_to_torch(pixels).to(self.device)
+        rgb_t = _jax_to_torch(rgb).to(self.device)  # [B,2,H,W,4] uint8
+        left = rgb_t[:, 0, :, :, :3]               # [B,H,W,3] uint8
+        right = rgb_t[:, 1, :, :, :3]              # [B,H,W,3] uint8
+        obs_t = torch.cat([left, right], dim=2).contiguous()  # [B,H,2W,3] uint8
         reward_t = _jax_to_torch(self.env_state.reward).to(self.device)
         done_t = _jax_to_torch(self.env_state.done).to(self.device)
 

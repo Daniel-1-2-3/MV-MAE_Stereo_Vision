@@ -273,6 +273,26 @@ class StereoPickCube(panda.PandaBase):
     # Rendering (always non-jit)
     # -------------------------
 
+def render_rgba(self, data_batched: mjx.Data) -> jax.Array:
+    """Return raw Madrona RGBA uint8 frames: [B, 2, H, W, 4].
+
+    This intentionally avoids any JAX-side postprocessing (astype/concat/div),
+    so you can do the view-fusion + normalization in Torch on-GPU.
+    """
+    if self._render_token is None:
+        self._ensure_render_token(data_batched, debug=False)
+
+    debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
+    if debug:
+        print("entered render_rgba")
+    new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
+    if debug:
+        print("render_rgba done")
+
+    self._render_token = new_token
+    return rgb
+
+
     def render_pixels(self, data_batched: mjx.Data) -> jax.Array:
         if self._render_token is None:
             print('token again')
@@ -292,27 +312,6 @@ class StereoPickCube(panda.PandaBase):
     @staticmethod
     def _postprocess_rgb(rgb: jax.Array) -> jax.Array:
         # rgb: [B, 2, H, W, 4] uint8
-        # Force the render to finish *as much as JAX can track*
-        jax.block_until_ready(rgb)
-
-        # Host copy (avoids launching more JAX GPU kernels like reduce_min)
-        rgb_h = np.asarray(jax.device_get(rgb))  # dtype uint8 on CPU
-
-        print("rgb shape:", rgb_h.shape)
-        print("rgb dtype:", rgb_h.dtype)
-        print("min/max:", int(rgb_h.min()), int(rgb_h.max()))
-        
-        rgb_only = rgb_h[..., :3]
-        a_only   = rgb_h[..., 3]
-
-        print("RGB min/max:", int(rgb_only.min()), int(rgb_only.max()))
-        print("A   min/max:", int(a_only.min()), int(a_only.max()))
-
-        patch = rgb_h[0, 0, :3, :3, :3]  # [3,3,3]
-        print(np.array2string(patch, separator=", ", max_line_width=120))
-        img0_rgb = rgb_h[0, 0, :, :, :3]
-        nonblack = np.mean(np.any(img0_rgb != 0, axis=-1))
-        print("fraction of non-black pixels (world0 cam0):", float(nonblack))
 
         left = rgb[:, 0, :, :, :3].astype(jp.float32)
         right = rgb[:, 1, :, :, :3].astype(jp.float32)
