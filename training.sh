@@ -92,31 +92,83 @@ set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
 # ============================================================
-# CUDA/JAX/Madrona loader hardening: DO NOT MIX CUDA LIB SETS
+# CUDA/JAX/Madrona loader hardening: SYSTEM CUDA TOOLKIT ONLY
 # ============================================================
 
-# Avoid user-site surprises (prevents ~/.local injection)
 export PYTHONNOUSERSITE=1
 
-# CUDA toolkit root (used for ptxas/libdevice via XLA_FLAGS)
 if [[ -d /usr/local/cuda-12.4 ]]; then
   export CUDA_HOME=/usr/local/cuda-12.4
 else
   export CUDA_HOME=/usr/local/cuda
 fi
 
-# --------- CHANGED: force SYSTEM CUDA TOOLKIT user-mode libs ONLY ----------
-# Put CUDA toolkit libs first (nvrtc/nvJitLink/cudart), then Madrona build,
-# then driver libs provided by apptainer --nv.
+# -------------------- ADDED: quarantine pip nvidia CUDA libs --------------------
+# JAX is still pulling libcudart from venv site-packages/nvidia/* even when
+# LD_LIBRARY_PATH prefers /usr/local/cuda. This block makes those libs un-loadable.
+PY_NVIDIA_ROOT="$(python - << "PY"
+import os, sys
+for p in sys.path:
+  if p and "site-packages" in p:
+    n = os.path.join(p, "nvidia")
+    if os.path.isdir(n):
+      print(n)
+      break
+PY
+)"
+echo "PY_NVIDIA_ROOT=${PY_NVIDIA_ROOT:-}"
+
+QUAR_DIR="/tmp/pip_cuda_quarantine"
+mkdir -p "$QUAR_DIR"
+RESTORE_LIST="$QUAR_DIR/restore_paths.txt"
+: > "$RESTORE_LIST"
+
+quarantine_one () {
+  local d="$1"
+  if [[ -d "$d" ]]; then
+    local bn
+    bn="$(echo "$d" | sed "s|/|_|g")"
+    local dst="$QUAR_DIR/$bn"
+    echo "[quarantine] moving $d -> $dst"
+    mv "$d" "$dst"
+    echo "$d|$dst" >> "$RESTORE_LIST"
+  fi
+}
+
+# Most important offenders:
+quarantine_one "$PY_NVIDIA_ROOT/cuda_runtime/lib"
+quarantine_one "$PY_NVIDIA_ROOT/cuda_nvrtc/lib"
+quarantine_one "$PY_NVIDIA_ROOT/nvjitlink/lib"
+# Common extras (safe to quarantine if present):
+quarantine_one "$PY_NVIDIA_ROOT/cublas/lib"
+quarantine_one "$PY_NVIDIA_ROOT/cudnn/lib"
+quarantine_one "$PY_NVIDIA_ROOT/cufft/lib"
+quarantine_one "$PY_NVIDIA_ROOT/curand/lib"
+quarantine_one "$PY_NVIDIA_ROOT/cusolver/lib"
+quarantine_one "$PY_NVIDIA_ROOT/cusparse/lib"
+quarantine_one "$PY_NVIDIA_ROOT/nccl/lib"
+
+restore_quarantine () {
+  if [[ -f "$RESTORE_LIST" ]]; then
+    echo "[quarantine] restoring pip CUDA dirs..."
+    while IFS="|" read -r orig dst; do
+      if [[ -d "$dst" ]]; then
+        mkdir -p "$(dirname "$orig")"
+        mv "$dst" "$orig"
+        echo "[quarantine] restored $orig"
+      fi
+    done < "$RESTORE_LIST"
+  fi
+}
+trap restore_quarantine EXIT
+# ------------------------------------------------------------------------------
+
 unset LD_PRELOAD
 export LD_LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib:$CUDA_HOME/lib64:/opt/madrona_mjx/build:/.singularity.d/libs:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
-echo "USING SYSTEM CUDA TOOLKIT LIBS (no pip nvidia/* in LD_LIBRARY_PATH)"
-# -------------------------------------------------------------------------
+echo "USING SYSTEM CUDA TOOLKIT LIBS (pip nvidia/* CUDA dirs quarantined)"
 
-# Point XLA at the toolkit tree (ptxas/libdevice)
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=$CUDA_HOME"
 
-# JAX runtime knobs
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
@@ -142,7 +194,6 @@ nvidia-smi -L || true
 nvidia-smi || true
 echo "============================="
 
-# Cache paths (Madrona compile)
 ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
 GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
 [[ -z "${GPU_MODEL:-}" ]] && GPU_MODEL="unknown"
@@ -175,14 +226,12 @@ print("_madrona_mjx_visualizer (top-level)     ->", origin("_madrona_mjx_visuali
 PY
 echo "======================================"
 
-# --------- CHANGED: fail-fast if pip nvidia CUDA user-mode libs get loaded ----------
 echo "=== [CONTAINER] loader sanity (maps, system-only) ==="
 python - << "PY"
 import re, sys
 import jax
 import jax.numpy as jnp
 
-# Force GPU runtime initialization in THIS process
 jax.block_until_ready(jax.jit(lambda: (jnp.arange(8192, dtype=jnp.float32) * 2).sum())())
 
 pats = [
@@ -210,7 +259,6 @@ print("CUDA libs in this process:")
 for h in uniq:
   print("  ", h)
 
-# We expect libcuda.so from driver (.singularity.d or /usr/local/nvidia). That is OK.
 bad=[h for h in uniq if "/site-packages/nvidia/" in h and "libcuda.so" not in h]
 if bad:
   print("FATAL: pip nvidia/* CUDA user-mode libs loaded, but this run is configured for system CUDA toolkit libs only:")
@@ -221,11 +269,6 @@ if bad:
 print("OK: system CUDA toolkit libs only (pip nvidia/* not loaded).")
 PY
 echo "========================================"
-# -------------------------------------------------------------------------------
-
-# ============================================================
-# (4) DECISIVE probe variants (each is its own python process)
-# ============================================================
 
 echo "=== [CONTAINER] (4) DECISIVE probe variants ==="
 
@@ -295,11 +338,9 @@ else:
 
 dump_loaded_cuda_libs()
 
-# Baseline JAX must succeed
 jax.block_until_ready(jax.jit(lambda: (jp.arange(8192, dtype=jp.float32) * 2).sum())())
 print("[probe] baseline JAX OK")
 
-# Load env
 path = "/workspace/Mujoco_Sim/pick_env.py"
 spec = importlib.util.spec_from_file_location("pick_env_mod", path)
 m = importlib.util.module_from_spec(spec)
@@ -316,7 +357,6 @@ data_b = st_b.data
 
 lib = load_cudart()
 
-# Stage 1: init token only
 env._ensure_render_token(data_b, debug=False)
 print("[probe] renderer.init OK")
 
@@ -327,12 +367,10 @@ except Exception as e:
   print("[probe] FAIL: JAX op after init FAILED -> poisoning at init:", repr(e))
   sys.exit(12)
 
-# Stage 2: render
 rgb = env.render_rgba(data_b)
 jax.block_until_ready(rgb)
 print("[probe] render OK; rgb:", getattr(rgb,"shape",None), getattr(rgb,"dtype",None))
 
-# Immediate CUDA error check (global runtime state)
 triple = cuda_sync_and_last_error(lib)
 if triple is None:
   print("[probe] libcudart ctypes load failed; skipping cudaDeviceSynchronize/cudaGetLastError")
@@ -341,7 +379,6 @@ else:
   print("[probe] cudaDeviceSynchronize rc:", rc)
   print("[probe] cudaGetLastError:", (err, msg))
 
-# Stage 3: first fresh JAX alloc AFTER render (poison test)
 try:
   jax.block_until_ready(jp.zeros((B,2,64,64,4), dtype=jp.uint8))
   print("[probe] PASS: post-render fresh JAX alloc OK")
@@ -349,7 +386,6 @@ except Exception as e:
   print("[probe] FAIL: post-render fresh JAX alloc FAILED -> poisoning after render:", repr(e))
   sys.exit(13)
 
-# Optional: Torch op AFTER render (only if imported)
 if torch_import:
   import torch
   torch.empty((1024,), device="cuda", dtype=torch.float32).fill_(1.0)

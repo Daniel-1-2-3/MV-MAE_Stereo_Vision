@@ -35,8 +35,6 @@ apptainer build training.sif training.def
 ##### Cluster training commands
 
 ### Start training
-chmod +x training.sh
-sbatch training.sh
 
 ### Live updates on file, tailing the last 30 lines, update every 0.5 secs
 watch -n 0.5 'tail -n 30 training-[NUMBER].out'
