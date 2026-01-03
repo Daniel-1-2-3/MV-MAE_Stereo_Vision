@@ -14,8 +14,8 @@ def _torch_to_jax(x: torch.Tensor) -> jax.Array:
 
 
 def _jax_to_torch(x: jax.Array) -> torch.Tensor:
-    # GPU->GPU via DLPack. Using jax.dlpack.to_dlpack avoids relying on __dlpack__ dispatch.
-    return tpack.from_dlpack(jax.dlpack.to_dlpack(x))
+    # GPU->GPU zero-copy via DLPack when possible.
+    return tpack.from_dlpack(x)
 
 
 class RSLRLBraxWrapper:
@@ -91,27 +91,14 @@ class RSLRLBraxWrapper:
 
         # Non-jit renderer init + render
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
-        self._raw_env._ensure_render_token(self.env_state.data, debug)        # Render raw RGBA (uint8)
+        self._raw_env._ensure_render_token(self.env_state.data, debug)
+        # Render raw RGBA (uint8) and fuse views in Torch (on-GPU)
         rgb = self._raw_env.render_rgba(self.env_state.data)
 
-        # Important: surface any renderer-side CUDA errors here (before Torch touches it).
-        jax.block_until_ready(rgb)
-
-        # Convert to Torch (GPU->GPU) and make a Torch-owned contiguous copy to avoid
-        # any DLPack/stride quirks with subsequent CUDA kernels.
-        rgb_t = _jax_to_torch(rgb)
-        if rgb_t.device != self.device:
-            rgb_t = rgb_t.to(self.device, non_blocking=True)
-        rgb_t = rgb_t.contiguous()
-
-        # Fuse stereo views without torch.cat (which can be picky on some uint8/stride cases)
-        left = rgb_t[:, 0, :, :, :3].contiguous()   # [B,H,W,3]
-        right = rgb_t[:, 1, :, :, :3].contiguous()  # [B,H,W,3]
-        B, H, W, C = left.shape
-        obs_t = torch.empty((B, H, 2 * W, C), device=self.device, dtype=left.dtype)
-        obs_t[:, :, :W, :].copy_(left)
-        obs_t[:, :, W:, :].copy_(right)
-
+        rgb_t = _jax_to_torch(rgb).to(self.device)  # [B,2,H,W,4] uint8
+        left = rgb_t[:, 0, :, :, :3]               # [B,H,W,3] uint8
+        right = rgb_t[:, 1, :, :, :3]              # [B,H,W,3] uint8
+        obs_t = torch.cat([left, right], dim=2).contiguous()  # [B,H,2W,3] uint8
         return TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
 
     def step(self, action: torch.Tensor) -> Tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
@@ -124,23 +111,14 @@ class RSLRLBraxWrapper:
         self.env_state = self.step_fn(self.env_state, action_jax)
 
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
-        self._raw_env._ensure_render_token(self.env_state.data, debug)        # Render raw RGBA (uint8)
+        self._raw_env._ensure_render_token(self.env_state.data, debug)
+        # Render raw RGBA (uint8) and fuse views in Torch (on-GPU)
         rgb = self._raw_env.render_rgba(self.env_state.data)
 
-        # Surface any renderer-side CUDA errors here.
-        jax.block_until_ready(rgb)
-
-        rgb_t = _jax_to_torch(rgb)
-        if rgb_t.device != self.device:
-            rgb_t = rgb_t.to(self.device, non_blocking=True)
-        rgb_t = rgb_t.contiguous()
-
-        left = rgb_t[:, 0, :, :, :3].contiguous()
-        right = rgb_t[:, 1, :, :, :3].contiguous()
-        B, H, W, C = left.shape
-        obs_t = torch.empty((B, H, 2 * W, C), device=self.device, dtype=left.dtype)
-        obs_t[:, :, :W, :].copy_(left)
-        obs_t[:, :, W:, :].copy_(right)
+        rgb_t = _jax_to_torch(rgb).to(self.device)  # [B,2,H,W,4] uint8
+        left = rgb_t[:, 0, :, :, :3]               # [B,H,W,3] uint8
+        right = rgb_t[:, 1, :, :, :3]              # [B,H,W,3] uint8
+        obs_t = torch.cat([left, right], dim=2).contiguous()  # [B,H,2W,3] uint8
         reward_t = _jax_to_torch(self.env_state.reward).to(self.device)
         done_t = _jax_to_torch(self.env_state.done).to(self.device)
 
