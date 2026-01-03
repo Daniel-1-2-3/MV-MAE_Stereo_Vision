@@ -67,9 +67,7 @@ echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 echo "=========================="
 
-# --------------------------------------------------------------------
-# Probe 1: EGL + Torch (fast, catches GL issues early)
-# --------------------------------------------------------------------
+# Probe 1: EGL + Torch
 apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
@@ -88,20 +86,16 @@ PY
 echo "====================================="
 '
 
-# --------------------------------------------------------------------
 # Probe 2 + Training
-# --------------------------------------------------------------------
 apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
-# ---- CUDA / nvJitLink: make dynamic linking unambiguous ----
+# ---- CUDA / nvJitLink: keep consistent & explicit ----
 export LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib64:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
-export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12"
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
-# -----------------------------------------------------------
+# ------------------------------------------------------
 
-# JAX runtime knobs
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
@@ -114,7 +108,6 @@ echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
 echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
-echo "LD_PRELOAD=${LD_PRELOAD:-}"
 echo "JAX_PLATFORMS=${JAX_PLATFORMS:-}"
 echo "XLA_FLAGS=${XLA_FLAGS:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
@@ -125,7 +118,7 @@ nvidia-smi -L || true
 nvidia-smi || true
 echo "============================="
 
-# Cache paths (good for Madrona compile)
+# Cache paths (Madrona compile)
 ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
 GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
 [[ -z "${GPU_MODEL:-}" ]] && GPU_MODEL="unknown"
@@ -138,234 +131,222 @@ echo "MADRONA_MWGPU_KERNEL_CACHE=$MADRONA_MWGPU_KERNEL_CACHE"
 echo "MADRONA_BVH_KERNEL_CACHE=$MADRONA_BVH_KERNEL_CACHE"
 
 echo "=== [CONTAINER] JAX device check ==="
-python - <<'"'"'PY'"'"'
+python - << "PY"
 import jax
 print("jax:", jax.__version__)
 print("devices:", jax.devices())
 PY
 echo "==================================="
 
-# ------------------------------
-# (1) JAX/jaxlib + backend string
-# ------------------------------
-echo "=== [CONTAINER] (1) JAX/JAXLIB + backend platform_version ==="
-python - <<'"'"'PY'"'"'
-import jax, jaxlib
-from jax.lib import xla_bridge
-print("jax   =", jax.__version__)
-print("jaxlib=", jaxlib.__version__)
-b = xla_bridge.get_backend()
-print("backend.platform        =", b.platform)
-print("backend.platform_version=", b.platform_version)
-PY
-echo "============================================================="
-
-# ------------------------------
-# (2) Which JAX CUDA plugin modules exist + their origins
-# ------------------------------
-echo "=== [CONTAINER] (2) JAX CUDA plugin module origins ==="
-python - <<'"'"'PY'"'"'
+echo "=== [CONTAINER] Madrona .so origins ==="
+python - << "PY"
 import importlib.util
-mods = [
-  "jax_cuda12_plugin",
-  "jax_cuda12_pjrt",
-  "jaxlib.cuda_plugin_extension",
-  "jaxlib.xla_extension",
-]
-for m in mods:
-  s = importlib.util.find_spec(m)
-  print(f"{m:28s} ->", None if s is None else s.origin)
-PY
-echo "======================================================"
-
-# ------------------------------
-# Madrona import + extension origins (must be consistent) + duplicate scan
-# ------------------------------
-echo "=== [CONTAINER] Madrona import + extension origins (must be consistent) ==="
-python - <<'"'"'PY'"'"'
-import os, glob, site, importlib.util
-
 def origin(name):
-    spec = importlib.util.find_spec(name)
-    return None if spec is None else spec.origin
-
-import madrona_mjx
-print("madrona_mjx.__file__:", madrona_mjx.__file__)
-
-top_br = origin("_madrona_mjx_batch_renderer")
-pkg_br = origin("madrona_mjx._madrona_mjx_batch_renderer")
-top_vz = origin("_madrona_mjx_visualizer")
-pkg_vz = origin("madrona_mjx._madrona_mjx_visualizer")
-
-print("top-level batch:", top_br)
-print("pkg batch     :", pkg_br)
-print("top-level viz :", top_vz)
-print("pkg viz       :", pkg_vz)
-
-if top_br is not None or top_vz is not None:
-    raise SystemExit("FATAL: top-level _madrona_* exists -> double-load risk.")
-if pkg_br is None:
-    raise SystemExit("FATAL: madrona_mjx._madrona_mjx_batch_renderer not importable (None).")
-if pkg_vz is None:
-    raise SystemExit("FATAL: madrona_mjx._madrona_mjx_visualizer not importable (None).")
-
-roots = [r for r in set(site.getsitepackages() + [site.getusersitepackages()]) if r and os.path.isdir(r)]
-pat_batch = "*_madrona_mjx_batch_renderer*.so"
-pat_viz   = "*_madrona_mjx_visualizer*.so"
-hits_batch, hits_viz = [], []
-for r in roots:
-    hits_batch += glob.glob(os.path.join(r, "**", pat_batch), recursive=True)
-    hits_viz   += glob.glob(os.path.join(r, "**", pat_viz), recursive=True)
-
-print("\nDisk scan (site-packages) hits:")
-print("batch hits:", len(hits_batch))
-for h in hits_batch: print("  ", h)
-print("viz hits  :", len(hits_viz))
-for h in hits_viz: print("  ", h)
-
-print("\nCHOSEN_PKG_BATCH_SO=" + str(pkg_br))
-print("CHOSEN_PKG_VIZ_SO=" + str(pkg_vz))
+  s = importlib.util.find_spec(name)
+  return None if s is None else s.origin
+print("madrona_mjx._madrona_mjx_batch_renderer ->", origin("madrona_mjx._madrona_mjx_batch_renderer"))
+print("madrona_mjx._madrona_mjx_visualizer     ->", origin("madrona_mjx._madrona_mjx_visualizer"))
+print("_madrona_mjx_batch_renderer (top-level) ->", origin("_madrona_mjx_batch_renderer"))
+print("_madrona_mjx_visualizer (top-level)     ->", origin("_madrona_mjx_visualizer"))
 PY
-echo "=========================================================================="
-
+echo "======================================"
 
 # ------------------------------
-# (3) ldd on the exact imported madrona .so (link targets)
+# (4) DECISIVE poisoning probe, variants:
+#   - no torch import
+#   - torch imported first
+#   - optional LD_PRELOAD on/off
 # ------------------------------
-echo "=== [CONTAINER] (3) ldd link targets for imported madrona .so ==="
-CHOSEN_PKG_BATCH_SO="$(python - <<'"'"'PY'"'"'
-import importlib.util
-s = importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer")
-print("" if s is None else s.origin)
-PY
-)"
-CHOSEN_PKG_VIZ_SO="$(python - <<'"'"'PY'"'"'
-import importlib.util
-s = importlib.util.find_spec("madrona_mjx._madrona_mjx_visualizer")
-print("" if s is None else s.origin)
-PY
-)"
-
-echo "--- batch so: $CHOSEN_PKG_BATCH_SO"
-ldd -v "$CHOSEN_PKG_BATCH_SO" | egrep "libcuda|libcudart|nvJitLink|nvrtc|libstdc\+\+|libgcc_s|libmadmjx|Version" || true
-
-echo "--- viz so:   $CHOSEN_PKG_VIZ_SO"
-ldd -v "$CHOSEN_PKG_VIZ_SO" | egrep "libcuda|libcudart|nvJitLink|nvrtc|libstdc\+\+|libgcc_s|libmadmjx|Version" || true
-echo "================================================================="
-
-echo "=== [CONTAINER] nvJitLink symbol check ==="
-python - <<'"'"'PY'"'"'
-import ctypes
-p = "/usr/local/cuda/lib64/libnvJitLink.so.12"
-lib = ctypes.CDLL(p)
-print("loaded:", p)
-print("has __nvJitLinkCreate_12_5:", hasattr(lib, "__nvJitLinkCreate_12_5"))
-PY
-echo "========================================="
-
-echo "=== [CONTAINER] ldd check for what libmadmjx_mgr.so actually binds ==="
-ldd -v /opt/madrona_mjx/build/libmadmjx_mgr.so | egrep "nvJitLink|nvrtc|libcuda|libcudart|Version|libmadmjx_mgr" || true
-echo "==============================================================="
-
-# ------------------------------
-# (4) DECISIVE poisoning probe:
-#     baseline JAX -> Madrona render -> JAX kernel -> Torch kernel -> DLPack crossings
-#     PLUS LD_PRELOAD A/B to isolate nvJitLink preload issues
-# ------------------------------
-echo "=== [CONTAINER] (4) DECISIVE probe: isolate Madrona vs JAX vs Torch vs DLPack ==="
+echo "=== [CONTAINER] (4) DECISIVE probe variants ==="
 
 run_probe () {
-  local label="$1"
-  shift
-  echo "---- PROBE RUN: $label ----"
-  "$@" python - <<'"'"'PY'"'"'
-import os, importlib.util
-import jax, jax.numpy as jp
-import torch
-from torch.utils import dlpack as tpack
+  local TORCH_IMPORT="$1"
+  local PRELOAD="$2"
+  local LAUNCH_BLOCKING="$3"
 
-B = int(os.environ.get("RENDER_PROBE_B", "32"))
-DBG = os.environ.get("RENDER_PROBE_DEBUG", "0") == "1"
-print("[probe] B =", B, "| debug =", DBG)
+  if [[ "$PRELOAD" == "1" ]]; then
+    export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12"
+  else
+    unset LD_PRELOAD || true
+  fi
 
-print("\n[probe] === versions ===")
-print("torch:", torch.__version__)
-print("jax:", jax.__version__)
-import jaxlib
-print("jaxlib:", jaxlib.__version__)
+  if [[ "$LAUNCH_BLOCKING" == "1" ]]; then
+    export CUDA_LAUNCH_BLOCKING=1
+  else
+    unset CUDA_LAUNCH_BLOCKING || true
+  fi
 
-print("\n[probe] === baseline JAX (no Madrona) ===")
-x = jax.jit(lambda: (jp.arange(4096, dtype=jp.float32) * 2).sum())()
-jax.block_until_ready(x)
+  echo
+  echo "---- PROBE RUN: torch_import=$TORCH_IMPORT preload=$PRELOAD launch_blocking=$LAUNCH_BLOCKING ----"
+
+  TORCH_IMPORT="$TORCH_IMPORT" python - << "PY"
+import os, importlib.util, ctypes, re
+
+import jax
+import jax.numpy as jp
+
+torch_import = os.environ.get("TORCH_IMPORT","0") == "1"
+
+def print_loaded_cuda_libs():
+  pats = [
+    r"/.*libcudart\.so(\.[0-9]+)*",
+    r"/.*libnvrtc\.so(\.[0-9]+)*",
+    r"/.*libnvJitLink\.so(\.[0-9]+)*",
+    r"/.*libcuda\.so(\.[0-9]+)*",
+  ]
+  seen = set()
+  hits = []
+  with open("/proc/self/maps","r") as f:
+    for line in f:
+      path = line.strip().split()[-1] if line.strip() else ""
+      for p in pats:
+        if re.match(p, path):
+          if path not in seen:
+            seen.add(path)
+            hits.append(path)
+  print("[probe] loaded CUDA libs:")
+  for h in hits:
+    print("   ", h)
+
+def cudart():
+  # try common names
+  for name in ("libcudart.so.12","libcudart.so"):
+    try:
+      return ctypes.CDLL(name)
+    except Exception:
+      pass
+  return None
+
+def cuda_last_error_str(lib):
+  if lib is None:
+    return None
+  lib.cudaGetLastError.restype = ctypes.c_int
+  lib.cudaGetErrorString.restype = ctypes.c_char_p
+  err = lib.cudaGetLastError()
+  msg = lib.cudaGetErrorString(err)
+  return err, (msg.decode("utf-8","ignore") if msg else "")
+
+def cuda_sync(lib):
+  if lib is None:
+    return None
+  lib.cudaDeviceSynchronize.restype = ctypes.c_int
+  return lib.cudaDeviceSynchronize()
+
+print("[probe] jax:", jax.__version__)
+if torch_import:
+  import torch
+  print("[probe] torch:", torch.__version__, "| torch.version.cuda:", getattr(torch.version,"cuda",None))
+else:
+  print("[probe] torch: (not imported)")
+
+print_loaded_cuda_libs()
+
+# Baseline JAX should work
+baseline = jax.jit(lambda: (jp.arange(8192, dtype=jp.float32) * 2).sum())
+jax.block_until_ready(baseline())
 print("[probe] baseline JAX OK")
 
-print("\n[probe] === baseline Torch (no Madrona) ===")
-torch.empty((1024,), device="cuda", dtype=torch.float32).fill_(1.0)
-torch.cuda.synchronize()
-print("[probe] baseline Torch OK")
-
-print("\n[probe] === load env + render ===")
+# Load env module without touching torch unless requested
 path = "/workspace/Mujoco_Sim/pick_env.py"
 spec = importlib.util.spec_from_file_location("pick_env_mod", path)
-m = importlib.util.module_from_spec(spec); assert spec and spec.loader
+m = importlib.util.module_from_spec(spec)
+assert spec and spec.loader
 spec.loader.exec_module(m)
 StereoPickCube = getattr(m, "StereoPickCube")
+
+B = 32
 env = StereoPickCube(render_batch_size=B)
 
 keys = jax.random.split(jax.random.PRNGKey(0), B)
 st_b = jax.vmap(env.reset_physics)(keys)
 data_b = st_b.data
 
-# Avoid extra smoke-render unless explicitly testing it
-env._ensure_render_token(data_b, debug=DBG)
+lib = cudart()
+
+# ---- Stage 1: init token only (no render) ----
+env._ensure_render_token(data_b, debug=False)
+print("[probe] renderer.init OK; token dtype/shape:", getattr(env, "_render_token", None).dtype, getattr(env, "_render_token", None).shape)
+
+# If init already poisons, this will fail
+try:
+  jax.block_until_ready(jp.zeros((128,), dtype=jp.float32) + 1)
+  print("[probe] PASS: JAX op after init OK")
+except Exception as e:
+  print("[probe] FAIL: JAX op after init FAILED -> poisoning happens at init")
+  raise
+
+# ---- Stage 2: render once ----
 rgb = env.render_rgba(data_b)
 jax.block_until_ready(rgb)
-print("[probe] render OK; rgb:", rgb.shape, rgb.dtype)
+print("[probe] render OK; rgb:", getattr(rgb,"shape",None), getattr(rgb,"dtype",None))
 
-print("\n[probe] === (A1) JAX kernel AFTER render on fresh array (global poison check) ===")
-post = jax.jit(lambda t: t + jp.array(0, dtype=t.dtype))
-fresh = jp.zeros((B, 2, 64, 64, 4), dtype=jp.uint8)
-y0 = post(fresh); jax.block_until_ready(y0)
-print("[probe] PASS A1")
+# Check CUDA runtime error state immediately
+if lib is not None:
+  sync_rc = cuda_sync(lib)
+  err = cuda_last_error_str(lib)
+  print("[probe] cudaDeviceSynchronize rc:", sync_rc)
+  print("[probe] cudaGetLastError:", err)
+else:
+  print("[probe] libcudart not loadable via ctypes; skipping cudaGetLastError")
 
-print("\n[probe] === (A2) JAX kernel AFTER render on rgb (buffer/path check) ===")
-y = post(rgb); jax.block_until_ready(y)
-print("[probe] PASS A2")
+# ---- Stage 3: first unrelated JAX op after render (this is your A1) ----
+def try_post_jax(tag):
+  try:
+    jax.block_until_ready(jp.zeros((B,2,64,64,4), dtype=jp.uint8))
+    print(f"[probe] PASS: post-render JAX fresh alloc OK ({tag})")
+    return True
+  except Exception as e:
+    print(f"[probe] FAIL: post-render JAX fresh alloc FAILED ({tag}) ->", repr(e))
+    return False
 
-print("\n[probe] === (B) Torch CUDA AFTER render (no DLPack) ===")
-torch.empty((1024,), device="cuda", dtype=torch.uint8).zero_()
-torch.cuda.synchronize()
-print("[probe] PASS B")
+ok = try_post_jax("no-extra-sync")
 
-print("\n[probe] === (C) DLPack JAX->Torch + clone AFTER render ===")
-t = tpack.from_dlpack(rgb)          # match wrapper
-t2 = t.contiguous()
-t3 = t2.clone()
-torch.cuda.synchronize()
-print("[probe] PASS C")
+# If it failed, try one more hard device sync + retry (detects stream/ordering bugs)
+if not ok and lib is not None:
+  print("[probe] retrying after extra cudaDeviceSynchronize() ...")
+  cuda_sync(lib)
+  # clear last error read
+  _ = cuda_last_error_str(lib)
+  ok2 = try_post_jax("after-extra-device-sync")
+  if not ok2:
+    raise SystemExit(2)
+  else:
+    raise SystemExit(3)  # special code: sync workaround helped
 
-print("\n[probe] === (D) DLPack Torch->JAX + JAX op ===")
-tj = jax.dlpack.from_dlpack(t3)
-z = jax.jit(lambda a: a[0,0,0,0,0].astype(jp.int32) + 1)(tj)
-jax.block_until_ready(z)
-print("[probe] PASS D")
+# Optional: torch kernel AFTER render (only if imported)
+if torch_import:
+  import torch
+  torch.empty((1024,), device="cuda", dtype=torch.float32).fill_(1.0)
+  torch.cuda.synchronize()
+  print("[probe] PASS: Torch CUDA op after render OK")
 
-print("\n[probe] ALL PASSED")
+print("[probe] ALL GOOD: no poisoning detected in this variant")
 PY
-  echo "---- END PROBE RUN: $label ----"
 }
 
-# Run 1: WITH LD_PRELOAD (current environment)
-RENDER_PROBE_DEBUG=0 run_probe "WITH LD_PRELOAD, debug=0" env
+# Run variants (separate python processes => clean isolation)
+#   - If torch_import=0 still fails: Madrona/JAX/XLA side.
+#   - If torch_import=0 passes but torch_import=1 fails: CUDA runtime lib collision involving torch.
+set +e
+run_probe 0 0 1; rc00=$?
+run_probe 1 0 1; rc10=$?
+run_probe 0 1 1; rc01=$?
+run_probe 1 1 1; rc11=$?
+set -e
 
-# Run 2: WITHOUT LD_PRELOAD (critical A/B)
-RENDER_PROBE_DEBUG=0 run_probe "NO LD_PRELOAD, debug=0" env -u LD_PRELOAD
+echo
+echo "=== [probe summary] exit codes ==="
+echo "noTorch noPreload : $rc00"
+echo "Torch   noPreload : $rc10"
+echo "noTorch Preload   : $rc01"
+echo "Torch   Preload   : $rc11"
+echo "Codes: 0=OK, 2=poison persists even after extra sync, 3=extra sync fixed (stream ordering bug)"
 
-# Optional: test the debug-smoke-render path too (your pick_env does extra work when debug=True)
-RENDER_PROBE_DEBUG=1 run_probe "WITH LD_PRELOAD, debug=1" env
-RENDER_PROBE_DEBUG=1 run_probe "NO LD_PRELOAD, debug=1" env -u LD_PRELOAD
-
-echo "==========================================================================="
+# If any variant shows poisoning (exit 2), stop before training
+if [[ "$rc00" == "2" || "$rc10" == "2" || "$rc01" == "2" || "$rc11" == "2" ]]; then
+  echo "FATAL: renderer poisoning confirmed in at least one variant (exit=2). Not starting training."
+  exit 20
+fi
 
 echo "=== [CONTAINER] starting training ==="
 stdbuf -oL -eL python -u execute.py 2>&1
