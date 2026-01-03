@@ -105,13 +105,19 @@ class RSLRLBraxWrapper:
 
         # Important: surface any renderer-side CUDA errors here (before Torch touches it).
         jax.block_until_ready(rgb)
+        # This is a cheap device-to-device copy for ~1MB/batch at B=32,64x64x4x2.
+        rgb2 = jax.device_put(rgb)
 
-        # Convert to Torch (GPU->GPU) and make a Torch-owned contiguous copy to avoid
-        # any DLPack/stride quirks with subsequent CUDA kernels.
-        rgb_t = _jax_to_torch(rgb)
+        # Stronger (still cheap) fallback if device_put alone doesn't rebuffer:
+        # rgb2 = rgb + jp.array(0, dtype=rgb.dtype)
+
+        jax.block_until_ready(rgb2)
+
+        rgb_t = _jax_to_torch(rgb2)
         if rgb_t.device != self.device:
             rgb_t = rgb_t.to(self.device, non_blocking=True)
-        # Force a Torch-owned copy (contiguous() can be a no-op if already contiguous)
+
+        # Now clone should be safe because the source is a normal XLA buffer
         rgb_t = rgb_t.contiguous().clone()
 
         # Split stereo views (these are strided views; copy_ handles them directly)
@@ -140,10 +146,19 @@ class RSLRLBraxWrapper:
         # Surface any renderer-side CUDA errors here.
         jax.block_until_ready(rgb)
 
-        rgb_t = _jax_to_torch(rgb)
+        # This is a cheap device-to-device copy for ~1MB/batch at B=32,64x64x4x2.
+        rgb2 = jax.device_put(rgb)
+
+        # Stronger (still cheap) fallback if device_put alone doesn't rebuffer:
+        # rgb2 = rgb + jp.array(0, dtype=rgb.dtype)
+
+        jax.block_until_ready(rgb2)
+
+        rgb_t = _jax_to_torch(rgb2)
         if rgb_t.device != self.device:
             rgb_t = rgb_t.to(self.device, non_blocking=True)
-        # Force a Torch-owned copy (contiguous() can be a no-op if already contiguous)
+
+        # Now clone should be safe because the source is a normal XLA buffer
         rgb_t = rgb_t.contiguous().clone()
 
         left = rgb_t[:, 0, :, :, :3]
