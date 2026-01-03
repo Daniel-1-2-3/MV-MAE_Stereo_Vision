@@ -1,9 +1,9 @@
 Bootstrap: docker
-From: nvidia/cuda:12.8.0-devel-ubuntu24.04
+From: nvidia/cuda:12.4.0-devel-ubuntu22.04
 
 %labels
     Author        Daniel Zhu
-    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.8, Offline bulk deps + online JAX GPU)
+    Description   MV-MAE + DrQv2 + MJX + Madrona Training Environment (CUDA 12.4, Offline bulk deps + online JAX GPU)
 
 %files
     . /opt/src/MV_MAE_Implementation
@@ -15,18 +15,30 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         git build-essential cmake pkg-config curl ca-certificates \
-        ffmpeg libavcodec60 libavdevice60 libavfilter9 libavformat60 \
-        libswscale7 libswresample4 \
+        ffmpeg \
         xvfb x11-utils libx11-dev libxrandr-dev libxinerama-dev \
         libxcursor-dev libxi-dev mesa-common-dev \
         libegl1 libegl-dev gpg lsb-release \
-        python3 python3-venv python3-pip python3-dev
+        software-properties-common
     rm -rf /var/lib/apt/lists/*
 
-    echo "=== [2] Creating Python venv ==="
-    python3 -m venv /opt/mvmae_venv
+    echo "=== [1b] Install Python 3.12 on Ubuntu 22.04 (deadsnakes) ==="
+    apt-get update -y
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3.12-dev
+    rm -rf /var/lib/apt/lists/*
+
+    echo "=== [2] Creating Python venv (py3.12) ==="
+    python3.12 -m venv /opt/mvmae_venv
     . /opt/mvmae_venv/bin/activate
-    python -m pip install -U pip setuptools wheel uv
+    python3 -m pip install -U pip setuptools wheel uv
+
+    echo "=== [2b] Upgrade CMake (apt CMake 3.22 is too old for Madrona toolchain) ==="
+    python3 -m pip install -U "cmake>=3.27" ninja
+    echo "[post] cmake in PATH: $(which cmake)"
+    cmake --version
 
     echo "=== [3] Configure offline wheelhouse for bulk deps ==="
     export TMPDIR=/opt/pip-tmp
@@ -48,10 +60,23 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     fi
 
     echo "=== [4] Installing Python deps (offline from wheelhouse) ==="
-    python -m pip install --no-index --find-links "$WHL" -r "$REQ"
+    python3 -m pip install --no-index --find-links "$WHL" -r "$REQ"
 
-    echo "=== [5] Build Madrona-MJX (geom_quat) ==="
-    # Clean any previous partial clone from earlier builds
+    echo "=== [4b] Ensure pip doesn't later override torch/torchvision from PyPI ==="
+    export PIP_NO_BUILD_ISOLATION=1
+
+    echo "=== [5] Installing JAX 0.4.36 + CUDA12 plugin/pjrt explicitly ==="
+    unset PIP_NO_INDEX
+    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
+
+    echo "=== [5b] Build-time JAX sanity check (NO GPU) ==="
+    python3 - <<'PY'
+import jax, jaxlib
+print("jax:", jax.__version__)
+print("jaxlib:", jaxlib.__version__)
+PY
+
+    echo "=== [6] Build Madrona-MJX (geom_quat) ==="
     rm -rf /opt/madrona_mjx
     cd /opt
     git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
@@ -64,56 +89,59 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     cmake .. -DLOAD_VULKAN=OFF
     make -j"$(nproc)"
     cd ..
-    # Editable install so Python can import madrona_mjx
+
     uv pip install -e .
 
-    echo "=== [6] Install CUDA 12.8 pinned NVIDIA libs ==="
-    cat >/tmp/nvidia_cuda12_12.8.txt <<'REQ'
-nvidia-cublas-cu12==12.8.3.14
-nvidia-cuda-cupti-cu12==12.8.57
-nvidia-cuda-nvcc-cu12==12.8.93
-nvidia-cuda-nvrtc-cu12==12.8.61
-nvidia-cuda-runtime-cu12==12.8.57
-nvidia-cudnn-cu12==9.7.1.26
-nvidia-cufft-cu12==11.3.3.41
-nvidia-cufile-cu12==1.13.0.11
-nvidia-curand-cu12==10.3.9.55
-nvidia-cusolver-cu12==11.7.2.55
-nvidia-cusparse-cu12==12.5.7.53
-nvidia-cusparselt-cu12==0.6.3
-nvidia-nccl-cu12==2.26.2
-nvidia-nvjitlink-cu12==12.8.61
-nvidia-nvtx-cu12==12.8.55
-REQ
+    echo "=== [6c] Remove any TOP-LEVEL _madrona_* from site-packages (must not exist) ==="
+    python3 - <<'PY'
+import site, glob, os, sys, importlib.util
 
-    # Let uv talk to the network for this step (don’t enforce PIP_NO_INDEX here)
-    unset PIP_NO_INDEX
+paths = []
+try:
+    paths += site.getsitepackages()
+except Exception:
+    pass
+paths += [p for p in sys.path if p and ("site-packages" in p or "dist-packages" in p)]
+paths = list(dict.fromkeys(paths))
 
-    # Install/override to these exact CUDA12.8 wheels
-    uv pip install -r /tmp/nvidia_cuda12_12.8.txt
+removed = 0
+for sp in paths:
+    for pat in ("_madrona_mjx_batch_renderer*.so", "_madrona_mjx_visualizer*.so"):
+        for f in glob.glob(os.path.join(sp, pat)):
+            try:
+                os.remove(f); removed += 1
+            except FileNotFoundError:
+                pass
 
-    echo "=== [7] Installing JAX 0.4.36 with CUDA12 local plugin (GPU JAX) ==="
-    # This pulls jax, jaxlib, and jax-cuda12-plugin, and wires them to the pinned CUDA libs.
-    uv pip install --upgrade "jax[cuda12_local]==0.4.36"
+top_br = importlib.util.find_spec("_madrona_mjx_batch_renderer")
+top_vz = importlib.util.find_spec("_madrona_mjx_visualizer")
+assert top_br is None and top_vz is None, "FATAL: top-level _madrona_* still present"
+print("removed files:", removed)
+PY
 
-    echo "=== [8] Auto-enable venv inside container ==="
+    echo "/opt/madrona_mjx/build" > /etc/ld.so.conf.d/madrona_mjx.conf
+    ldconfig
+
+    echo "=== [7] Auto-enable venv inside container ==="
     mkdir -p /.singularity.d/env
     cat > /.singularity.d/env/99-autovenv.sh <<'EOS'
 export VIRTUAL_ENV=/opt/mvmae_venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
-export PYTHONPATH="/opt/src:${PYTHONPATH}"
+export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
+export JAX_PLATFORMS="cuda,cpu"
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 EOS
     chmod 644 /.singularity.d/env/99-autovenv.sh
 
     echo "=== Build Completed Successfully ==="
 
-
 %environment
-    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
     export DISPLAY=:1
     export HF_TOKEN=${HF_TOKEN:-}
     export WANDB_API_KEY=${WANDB_API_KEY:-}
-
+    export PYTHONPATH="/workspace:/workspace/MV_MAE_Implementation:/opt/src:${PYTHONPATH}"
+    export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+    export JAX_PLATFORMS="cuda,cpu"
 
 %runscript
     if command -v nvidia-smi >/dev/null 2>&1; then
@@ -122,23 +150,12 @@ EOS
     fi
 
     . /opt/mvmae_venv/bin/activate
-    cd /opt/src
+
+    if [ -d "/workspace" ]; then
+        cd /workspace
+    else
+        cd /opt/src
+    fi
 
     echo "[MVMAE] Running training script..."
-    exec python -m MV_MAE_Implementation.train_drqv2_mujoco "$@"
-
-
-%help
-    Offline MV-MAE / DrQv2 / MJX + Madrona container.
-    - Bulk deps (torch, mujoco, etc.) from local wheelhouse.
-    - NVIDIA CUDA 12.8 wheels pinned.
-    - JAX 0.4.36 with cuda12_local plugin installed from PyPI (GPU backend).
-
-    Build:
-      apptainer build training.sif training.def
-
-    Run default training:
-      apptainer run --nv training.sif
-
-    Exec custom:
-      apptainer exec --nv training.sif python3
+    exec python3 -m MV_MAE_Implementation.execute "$@"
