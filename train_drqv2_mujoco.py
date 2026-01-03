@@ -62,7 +62,7 @@ def eval_and_record(env, agent, num_steps: int = 10_000, video_root: Path | None
     print("[EVAL] Saved eval_video/eval.gif")
 
 def main():
-    num_envs = 5
+    num_envs = 32
     episode_length = 200
     total_timesteps = 1_000_000
     learning_starts = 50_000
