@@ -92,13 +92,8 @@ set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
 # ---- CUDA / nvJitLink: make dynamic linking unambiguous ----
-# Put targets dir FIRST, then lib64, then madrona build.
 export LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib64:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
-
-# Force the exact nvJitLink we built against (prevents host/driver copy from being chosen)
 export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12"
-
-# JAX needs to find the toolkit, too
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 # -----------------------------------------------------------
 
@@ -111,6 +106,10 @@ export JAX_TRACEBACK_FILTERING=off
 export PICK_ENV_DEBUG=1
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 
+# Optional: turn on a single sync after render inside your wrapper (NOT launch blocking)
+# (only useful if your Python code reads this env var)
+export RENDER_SYNC="${RENDER_SYNC:-0}"
+
 echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
@@ -119,6 +118,7 @@ echo "LD_PRELOAD=${LD_PRELOAD:-}"
 echo "JAX_PLATFORMS=${JAX_PLATFORMS:-}"
 echo "XLA_FLAGS=${XLA_FLAGS:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
+echo "RENDER_SYNC=${RENDER_SYNC:-}"
 echo "=========================================="
 
 echo "=== [CONTAINER] nvidia-smi ==="
@@ -146,9 +146,6 @@ print("devices:", jax.devices())
 PY
 echo "==================================="
 
-# ------------------------------
-# ADDED: JAX/JAXLIB + plugin probe
-# ------------------------------
 echo "=== [CONTAINER] JAX/JAXLIB/plugin version probe ==="
 python - <<'"'"'PY'"'"'
 import jax, jaxlib
@@ -168,30 +165,112 @@ except Exception as e:
     print("print_environment_info failed:", e)
 PY
 echo "===================================================="
-# ------------------------------
 
-echo "=== [CONTAINER] Madrona spec check (MUST NOT double-load) ==="
+echo "=== [CONTAINER] Madrona import + extension origins (must be consistent) ==="
 python - <<'"'"'PY'"'"'
-import importlib.util
+import os, sys, glob, site, importlib.util
 
-def show(name):
+def origin(name):
     spec = importlib.util.find_spec(name)
     return None if spec is None else spec.origin
 
-top_br = show("_madrona_mjx_batch_renderer")
-pkg_br = show("madrona_mjx._madrona_mjx_batch_renderer")
-top_vz = show("_madrona_mjx_visualizer")
-pkg_vz = show("madrona_mjx._madrona_mjx_visualizer")
+# Show base package origin (helps catch “wrong madrona_mjx” on sys.path)
+try:
+    import madrona_mjx
+    print("madrona_mjx.__file__:", madrona_mjx.__file__)
+except Exception as e:
+    print("FATAL: import madrona_mjx failed:", e)
+    raise SystemExit(90)
+
+# Extension module origins
+top_br = origin("_madrona_mjx_batch_renderer")
+pkg_br = origin("madrona_mjx._madrona_mjx_batch_renderer")
+top_vz = origin("_madrona_mjx_visualizer")
+pkg_vz = origin("madrona_mjx._madrona_mjx_visualizer")
 
 print("top-level batch:", top_br)
 print("pkg batch     :", pkg_br)
 print("top-level viz :", top_vz)
 print("pkg viz       :", pkg_vz)
 
+# Hard fail if any top-level extension exists (double-load risk)
 if top_br is not None or top_vz is not None:
-    raise SystemExit("FATAL: top-level _madrona_* exists -> double-load risk. Rebuild/clean image.")
+    raise SystemExit("FATAL: top-level _madrona_* exists -> double-load risk. Remove stray .so from site-packages.")
+
+# Hard fail if package extension missing (your current symptom)
+if pkg_br is None:
+    raise SystemExit("FATAL: madrona_mjx._madrona_mjx_batch_renderer is NOT importable (pkg_br=None). Wrong install or missing .so.")
+if pkg_vz is None:
+    raise SystemExit("FATAL: madrona_mjx._madrona_mjx_visualizer is NOT importable (pkg_vz=None). Wrong install or missing .so.")
+
+# Look for duplicates on disk (common cause of “None” or mismatched imports)
+roots = [r for r in set(site.getsitepackages() + [site.getusersitepackages()]) if r and os.path.isdir(r)]
+pat_batch = "*_madrona_mjx_batch_renderer*.so"
+pat_viz   = "*_madrona_mjx_visualizer*.so"
+hits_batch, hits_viz = [], []
+for r in roots:
+    hits_batch += glob.glob(os.path.join(r, "**", pat_batch), recursive=True)
+    hits_viz   += glob.glob(os.path.join(r, "**", pat_viz), recursive=True)
+
+print("\nDisk scan (site-packages) hits:")
+print("batch hits:", len(hits_batch))
+for h in hits_batch: print("  ", h)
+print("viz hits  :", len(hits_viz))
+for h in hits_viz: print("  ", h)
+
+# Warn/fail if duplicates exist
+if len(hits_batch) > 1:
+    raise SystemExit("FATAL: multiple batch_renderer .so files found in site-packages -> ambiguous/double-load.")
+if len(hits_viz) > 1:
+    raise SystemExit("FATAL: multiple visualizer .so files found in site-packages -> ambiguous/double-load.")
+
+# Also search for any top-level _madrona_* .so (these are especially bad)
+pat_top = "_madrona_*.so"
+hits_top = []
+for r in roots:
+    hits_top += glob.glob(os.path.join(r, "**", pat_top), recursive=True)
+hits_top = [h for h in hits_top if "madrona_mjx" not in os.path.basename(h)] + [h for h in hits_top if os.path.basename(h).startswith("_madrona_")]
+hits_top = sorted(set(hits_top))
+if hits_top:
+    print("\nTop-level _madrona_*.so present on disk (DANGER):")
+    for h in hits_top: print("  ", h)
+    raise SystemExit("FATAL: top-level _madrona_*.so exists on disk -> remove it.")
+
+# Print the chosen origins so bash can capture them if needed
+print("\nCHOSEN_PKG_BATCH_SO=" + str(pkg_br))
+print("CHOSEN_PKG_VIZ_SO=" + str(pkg_vz))
 PY
-echo "============================================================"
+echo "=========================================================================="
+
+# Extract chosen .so paths for ldd checks
+CHOSEN_PKG_BATCH_SO="$(python - <<'"'"'PY'"'"'
+import importlib.util
+spec = importlib.util.find_spec("madrona_mjx._madrona_mjx_batch_renderer")
+print("" if spec is None else spec.origin)
+PY
+)"
+CHOSEN_PKG_VIZ_SO="$(python - <<'"'"'PY'"'"'
+import importlib.util
+spec = importlib.util.find_spec("madrona_mjx._madrona_mjx_visualizer")
+print("" if spec is None else spec.origin)
+PY
+)"
+
+echo "=== [CONTAINER] ldd check: extension .so linkage ==="
+if [[ -n "$CHOSEN_PKG_BATCH_SO" && -f "$CHOSEN_PKG_BATCH_SO" ]]; then
+  echo "--- ldd batch_renderer: $CHOSEN_PKG_BATCH_SO"
+  ldd -v "$CHOSEN_PKG_BATCH_SO" | grep -E "libcuda|libcudart|nvJitLink|libstdc\+\+|libgcc_s|libmadmjx|Version" || true
+else
+  echo "FATAL: batch_renderer .so path missing -> cannot ldd"; exit 91
+fi
+
+if [[ -n "$CHOSEN_PKG_VIZ_SO" && -f "$CHOSEN_PKG_VIZ_SO" ]]; then
+  echo "--- ldd visualizer: $CHOSEN_PKG_VIZ_SO"
+  ldd -v "$CHOSEN_PKG_VIZ_SO" | grep -E "libcuda|libcudart|nvJitLink|libstdc\+\+|libgcc_s|libmadmjx|Version" || true
+else
+  echo "FATAL: visualizer .so path missing -> cannot ldd"; exit 92
+fi
+echo "===================================================="
 
 echo "=== [CONTAINER] nvJitLink symbol check ==="
 python - <<'"'"'PY'"'"'
@@ -204,7 +283,7 @@ PY
 echo "========================================="
 
 echo "=== [CONTAINER] ldd check for what libmadmjx_mgr.so actually binds ==="
-ldd -v /opt/madrona_mjx/build/libmadmjx_mgr.so | grep -E "nvJitLink|Version|libmadmjx_mgr" || true
+ldd -v /opt/madrona_mjx/build/libmadmjx_mgr.so | grep -E "nvJitLink|Version|libmadmjx_mgr|libcuda|libcudart" || true
 echo "==============================================================="
 
 echo "=== [CONTAINER] starting training ==="

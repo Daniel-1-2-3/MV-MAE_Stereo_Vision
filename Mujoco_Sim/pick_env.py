@@ -49,6 +49,7 @@ from mujoco import mjx
 from Custom_Mujoco_Playground._src import mjx_env
 from Custom_Mujoco_Playground._src.mjx_env import State
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
+import torch
 
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
@@ -369,8 +370,10 @@ class StereoPickCube(panda.PandaBase):
             # smoke render is OK in real execution (non-jit); keep it lightweight
             new_token, rgb, _ = self.renderer.render(self._render_token, data_batched, self._mjx_model)
             self._render_token = new_token
-            jax.block_until_ready(rgb)
             print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
+            jax.block_until_ready(rgb)
+            if os.environ.get("RENDER_SYNC", "0") == "1":
+                torch.cuda.synchronize()
 
     # -------------------------
     # Physics (single-world, JIT-friendly)
