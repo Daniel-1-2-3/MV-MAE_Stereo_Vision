@@ -17,15 +17,15 @@ def _torch_to_jax(x: torch.Tensor) -> jax.Array:
         # Fallback for older stacks that only accept a capsule.
         return jax.dlpack.from_dlpack(tpack.to_dlpack(x))
 
-
 def _jax_to_torch(x: jax.Array) -> torch.Tensor:
-    # GPU->GPU via the modern DLPack protocol (stream-aware).
-    # Let Torch request the view on Torch's current CUDA stream to avoid races.
-    try:
-        return tpack.from_dlpack(x)
-    except TypeError:
-        # Fallback for older stacks that only accept a capsule.
-        return tpack.from_dlpack(jax.dlpack.to_dlpack(x))
+    # Force capsule path (avoids torch calling JAX's __dlpack__ directly)
+    return tpack.from_dlpack(jax.dlpack.to_dlpack(x))
+
+def _rebuffer_xla(rgb: jax.Array) -> jax.Array:
+    # Forces a new XLA-owned buffer on GPU (cheap: ~1MB per step at B=32, 64x64x2x4).
+    z = jp.array(0, dtype=rgb.dtype)
+    rgb2 = rgb + z
+    return rgb2
 
 class RSLRLBraxWrapper:
     """Batched MJX env wrapper for a Torch RL loop (DrQv2).
@@ -113,12 +113,20 @@ class RSLRLBraxWrapper:
 
         jax.block_until_ready(rgb2)
 
+        # 1) finish render on JAX stream
+        jax.block_until_ready(rgb)
+
+        # 2) force a real XLA rebuffer (device_put is not enough)
+        rgb2 = _rebuffer_xla(rgb)
+        jax.block_until_ready(rgb2)
+
+        # 3) export via capsule DLPack
         rgb_t = _jax_to_torch(rgb2)
         if rgb_t.device != self.device:
+            # this should normally be unnecessary if both are cuda:0, but keep it safe
             rgb_t = rgb_t.to(self.device, non_blocking=True)
 
-        # Now clone should be safe because the source is a normal XLA buffer
-        rgb_t = rgb_t.contiguous().clone()
+        # no clone
 
         # Split stereo views (these are strided views; copy_ handles them directly)
         left = rgb_t[:, 0, :, :, :3]   # [B,H,W,3]
@@ -154,12 +162,20 @@ class RSLRLBraxWrapper:
 
         jax.block_until_ready(rgb2)
 
+        # 1) finish render on JAX stream
+        jax.block_until_ready(rgb)
+
+        # 2) force a real XLA rebuffer (device_put is not enough)
+        rgb2 = _rebuffer_xla(rgb)
+        jax.block_until_ready(rgb2)
+
+        # 3) export via capsule DLPack
         rgb_t = _jax_to_torch(rgb2)
         if rgb_t.device != self.device:
+            # this should normally be unnecessary if both are cuda:0, but keep it safe
             rgb_t = rgb_t.to(self.device, non_blocking=True)
 
-        # Now clone should be safe because the source is a normal XLA buffer
-        rgb_t = rgb_t.contiguous().clone()
+        # no clone
 
         left = rgb_t[:, 0, :, :, :3]
         right = rgb_t[:, 1, :, :, :3]
