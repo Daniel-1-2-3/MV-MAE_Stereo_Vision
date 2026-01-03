@@ -35,6 +35,11 @@ From: nvidia/cuda:12.4.0-devel-ubuntu22.04
     . /opt/mvmae_venv/bin/activate
     python3 -m pip install -U pip setuptools wheel uv
 
+    echo "=== [2b] Upgrade CMake (apt CMake 3.22 is too old for Madrona toolchain) ==="
+    python3 -m pip install -U "cmake>=3.27" ninja
+    echo "[post] cmake in PATH: $(which cmake)"
+    cmake --version
+
     echo "=== [3] Configure offline wheelhouse for bulk deps ==="
     export TMPDIR=/opt/pip-tmp
     export PIP_CACHE_DIR=/opt/pip-cache
