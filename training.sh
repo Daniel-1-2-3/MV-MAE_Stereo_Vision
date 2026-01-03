@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mjxs_mvmae
 #SBATCH --nodes=1
-#SBATCH --exclude=kn117
+#SBATCH --exclude=kn010
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1

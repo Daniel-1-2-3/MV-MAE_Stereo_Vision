@@ -277,22 +277,15 @@ class StereoPickCube(panda.PandaBase):
         """Return raw Madrona RGBA uint8 frames: [B, 2, H, W, 4].
 
         This intentionally avoids any JAX-side postprocessing (astype/concat/div),
-        so you can do the view-fusion + normalization in Torch on-GPU.
+        so you can fuse views + normalize on the Torch side (still on GPU).
         """
         if self._render_token is None:
             self._ensure_render_token(data_batched, debug=False)
 
-        debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
-        if debug:
-            print("entered render_rgba")
         new_token, rgb, _depth = self.renderer.render(self._render_token, data_batched, self._mjx_model)
-        if debug:
-            print("render_rgba done")
-
         self._render_token = new_token
         return rgb
-
-
+    
     def render_pixels(self, data_batched: mjx.Data) -> jax.Array:
         if self._render_token is None:
             print('token again')
