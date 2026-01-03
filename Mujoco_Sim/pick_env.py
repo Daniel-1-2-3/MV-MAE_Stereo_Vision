@@ -292,14 +292,18 @@ class StereoPickCube(panda.PandaBase):
     @staticmethod
     def _postprocess_rgb(rgb: jax.Array) -> jax.Array:
         # rgb: [B, 2, H, W, 4] uint8
-        print("rgb shape:", rgb.shape)
-        print("rgb dtype:", rgb.dtype)
-        print("min / max:", rgb.min(), rgb.max())
+        # Force the render to finish *as much as JAX can track*
+        jax.block_until_ready(rgb)
 
-        patch = rgb[0, 0, :3, :3, :3]  # [3,3,3]
-        for row in patch:
-            print(" | ".join(f"({r:3d},{g:3d},{b:3d})" for r, g, b in row))
+        # Host copy (avoids launching more JAX GPU kernels like reduce_min)
+        rgb_h = np.asarray(jax.device_get(rgb))  # dtype uint8 on CPU
 
+        print("rgb shape:", rgb_h.shape)
+        print("rgb dtype:", rgb_h.dtype)
+        print("min/max:", int(rgb_h.min()), int(rgb_h.max()))
+
+        patch = rgb_h[0, 0, :3, :3, :3]  # [3,3,3]
+        print(np.array2string(patch, separator=", ", max_line_width=120))
         left = rgb[:, 0, :, :, :3].astype(jp.float32)
         right = rgb[:, 1, :, :, :3].astype(jp.float32)
         return jp.concatenate([left, right], axis=2) / 255.0  # [B,H,2W,3]
