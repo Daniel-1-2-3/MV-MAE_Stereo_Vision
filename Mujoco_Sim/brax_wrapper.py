@@ -9,14 +9,23 @@ from torch.utils import dlpack as tpack
 
 
 def _torch_to_jax(x: torch.Tensor) -> jax.Array:
-    # GPU->GPU zero-copy via DLPack when possible.
-    return jax.dlpack.from_dlpack(tpack.to_dlpack(x))
+    # GPU->GPU via the modern DLPack protocol (stream-aware).
+    # Let JAX request the view on its own stream to avoid races.
+    try:
+        return jax.dlpack.from_dlpack(x)
+    except TypeError:
+        # Fallback for older stacks that only accept a capsule.
+        return jax.dlpack.from_dlpack(tpack.to_dlpack(x))
 
 
 def _jax_to_torch(x: jax.Array) -> torch.Tensor:
-    # GPU->GPU via DLPack. Using jax.dlpack.to_dlpack avoids relying on __dlpack__ dispatch.
-    return tpack.from_dlpack(jax.dlpack.to_dlpack(x))
-
+    # GPU->GPU via the modern DLPack protocol (stream-aware).
+    # Let Torch request the view on Torch's current CUDA stream to avoid races.
+    try:
+        return tpack.from_dlpack(x)
+    except TypeError:
+        # Fallback for older stacks that only accept a capsule.
+        return tpack.from_dlpack(jax.dlpack.to_dlpack(x))
 
 class RSLRLBraxWrapper:
     """Batched MJX env wrapper for a Torch RL loop (DrQv2).
@@ -102,11 +111,12 @@ class RSLRLBraxWrapper:
         rgb_t = _jax_to_torch(rgb)
         if rgb_t.device != self.device:
             rgb_t = rgb_t.to(self.device, non_blocking=True)
-        rgb_t = rgb_t.contiguous()
+        # Force a Torch-owned copy (contiguous() can be a no-op if already contiguous)
+        rgb_t = rgb_t.contiguous().clone()
 
-        # Fuse stereo views without torch.cat (which can be picky on some uint8/stride cases)
-        left = rgb_t[:, 0, :, :, :3].contiguous()   # [B,H,W,3]
-        right = rgb_t[:, 1, :, :, :3].contiguous()  # [B,H,W,3]
+        # Split stereo views (these are strided views; copy_ handles them directly)
+        left = rgb_t[:, 0, :, :, :3]   # [B,H,W,3]
+        right = rgb_t[:, 1, :, :, :3]  # [B,H,W,3]
         B, H, W, C = left.shape
         obs_t = torch.empty((B, H, 2 * W, C), device=self.device, dtype=left.dtype)
         obs_t[:, :, :W, :].copy_(left)
@@ -133,10 +143,11 @@ class RSLRLBraxWrapper:
         rgb_t = _jax_to_torch(rgb)
         if rgb_t.device != self.device:
             rgb_t = rgb_t.to(self.device, non_blocking=True)
-        rgb_t = rgb_t.contiguous()
+        # Force a Torch-owned copy (contiguous() can be a no-op if already contiguous)
+        rgb_t = rgb_t.contiguous().clone()
 
-        left = rgb_t[:, 0, :, :, :3].contiguous()
-        right = rgb_t[:, 1, :, :, :3].contiguous()
+        left = rgb_t[:, 0, :, :, :3]
+        right = rgb_t[:, 1, :, :, :3]
         B, H, W, C = left.shape
         obs_t = torch.empty((B, H, 2 * W, C), device=self.device, dtype=left.dtype)
         obs_t[:, :, :W, :].copy_(left)
