@@ -91,11 +91,31 @@ apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
-# ---- CUDA / nvJitLink: keep consistent & explicit ----
-export LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib:/usr/local/cuda/lib64:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
-# ------------------------------------------------------
+# ============================================================
+# CUDA/JAX/Madrona loader hardening: use ONE consistent CUDA set
+# ============================================================
 
+# Avoid user-site surprises (won’t remove venv packages; just prevents ~/.local injection)
+export PYTHONNOUSERSITE=1
+
+# Force system CUDA libs to the front (prevents pip nvidia-* wheels from winning)
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
+
+# Preload *the exact file* (not just soname) to prevent picking up a different nvJitLink
+NVJITLINK_EXACT="/usr/local/cuda/targets/x86_64-linux/lib/libnvJitLink.so.12"
+if [[ -f "$NVJITLINK_EXACT" ]]; then
+  export LD_PRELOAD="$NVJITLINK_EXACT"
+else
+  # fallback to common location
+  NVJITLINK_EXACT2="/usr/local/cuda/lib64/libnvJitLink.so.12"
+  [[ -f "$NVJITLINK_EXACT2" ]] || { echo "FATAL: libnvJitLink.so.12 not found under /usr/local/cuda"; exit 11; }
+  export LD_PRELOAD="$NVJITLINK_EXACT2"
+fi
+
+# Point XLA at the same CUDA tree
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+
+# JAX runtime knobs
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
@@ -107,7 +127,9 @@ export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
+echo "PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-}"
 echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+echo "LD_PRELOAD=${LD_PRELOAD:-}"
 echo "JAX_PLATFORMS=${JAX_PLATFORMS:-}"
 echo "XLA_FLAGS=${XLA_FLAGS:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
@@ -151,65 +173,52 @@ print("_madrona_mjx_visualizer (top-level)     ->", origin("_madrona_mjx_visuali
 PY
 echo "======================================"
 
-# ------------------------------
-# (4) DECISIVE poisoning probe, variants:
-#   - no torch import
-#   - torch imported first
-#   - optional LD_PRELOAD on/off
-# ------------------------------
+# ============================================================
+# (4) DECISIVE probe variants (each is its own python process)
+#   - prints /proc/self/maps CUDA libs (what ACTUALLY loaded)
+#   - checks poisoning at init vs after render
+# ============================================================
+
 echo "=== [CONTAINER] (4) DECISIVE probe variants ==="
 
 run_probe () {
   local TORCH_IMPORT="$1"
-  local PRELOAD="$2"
-  local LAUNCH_BLOCKING="$3"
-
-  if [[ "$PRELOAD" == "1" ]]; then
-    export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12"
-  else
-    unset LD_PRELOAD || true
-  fi
-
-  if [[ "$LAUNCH_BLOCKING" == "1" ]]; then
-    export CUDA_LAUNCH_BLOCKING=1
-  else
-    unset CUDA_LAUNCH_BLOCKING || true
-  fi
 
   echo
-  echo "---- PROBE RUN: torch_import=$TORCH_IMPORT preload=$PRELOAD launch_blocking=$LAUNCH_BLOCKING ----"
+  echo "---- PROBE RUN: torch_import=$TORCH_IMPORT ----"
 
   TORCH_IMPORT="$TORCH_IMPORT" python - << "PY"
-import os, importlib.util, ctypes, re
-
+import os, importlib.util, ctypes, re, sys
 import jax
 import jax.numpy as jp
 
 torch_import = os.environ.get("TORCH_IMPORT","0") == "1"
 
-def print_loaded_cuda_libs():
+def dump_loaded_cuda_libs():
   pats = [
-    r"/.*libcudart\.so(\.[0-9]+)*",
-    r"/.*libnvrtc\.so(\.[0-9]+)*",
-    r"/.*libnvJitLink\.so(\.[0-9]+)*",
-    r"/.*libcuda\.so(\.[0-9]+)*",
+    r".*libcudart\.so(\.[0-9]+)*$",
+    r".*libnvrtc\.so(\.[0-9]+)*$",
+    r".*libnvJitLink\.so(\.[0-9]+)*$",
+    r".*libcuda\.so(\.[0-9]+)*$",
   ]
   seen = set()
   hits = []
   with open("/proc/self/maps","r") as f:
     for line in f:
-      path = line.strip().split()[-1] if line.strip() else ""
+      parts = line.strip().split()
+      if not parts:
+        continue
+      path = parts[-1]
       for p in pats:
         if re.match(p, path):
           if path not in seen:
             seen.add(path)
             hits.append(path)
-  print("[probe] loaded CUDA libs:")
+  print("[probe] /proc/self/maps CUDA libs:")
   for h in hits:
     print("   ", h)
 
-def cudart():
-  # try common names
+def load_cudart():
   for name in ("libcudart.so.12","libcudart.so"):
     try:
       return ctypes.CDLL(name)
@@ -217,20 +226,17 @@ def cudart():
       pass
   return None
 
-def cuda_last_error_str(lib):
-  if lib is None:
-    return None
-  lib.cudaGetLastError.restype = ctypes.c_int
-  lib.cudaGetErrorString.restype = ctypes.c_char_p
-  err = lib.cudaGetLastError()
-  msg = lib.cudaGetErrorString(err)
-  return err, (msg.decode("utf-8","ignore") if msg else "")
-
-def cuda_sync(lib):
+def cuda_sync_and_last_error(lib):
   if lib is None:
     return None
   lib.cudaDeviceSynchronize.restype = ctypes.c_int
-  return lib.cudaDeviceSynchronize()
+  lib.cudaGetLastError.restype = ctypes.c_int
+  lib.cudaGetErrorString.restype = ctypes.c_char_p
+  rc = lib.cudaDeviceSynchronize()
+  err = lib.cudaGetLastError()
+  msg = lib.cudaGetErrorString(err)
+  msg = msg.decode("utf-8","ignore") if msg else ""
+  return rc, err, msg
 
 print("[probe] jax:", jax.__version__)
 if torch_import:
@@ -239,14 +245,13 @@ if torch_import:
 else:
   print("[probe] torch: (not imported)")
 
-print_loaded_cuda_libs()
+dump_loaded_cuda_libs()
 
-# Baseline JAX should work
-baseline = jax.jit(lambda: (jp.arange(8192, dtype=jp.float32) * 2).sum())
-jax.block_until_ready(baseline())
+# Baseline JAX must succeed
+jax.block_until_ready(jax.jit(lambda: (jp.arange(8192, dtype=jp.float32) * 2).sum())())
 print("[probe] baseline JAX OK")
 
-# Load env module without touching torch unless requested
+# Load env
 path = "/workspace/Mujoco_Sim/pick_env.py"
 spec = importlib.util.spec_from_file_location("pick_env_mod", path)
 m = importlib.util.module_from_spec(spec)
@@ -261,90 +266,65 @@ keys = jax.random.split(jax.random.PRNGKey(0), B)
 st_b = jax.vmap(env.reset_physics)(keys)
 data_b = st_b.data
 
-lib = cudart()
+lib = load_cudart()
 
-# ---- Stage 1: init token only (no render) ----
+# Stage 1: init token only
 env._ensure_render_token(data_b, debug=False)
-print("[probe] renderer.init OK; token dtype/shape:", getattr(env, "_render_token", None).dtype, getattr(env, "_render_token", None).shape)
+print("[probe] renderer.init OK")
 
-# If init already poisons, this will fail
 try:
   jax.block_until_ready(jp.zeros((128,), dtype=jp.float32) + 1)
   print("[probe] PASS: JAX op after init OK")
 except Exception as e:
-  print("[probe] FAIL: JAX op after init FAILED -> poisoning happens at init")
-  raise
+  print("[probe] FAIL: JAX op after init FAILED -> poisoning at init:", repr(e))
+  sys.exit(12)
 
-# ---- Stage 2: render once ----
+# Stage 2: render
 rgb = env.render_rgba(data_b)
 jax.block_until_ready(rgb)
 print("[probe] render OK; rgb:", getattr(rgb,"shape",None), getattr(rgb,"dtype",None))
 
-# Check CUDA runtime error state immediately
-if lib is not None:
-  sync_rc = cuda_sync(lib)
-  err = cuda_last_error_str(lib)
-  print("[probe] cudaDeviceSynchronize rc:", sync_rc)
-  print("[probe] cudaGetLastError:", err)
+# Immediate CUDA error check (global runtime state)
+triple = cuda_sync_and_last_error(lib)
+if triple is None:
+  print("[probe] libcudart ctypes load failed; skipping cudaDeviceSynchronize/cudaGetLastError")
 else:
-  print("[probe] libcudart not loadable via ctypes; skipping cudaGetLastError")
+  rc, err, msg = triple
+  print("[probe] cudaDeviceSynchronize rc:", rc)
+  print("[probe] cudaGetLastError:", (err, msg))
 
-# ---- Stage 3: first unrelated JAX op after render (this is your A1) ----
-def try_post_jax(tag):
-  try:
-    jax.block_until_ready(jp.zeros((B,2,64,64,4), dtype=jp.uint8))
-    print(f"[probe] PASS: post-render JAX fresh alloc OK ({tag})")
-    return True
-  except Exception as e:
-    print(f"[probe] FAIL: post-render JAX fresh alloc FAILED ({tag}) ->", repr(e))
-    return False
+# Stage 3: first fresh JAX alloc AFTER render (your A1 poison test)
+try:
+  jax.block_until_ready(jp.zeros((B,2,64,64,4), dtype=jp.uint8))
+  print("[probe] PASS: post-render fresh JAX alloc OK")
+except Exception as e:
+  print("[probe] FAIL: post-render fresh JAX alloc FAILED -> poisoning after render:", repr(e))
+  sys.exit(13)
 
-ok = try_post_jax("no-extra-sync")
-
-# If it failed, try one more hard device sync + retry (detects stream/ordering bugs)
-if not ok and lib is not None:
-  print("[probe] retrying after extra cudaDeviceSynchronize() ...")
-  cuda_sync(lib)
-  # clear last error read
-  _ = cuda_last_error_str(lib)
-  ok2 = try_post_jax("after-extra-device-sync")
-  if not ok2:
-    raise SystemExit(2)
-  else:
-    raise SystemExit(3)  # special code: sync workaround helped
-
-# Optional: torch kernel AFTER render (only if imported)
+# Optional: Torch op AFTER render (only if imported)
 if torch_import:
   import torch
   torch.empty((1024,), device="cuda", dtype=torch.float32).fill_(1.0)
   torch.cuda.synchronize()
   print("[probe] PASS: Torch CUDA op after render OK")
 
-print("[probe] ALL GOOD: no poisoning detected in this variant")
+print("[probe] ALL GOOD in this variant")
 PY
 }
 
-# Run variants (separate python processes => clean isolation)
-#   - If torch_import=0 still fails: Madrona/JAX/XLA side.
-#   - If torch_import=0 passes but torch_import=1 fails: CUDA runtime lib collision involving torch.
 set +e
-run_probe 0 0 1; rc00=$?
-run_probe 1 0 1; rc10=$?
-run_probe 0 1 1; rc01=$?
-run_probe 1 1 1; rc11=$?
+run_probe 0; rc0=$?
+run_probe 1; rc1=$?
 set -e
 
 echo
 echo "=== [probe summary] exit codes ==="
-echo "noTorch noPreload : $rc00"
-echo "Torch   noPreload : $rc10"
-echo "noTorch Preload   : $rc01"
-echo "Torch   Preload   : $rc11"
-echo "Codes: 0=OK, 2=poison persists even after extra sync, 3=extra sync fixed (stream ordering bug)"
+echo "noTorch : $rc0"
+echo "Torch   : $rc1"
+echo "Codes: 0=OK, 12=poison at init, 13=poison after render"
 
-# If any variant shows poisoning (exit 2), stop before training
-if [[ "$rc00" == "2" || "$rc10" == "2" || "$rc01" == "2" || "$rc11" == "2" ]]; then
-  echo "FATAL: renderer poisoning confirmed in at least one variant (exit=2). Not starting training."
+if [[ "$rc0" != "0" || "$rc1" != "0" ]]; then
+  echo "FATAL: decisive probe failed (see above). Not starting training."
   exit 20
 fi
 
