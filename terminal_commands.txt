@@ -13,14 +13,13 @@ python -m pip download \
   --abi cp312 \
   --python-version 312 \
   --index-url https://pypi.org/simple \
-  --extra-index-url https://download.pytorch.org/whl/cu124 \
+  --extra-index-url https://download.pytorch.org/whl/cu121 \
   -r requirements.txt \
   -d wheelhouse
 
 deactivate
 
 ls -lh wheelhouse | head
-
 SCRATCH=/scratch/$USER/apptainer_build
 mkdir -p "$SCRATCH/cache" "$SCRATCH/tmp"
 
@@ -29,6 +28,7 @@ export APPTAINER_TMPDIR="$SCRATCH/tmp"
 export SINGULARITY_CACHEDIR="$APPTAINER_CACHEDIR"
 export SINGULARITY_TMPDIR="$APPTAINER_TMPDIR"
 
+# Pick version 2
 apptainer cache clean --type=all --force || true
 apptainer build training.sif training.def
 
@@ -43,7 +43,7 @@ watch -n 0.5 'tail -n 30 training-[NUMBER].out'
 
 ##### Take log files from SSH and put in local computer. Run this on regular cmd, not in wsl
 scp -r `
-  ameypore@killarney.alliancecan.ca:/home/ameypore/scratch/daniel/MV-MAE_Stereo_Vision/logs `
+  ameypore@killarney.alliancecan.ca:/home/ameypore/scratch/daniel/MV-MAE_Stereo_Vision/Training_Results `
   "C:\Daniel\High School\Research\MV_MAE_Implementation"
 
 ##### Force pull from Github
