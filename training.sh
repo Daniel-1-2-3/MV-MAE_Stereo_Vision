@@ -92,37 +92,54 @@ set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
 # ============================================================
-# CUDA/JAX/Madrona loader hardening: use ONE consistent CUDA set
+# CUDA/JAX/Madrona loader hardening: DO NOT MIX CUDA LIB SETS
 # ============================================================
 
 # Avoid user-site surprises (prevents ~/.local injection)
 export PYTHONNOUSERSITE=1
 
-# --------- ADDED: pick a consistent CUDA root that exists in-image ----------
+# CUDA toolkit root (used for ptxas/libdevice via XLA_FLAGS; does NOT force runtime libs)
 if [[ -d /usr/local/cuda-12.5 ]]; then
   export CUDA_HOME=/usr/local/cuda-12.5
 else
   export CUDA_HOME=/usr/local/cuda
 fi
-# ---------------------------------------------------------------------------
 
-# Force system CUDA libs to the front (prevents pip nvidia-* wheels from winning)
-# (CHANGED: use $CUDA_HOME instead of /usr/local/cuda hardcode, and append driver libs explicitly)
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$CUDA_HOME/targets/x86_64-linux/lib:/opt/madrona_mjx/build:/.singularity.d/libs:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
-
-# Preload the exact nvJitLink file to prevent mixing nvJitLink variants
-# (CHANGED: preload from $CUDA_HOME; exact file path)
-NVJITLINK_EXACT="$CUDA_HOME/targets/x86_64-linux/lib/libnvJitLink.so.12"
-if [[ -f "$NVJITLINK_EXACT" ]]; then
-  export LD_PRELOAD="$NVJITLINK_EXACT"
-else
-  NVJITLINK_EXACT2="$CUDA_HOME/lib64/libnvJitLink.so.12"
-  [[ -f "$NVJITLINK_EXACT2" ]] || { echo "FATAL: libnvJitLink.so.12 not found under $CUDA_HOME"; exit 11; }
-  export LD_PRELOAD="$NVJITLINK_EXACT2"
+# --------- CHANGED: prefer ONE CUDA runtime lib family (venv nvidia/*) ----------
+# Reason: your log proves JAX is already loading libcudart from site-packages/nvidia,
+# while you were forcing nvJitLink from /usr/local/cuda -> mixed set -> CUDA poisoning.
+PY_NVIDIA_ROOT="$(python - << "PY"
+import os, sys
+for p in sys.path:
+    if p and "site-packages" in p:
+        n = os.path.join(p, "nvidia")
+        if os.path.isdir(n):
+            print(n)
+            break
+PY
+)"
+if [[ -z "${PY_NVIDIA_ROOT:-}" ]]; then
+  echo "FATAL: could not locate venv site-packages/nvidia (cannot enforce a single CUDA lib set)"
+  exit 11
 fi
 
-# Point XLA at the same CUDA tree
-# (CHANGED: use $CUDA_HOME)
+PIP_CUDA_LIB_DIRS=()
+for sub in cuda_runtime cuda_nvrtc nvjitlink cublas cudnn cufft curand cusolver cusparse nccl; do
+  d="$PY_NVIDIA_ROOT/$sub/lib"
+  [[ -d "$d" ]] && PIP_CUDA_LIB_DIRS+=("$d")
+done
+PIP_CUDA_LIB_PATH="$(IFS=:; echo "${PIP_CUDA_LIB_DIRS[*]}")"
+echo "PIP_CUDA_LIB_PATH=$PIP_CUDA_LIB_PATH"
+
+# CRITICAL: do not pin system nvJitLink via LD_PRELOAD (it creates dual nvJitLink loads)
+unset LD_PRELOAD
+
+# Put pip CUDA libs FIRST to keep libcudart/nvrtc/nvJitLink consistent in-process.
+# Keep system CUDA dirs LAST as fallback only.
+export LD_LIBRARY_PATH="${PIP_CUDA_LIB_PATH}${PIP_CUDA_LIB_PATH:+:}/opt/madrona_mjx/build:/.singularity.d/libs:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:$CUDA_HOME/targets/x86_64-linux/lib:$CUDA_HOME/lib64"
+# -------------------------------------------------------------------------------
+
+# Point XLA at the toolkit tree (ptxas/libdevice); independent of runtime-lib choice
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=$CUDA_HOME"
 
 # JAX runtime knobs
@@ -139,6 +156,8 @@ echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
 echo "PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-}"
 echo "CUDA_HOME=${CUDA_HOME:-}"
+echo "PY_NVIDIA_ROOT=${PY_NVIDIA_ROOT:-}"
+echo "PIP_CUDA_LIB_PATH=${PIP_CUDA_LIB_PATH:-}"
 echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
 echo "LD_PRELOAD=${LD_PRELOAD:-}"
 echo "JAX_PLATFORMS=${JAX_PLATFORMS:-}"
@@ -184,15 +203,21 @@ print("_madrona_mjx_visualizer (top-level)     ->", origin("_madrona_mjx_visuali
 PY
 echo "======================================"
 
-# --------- ADDED: fail fast if pip nvidia CUDA libs are being mapped ----------
-echo "=== [CONTAINER] loader sanity (maps) ==="
+# --------- CHANGED: meaningful fail-fast (import JAX so CUDA libs actually load) ----------
+echo "=== [CONTAINER] loader sanity (maps, no-mixing) ==="
 python - << "PY"
 import re, sys
+import jax
+import jax.numpy as jnp
+
+# Force GPU runtime initialization in THIS process
+jax.block_until_ready(jax.jit(lambda: (jnp.arange(8192, dtype=jnp.float32) * 2).sum())())
+
 pats = [
-  r".*libcuda\.so(\.[0-9]+)*$",
   r".*libcudart\.so(\.[0-9]+)*$",
   r".*libnvrtc\.so(\.[0-9]+)*$",
   r".*libnvJitLink\.so(\.[0-9]+)*$",
+  r".*libcuda\.so(\.[0-9]+)*$",
 ]
 hits=[]
 with open("/proc/self/maps","r") as f:
@@ -202,26 +227,37 @@ with open("/proc/self/maps","r") as f:
     path=parts[-1]
     if any(re.match(p, path) for p in pats):
       hits.append(path)
+
 uniq=[]
 seen=set()
 for h in hits:
   if h not in seen:
     seen.add(h); uniq.append(h)
+
 print("CUDA libs in this process:")
 for h in uniq:
   print("  ", h)
-bad=[h for h in uniq if "/site-packages/nvidia/" in h]
-if bad:
-  print("FATAL: pip nvidia-* CUDA libs still loaded:", bad)
+
+pip=[h for h in uniq if "/site-packages/nvidia/" in h]
+syscuda=[h for h in uniq if "/usr/local/cuda" in h]
+
+# libcuda.so is expected from driver (/usr/local/nvidia or /.singularity.d/libs); ignore it for mixing detection.
+pip_core=[h for h in pip if "libcuda.so" not in h]
+sys_core=[h for h in syscuda if "libcuda.so" not in h]
+
+if pip_core and sys_core:
+  print("FATAL: mixed CUDA user-mode libs loaded (pip nvidia/* AND /usr/local/cuda*).")
+  print("  pip:", pip_core)
+  print("  sys:", sys_core)
   sys.exit(99)
+
+print("OK: no pip/system CUDA user-mode mixing detected.")
 PY
 echo "========================================"
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 
 # ============================================================
 # (4) DECISIVE probe variants (each is its own python process)
-#   - prints /proc/self/maps CUDA libs (what ACTUALLY loaded)
-#   - checks poisoning at init vs after render
 # ============================================================
 
 echo "=== [CONTAINER] (4) DECISIVE probe variants ==="
