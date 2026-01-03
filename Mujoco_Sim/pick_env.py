@@ -234,6 +234,7 @@ class StereoPickCube(panda.PandaBase):
 
         # ---- Renderer: create now, init token lazily (outside jit) ----
         self.renderer: BatchRenderer = self._create_renderer()
+        print('init renderer')
         self._render_token: Optional[jax.Array] = None
 
     # ---- IMPORTANT: prevent base-class observation_size from tracing reset() ----
