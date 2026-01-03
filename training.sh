@@ -67,7 +67,7 @@ echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 echo "=========================="
 
-# Probe 1: EGL + Torch
+# Probe 1: EGL + Torch (unchanged)
 apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
@@ -92,7 +92,7 @@ set -euo pipefail
 . /opt/mvmae_venv/bin/activate
 
 # ============================================================
-# CUDA/JAX/Madrona loader hardening: SYSTEM CUDA TOOLKIT ONLY
+# CUDA/JAX/Madrona loader probes: DO NOT MODIFY FILESYSTEM
 # ============================================================
 
 export PYTHONNOUSERSITE=1
@@ -103,70 +103,28 @@ else
   export CUDA_HOME=/usr/local/cuda
 fi
 
-# -------------------- ADDED: quarantine pip nvidia CUDA libs --------------------
-# JAX is still pulling libcudart from venv site-packages/nvidia/* even when
-# LD_LIBRARY_PATH prefers /usr/local/cuda. This block makes those libs un-loadable.
-PY_NVIDIA_ROOT="$(python - << "PY"
+# Keep this simple and explicit. (We will test BOTH modes in separate python processes.)
+SYSTEM_CUDA_LD="$CUDA_HOME/targets/x86_64-linux/lib:$CUDA_HOME/lib64:/opt/madrona_mjx/build:/.singularity.d/libs:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+PIP_CUDA_LD="$(python - << "PY"
 import os, sys
+root=None
 for p in sys.path:
   if p and "site-packages" in p:
-    n = os.path.join(p, "nvidia")
+    n=os.path.join(p,"nvidia")
     if os.path.isdir(n):
-      print(n)
+      root=n
       break
+dirs=[]
+if root:
+  for sub in ["cuda_runtime","cuda_nvrtc","nvjitlink","cublas","cudnn","cufft","curand","cusolver","cusparse","nccl"]:
+    d=os.path.join(root,sub,"lib")
+    if os.path.isdir(d):
+      dirs.append(d)
+print(":".join(dirs))
 PY
 )"
-echo "PY_NVIDIA_ROOT=${PY_NVIDIA_ROOT:-}"
 
-QUAR_DIR="/tmp/pip_cuda_quarantine"
-mkdir -p "$QUAR_DIR"
-RESTORE_LIST="$QUAR_DIR/restore_paths.txt"
-: > "$RESTORE_LIST"
-
-quarantine_one () {
-  local d="$1"
-  if [[ -d "$d" ]]; then
-    local bn
-    bn="$(echo "$d" | sed "s|/|_|g")"
-    local dst="$QUAR_DIR/$bn"
-    echo "[quarantine] moving $d -> $dst"
-    mv "$d" "$dst"
-    echo "$d|$dst" >> "$RESTORE_LIST"
-  fi
-}
-
-# Most important offenders:
-quarantine_one "$PY_NVIDIA_ROOT/cuda_runtime/lib"
-quarantine_one "$PY_NVIDIA_ROOT/cuda_nvrtc/lib"
-quarantine_one "$PY_NVIDIA_ROOT/nvjitlink/lib"
-# Common extras (safe to quarantine if present):
-quarantine_one "$PY_NVIDIA_ROOT/cublas/lib"
-quarantine_one "$PY_NVIDIA_ROOT/cudnn/lib"
-quarantine_one "$PY_NVIDIA_ROOT/cufft/lib"
-quarantine_one "$PY_NVIDIA_ROOT/curand/lib"
-quarantine_one "$PY_NVIDIA_ROOT/cusolver/lib"
-quarantine_one "$PY_NVIDIA_ROOT/cusparse/lib"
-quarantine_one "$PY_NVIDIA_ROOT/nccl/lib"
-
-restore_quarantine () {
-  if [[ -f "$RESTORE_LIST" ]]; then
-    echo "[quarantine] restoring pip CUDA dirs..."
-    while IFS="|" read -r orig dst; do
-      if [[ -d "$dst" ]]; then
-        mkdir -p "$(dirname "$orig")"
-        mv "$dst" "$orig"
-        echo "[quarantine] restored $orig"
-      fi
-    done < "$RESTORE_LIST"
-  fi
-}
-trap restore_quarantine EXIT
-# ------------------------------------------------------------------------------
-
-unset LD_PRELOAD
-export LD_LIBRARY_PATH="$CUDA_HOME/targets/x86_64-linux/lib:$CUDA_HOME/lib64:/opt/madrona_mjx/build:/.singularity.d/libs:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
-echo "USING SYSTEM CUDA TOOLKIT LIBS (pip nvidia/* CUDA dirs quarantined)"
-
+# XLA wants toolkit bits (ptxas/libdevice); independent of which libcudart family loads.
 export XLA_FLAGS="--xla_gpu_cuda_data_dir=$CUDA_HOME"
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -176,13 +134,15 @@ export PYTHONUNBUFFERED=1
 export JAX_TRACEBACK_FILTERING=off
 export PICK_ENV_DEBUG=1
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
+unset LD_PRELOAD
 
 echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
 echo "PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-}"
 echo "CUDA_HOME=${CUDA_HOME:-}"
-echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+echo "SYSTEM_CUDA_LD=$SYSTEM_CUDA_LD"
+echo "PIP_CUDA_LD=$PIP_CUDA_LD"
 echo "LD_PRELOAD=${LD_PRELOAD:-}"
 echo "JAX_PLATFORMS=${JAX_PLATFORMS:-}"
 echo "XLA_FLAGS=${XLA_FLAGS:-}"
@@ -194,6 +154,7 @@ nvidia-smi -L || true
 nvidia-smi || true
 echo "============================="
 
+# Cache paths (Madrona compile)
 ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1 || true)
 GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
 [[ -z "${GPU_MODEL:-}" ]] && GPU_MODEL="unknown"
@@ -213,7 +174,7 @@ print("devices:", jax.devices())
 PY
 echo "==================================="
 
-echo "=== [CONTAINER] Madrona .so origins ==="
+echo "=== [CONTAINER] Madrona .so origins (importlib only) ==="
 python - << "PY"
 import importlib.util
 def origin(name):
@@ -226,20 +187,35 @@ print("_madrona_mjx_visualizer (top-level)     ->", origin("_madrona_mjx_visuali
 PY
 echo "======================================"
 
-echo "=== [CONTAINER] loader sanity (maps, system-only) ==="
-python - << "PY"
-import re, sys
+# ============================================================
+# NEW: 2x “loader-only” probes (no Madrona) to see what JAX loads
+#   - One forces SYSTEM_CUDA_LD
+#   - One forces PIP_CUDA_LD (if present)
+# ============================================================
+
+loader_probe () {
+  local MODE="$1"
+  echo
+  echo "=== [LOADER PROBE] mode=$MODE ==="
+
+  if [[ "$MODE" == "system" ]]; then
+    export LD_LIBRARY_PATH="$SYSTEM_CUDA_LD"
+  else
+    # If PIP_CUDA_LD empty, still run to show it fails / behaves differently.
+    export LD_LIBRARY_PATH="${PIP_CUDA_LD}${PIP_CUDA_LD:+:}$SYSTEM_CUDA_LD"
+  fi
+
+  python - << "PY"
+import os, re, sys
 import jax
 import jax.numpy as jnp
 
-jax.block_until_ready(jax.jit(lambda: (jnp.arange(8192, dtype=jnp.float32) * 2).sum())())
+print("LD_LIBRARY_PATH=", os.environ.get("LD_LIBRARY_PATH",""))
 
-pats = [
-  r".*libcudart\.so(\.[0-9]+)*$",
-  r".*libnvrtc\.so(\.[0-9]+)*$",
-  r".*libnvJitLink\.so(\.[0-9]+)*$",
-  r".*libcuda\.so(\.[0-9]+)*$",
-]
+# force runtime init
+jax.block_until_ready(jax.jit(lambda: (jnp.arange(4096, dtype=jnp.float32) * 3).sum())())
+
+pats = [r".*libcudart\.so(\.[0-9]+)*$", r".*libnvrtc\.so(\.[0-9]+)*$", r".*libnvJitLink\.so(\.[0-9]+)*$", r".*libcuda\.so(\.[0-9]+)*$"]
 hits=[]
 with open("/proc/self/maps","r") as f:
   for line in f:
@@ -259,24 +235,43 @@ print("CUDA libs in this process:")
 for h in uniq:
   print("  ", h)
 
-bad=[h for h in uniq if "/site-packages/nvidia/" in h and "libcuda.so" not in h]
-if bad:
-  print("FATAL: pip nvidia/* CUDA user-mode libs loaded, but this run is configured for system CUDA toolkit libs only:")
-  for b in bad:
-    print("  ", b)
-  sys.exit(99)
-
-print("OK: system CUDA toolkit libs only (pip nvidia/* not loaded).")
+pip=[h for h in uniq if "/site-packages/nvidia/" in h]
+syscuda=[h for h in uniq if "/usr/local/cuda" in h]
+print("pip_cuda_count:", len(pip))
+print("sys_cuda_count:", len(syscuda))
 PY
-echo "========================================"
+}
 
-echo "=== [CONTAINER] (4) DECISIVE probe variants ==="
+loader_probe system
+loader_probe pip
+
+# ============================================================
+# NEW: decisive probes now run 4 variants:
+#   - LD=system, torch=0
+#   - LD=system, torch=1
+#   - LD=pip+system, torch=0
+#   - LD=pip+system, torch=1
+# Each variant:
+#   - dumps /proc/self/maps CUDA libs
+#   - checks CUDA last-error after init and after render
+#   - checks if JAX fails right after init (your poison)
+# ============================================================
+
+echo
+echo "=== [CONTAINER] (4) DECISIVE probe variants (system vs pip LD) ==="
 
 run_probe () {
-  local TORCH_IMPORT="$1"
+  local LD_MODE="$1"      # system | pip
+  local TORCH_IMPORT="$2" # 0 | 1
 
   echo
-  echo "---- PROBE RUN: torch_import=$TORCH_IMPORT ----"
+  echo "---- PROBE RUN: ld_mode=$LD_MODE torch_import=$TORCH_IMPORT ----"
+
+  if [[ "$LD_MODE" == "system" ]]; then
+    export LD_LIBRARY_PATH="$SYSTEM_CUDA_LD"
+  else
+    export LD_LIBRARY_PATH="${PIP_CUDA_LD}${PIP_CUDA_LD:+:}$SYSTEM_CUDA_LD"
+  fi
 
   TORCH_IMPORT="$TORCH_IMPORT" python - << "PY"
 import os, importlib.util, ctypes, re, sys
@@ -285,27 +280,24 @@ import jax.numpy as jp
 
 torch_import = os.environ.get("TORCH_IMPORT","0") == "1"
 
-def dump_loaded_cuda_libs():
+def dump_loaded_cuda_libs(tag):
   pats = [
     r".*libcudart\.so(\.[0-9]+)*$",
     r".*libnvrtc\.so(\.[0-9]+)*$",
     r".*libnvJitLink\.so(\.[0-9]+)*$",
     r".*libcuda\.so(\.[0-9]+)*$",
   ]
-  seen = set()
-  hits = []
+  seen=set()
+  hits=[]
   with open("/proc/self/maps","r") as f:
     for line in f:
-      parts = line.strip().split()
-      if not parts:
-        continue
-      path = parts[-1]
-      for p in pats:
-        if re.match(p, path):
-          if path not in seen:
-            seen.add(path)
-            hits.append(path)
-  print("[probe] /proc/self/maps CUDA libs:")
+      parts=line.strip().split()
+      if not parts: continue
+      path=parts[-1]
+      if any(re.match(p, path) for p in pats):
+        if path not in seen:
+          seen.add(path); hits.append(path)
+  print(f"[probe] CUDA libs ({tag}):")
   for h in hits:
     print("   ", h)
 
@@ -317,75 +309,84 @@ def load_cudart():
       pass
   return None
 
-def cuda_sync_and_last_error(lib):
+def cuda_last_error(lib, where):
   if lib is None:
-    return None
-  lib.cudaDeviceSynchronize.restype = ctypes.c_int
+    print(f"[probe] {where}: libcudart ctypes load failed")
+    return
   lib.cudaGetLastError.restype = ctypes.c_int
   lib.cudaGetErrorString.restype = ctypes.c_char_p
-  rc = lib.cudaDeviceSynchronize()
   err = lib.cudaGetLastError()
   msg = lib.cudaGetErrorString(err)
   msg = msg.decode("utf-8","ignore") if msg else ""
-  return rc, err, msg
+  print(f"[probe] {where}: cudaGetLastError ->", (err, msg))
 
 print("[probe] jax:", jax.__version__)
+print("[probe] LD_LIBRARY_PATH:", os.environ.get("LD_LIBRARY_PATH",""))
+
 if torch_import:
   import torch
   print("[probe] torch:", torch.__version__, "| torch.version.cuda:", getattr(torch.version,"cuda",None))
 else:
   print("[probe] torch: (not imported)")
 
-dump_loaded_cuda_libs()
+dump_loaded_cuda_libs("start")
 
+# Baseline JAX (must succeed)
 jax.block_until_ready(jax.jit(lambda: (jp.arange(8192, dtype=jp.float32) * 2).sum())())
 print("[probe] baseline JAX OK")
 
-path = "/workspace/Mujoco_Sim/pick_env.py"
-spec = importlib.util.spec_from_file_location("pick_env_mod", path)
-m = importlib.util.module_from_spec(spec)
+dump_loaded_cuda_libs("after baseline JAX")
+
+# Import env + create env
+path="/workspace/Mujoco_Sim/pick_env.py"
+spec=importlib.util.spec_from_file_location("pick_env_mod", path)
+m=importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 spec.loader.exec_module(m)
-StereoPickCube = getattr(m, "StereoPickCube")
+StereoPickCube=getattr(m,"StereoPickCube")
 
-B = 32
-env = StereoPickCube(render_batch_size=B)
+B=32
+env=StereoPickCube(render_batch_size=B)
 
-keys = jax.random.split(jax.random.PRNGKey(0), B)
-st_b = jax.vmap(env.reset_physics)(keys)
-data_b = st_b.data
+keys=jax.random.split(jax.random.PRNGKey(0), B)
+st_b=jax.vmap(env.reset_physics)(keys)
+data_b=st_b.data
 
-lib = load_cudart()
+lib=load_cudart()
+cuda_last_error(lib, "pre-init")
 
+# Stage 1: init token only
 env._ensure_render_token(data_b, debug=False)
 print("[probe] renderer.init OK")
 
+cuda_last_error(lib, "post-init (immediate)")
+
+# The poison check you care about
 try:
   jax.block_until_ready(jp.zeros((128,), dtype=jp.float32) + 1)
   print("[probe] PASS: JAX op after init OK")
 except Exception as e:
-  print("[probe] FAIL: JAX op after init FAILED -> poisoning at init:", repr(e))
+  print("[probe] FAIL: JAX op after init FAILED:", repr(e))
+  cuda_last_error(lib, "post-init (after failed JAX op)")
   sys.exit(12)
 
+# Stage 2: render
 rgb = env.render_rgba(data_b)
 jax.block_until_ready(rgb)
 print("[probe] render OK; rgb:", getattr(rgb,"shape",None), getattr(rgb,"dtype",None))
 
-triple = cuda_sync_and_last_error(lib)
-if triple is None:
-  print("[probe] libcudart ctypes load failed; skipping cudaDeviceSynchronize/cudaGetLastError")
-else:
-  rc, err, msg = triple
-  print("[probe] cudaDeviceSynchronize rc:", rc)
-  print("[probe] cudaGetLastError:", (err, msg))
+cuda_last_error(lib, "post-render")
 
+# Stage 3: fresh JAX alloc AFTER render
 try:
   jax.block_until_ready(jp.zeros((B,2,64,64,4), dtype=jp.uint8))
   print("[probe] PASS: post-render fresh JAX alloc OK")
 except Exception as e:
-  print("[probe] FAIL: post-render fresh JAX alloc FAILED -> poisoning after render:", repr(e))
+  print("[probe] FAIL: post-render fresh JAX alloc FAILED:", repr(e))
+  cuda_last_error(lib, "post-render (after failed JAX alloc)")
   sys.exit(13)
 
+# Optional: Torch CUDA op AFTER render
 if torch_import:
   import torch
   torch.empty((1024,), device="cuda", dtype=torch.float32).fill_(1.0)
@@ -397,17 +398,22 @@ PY
 }
 
 set +e
-run_probe 0; rc0=$?
-run_probe 1; rc1=$?
+run_probe system 0; rc_s0=$?
+run_probe system 1; rc_s1=$?
+run_probe pip    0; rc_p0=$?
+run_probe pip    1; rc_p1=$?
 set -e
 
 echo
 echo "=== [probe summary] exit codes ==="
-echo "noTorch : $rc0"
-echo "Torch   : $rc1"
+echo "system/noTorch : $rc_s0"
+echo "system/Torch   : $rc_s1"
+echo "pip/noTorch    : $rc_p0"
+echo "pip/Torch      : $rc_p1"
 echo "Codes: 0=OK, 12=poison at init, 13=poison after render"
 
-if [[ "$rc0" != "0" || "$rc1" != "0" ]]; then
+# If ANY fail, stop.
+if [[ "$rc_s0" != "0" || "$rc_s1" != "0" || "$rc_p0" != "0" || "$rc_p1" != "0" ]]; then
   echo "FATAL: decisive probe failed (see above). Not starting training."
   exit 20
 fi
