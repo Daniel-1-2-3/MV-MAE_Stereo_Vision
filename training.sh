@@ -95,18 +95,18 @@ set -euo pipefail
 # CUDA/JAX/Madrona loader hardening: use ONE consistent CUDA set
 # ============================================================
 
-# Avoid user-site surprises (won’t remove venv packages; just prevents ~/.local injection)
+# Avoid user-site surprises (prevents ~/.local injection)
 export PYTHONNOUSERSITE=1
 
 # Force system CUDA libs to the front (prevents pip nvidia-* wheels from winning)
+export CUDA_HOME=/usr/local/cuda
 export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:/opt/madrona_mjx/build:${LD_LIBRARY_PATH:-}"
 
-# Preload *the exact file* (not just soname) to prevent picking up a different nvJitLink
+# Preload the exact nvJitLink file to prevent mixing nvJitLink variants
 NVJITLINK_EXACT="/usr/local/cuda/targets/x86_64-linux/lib/libnvJitLink.so.12"
 if [[ -f "$NVJITLINK_EXACT" ]]; then
   export LD_PRELOAD="$NVJITLINK_EXACT"
 else
-  # fallback to common location
   NVJITLINK_EXACT2="/usr/local/cuda/lib64/libnvJitLink.so.12"
   [[ -f "$NVJITLINK_EXACT2" ]] || { echo "FATAL: libnvJitLink.so.12 not found under /usr/local/cuda"; exit 11; }
   export LD_PRELOAD="$NVJITLINK_EXACT2"
@@ -128,6 +128,7 @@ echo "=== [CONTAINER] preflight env snapshot ==="
 echo "PATH=$PATH"
 echo "PYTHONPATH=${PYTHONPATH:-}"
 echo "PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-}"
+echo "CUDA_HOME=${CUDA_HOME:-}"
 echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
 echo "LD_PRELOAD=${LD_PRELOAD:-}"
 echo "JAX_PLATFORMS=${JAX_PLATFORMS:-}"
@@ -293,7 +294,7 @@ else:
   print("[probe] cudaDeviceSynchronize rc:", rc)
   print("[probe] cudaGetLastError:", (err, msg))
 
-# Stage 3: first fresh JAX alloc AFTER render (your A1 poison test)
+# Stage 3: first fresh JAX alloc AFTER render (poison test)
 try:
   jax.block_until_ready(jp.zeros((B,2,64,64,4), dtype=jp.uint8))
   print("[probe] PASS: post-render fresh JAX alloc OK")
