@@ -157,13 +157,6 @@ def _renderer_worker_main(
         # Init token ONCE on batched data (your exact contract)
         render_token, _init_rgb, _init_depth = renderer.init(data_b, mjx_model)
 
-        # Compile a render function that returns rgb (still "poison" until device_get)
-        def render_fn(token, data):
-            new_tok, rgb, depth = renderer.render(token, data, mjx_model)
-            return new_tok, rgb, depth
-
-        render_fn_compiled = jax.jit(render_fn).lower(render_token, data_b).compile()
-
         print(f"[renderer-worker] ready (token init ok, compiled ok) B={B} H={shm.H} W={shm.W}", flush=True)
         pipe_conn.send(("ready", {"B": B, "H": shm.H, "W": shm.W}))
 
@@ -194,9 +187,11 @@ def _renderer_worker_main(
                 mocap_pos=mocap_pos,
                 mocap_quat=mocap_quat,
             )
+            data_b = mjx.forward(mjx_model, data_b)
 
             # Render (compiled): rgb is still unsafe as JAX value
-            render_token, rgb, _depth = render_fn_compiled(render_token, data_b)
+            render_token, rgb, _depth = renderer.render(render_token, data_b, mjx_model)
+            jax.block_until_ready(rgb)
 
             # Break context poisoning: hard copy to CPU uint8
             rgb_h = np.asarray(jax.device_get(rgb))  # expected [B,2,H,W,4] uint8
