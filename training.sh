@@ -125,7 +125,7 @@ export PYTHONUNBUFFERED=1
 # JAX / XLA tuning (optional)
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
@@ -147,7 +147,7 @@ GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
 ENV_CONFIG="default"
 
 # Cache build dir lives in your submit directory, shared host<->container
-CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
+CACHE_BUILD_DIR="/tmp/${SLURM_JOB_ID}_madrona_build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
 mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
 
 export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
@@ -214,12 +214,20 @@ echo "============================================"
 heartbeat () {
   while true; do
     ts=$(date +"%H:%M:%S")
+    # CPU% of the *python* process (child) if it exists, else the shell
+    if [[ -n "${PY_PID:-}" ]] && kill -0 "$PY_PID" 2>/dev/null; then
+      cpu=$(ps -p "$PY_PID" -o %cpu=,rss= 2>/dev/null | tr -s " " | sed "s/^ //")
+    else
+      cpu=$(ps -p $$ -o %cpu=,rss= 2>/dev/null | tr -s " " | sed "s/^ //")
+    fi
+
     if command -v nvidia-smi >/dev/null 2>&1; then
       gpu=$(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
-      echo "[hb $ts] gpu(util%,memutil%,memMB)=${gpu:-na}"
     else
-      echo "[hb $ts] nvidia-smi=missing"
+      gpu="na"
     fi
+
+    echo "[hb $ts] cpu(%CPU,RSSKB)=${cpu:-na} | gpu(util%,memutil%,memMB)=${gpu:-na}"
     sleep 5
   done
 }
@@ -228,7 +236,9 @@ set +e
 heartbeat & HB_PID=$!
 
 # run python in foreground so your output stays as-is; heartbeat continues in background
-stdbuf -oL -eL python -u execute.py 2>&1
+stdbuf -oL -eL python -u execute.py 2>&1 &
+PY_PID=$!
+wait $PY_PID
 RC=$?
 
 kill $HB_PID >/dev/null 2>&1 || true
