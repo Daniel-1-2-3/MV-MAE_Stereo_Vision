@@ -114,7 +114,7 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 
 # IMPORTANT: append to XLA_FLAGS (don’t clobber)
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda"
 
 # ---- Madrona caches on /tmp (avoid scratch hiccups during first init) ----
 GPU_MODEL_LOWER="unknown"
