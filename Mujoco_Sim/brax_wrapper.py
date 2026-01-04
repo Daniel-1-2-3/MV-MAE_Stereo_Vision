@@ -14,24 +14,29 @@ import jax
 import jax.numpy as jp
 from mujoco import mjx
 import numpy as np
-import torch
-from tensordict import TensorDict
-from torch.utils import dlpack as tpack
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch  # pragma: no cover
+    from tensordict import TensorDict  # pragma: no cover
 
 
 # ---------------------------
 # Torch/JAX helpers
 # ---------------------------
 
-def _torch_to_jax(x: torch.Tensor) -> jax.Array:
+def _torch_to_jax(x) -> jax.Array:
+    # Local import so the renderer worker process never imports torch.
+    from torch.utils import dlpack as tpack
     try:
         return jax.dlpack.from_dlpack(x)
     except TypeError:
         return jax.dlpack.from_dlpack(tpack.to_dlpack(x))
 
 
-def _jax_to_torch_hostcopy(x: jax.Array, device: torch.device) -> torch.Tensor:
+def _jax_to_torch_hostcopy(x: jax.Array, device):
     """Break any GPU pointer sharing: JAX -> host numpy -> Torch tensor -> (optional) GPU."""
+    import torch
     arr = np.asarray(jax.device_get(x))
     t = torch.from_numpy(arr)
     if device.type == "cuda":
@@ -56,17 +61,25 @@ class _EnvCtorSpec:
 
 @dataclass(frozen=True)
 class _ShmSpec:
-    qpos_name: str
-    qvel_name: str
-    ctrl_name: str
-    mocap_pos_name: str
-    mocap_quat_name: str
-    out_obs_name: str
+    # Render-only inputs (already-forwarded kinematics from main process)
+    geom_xpos_name: str
+    geom_xmat_name: str
+    cam_xpos_name: str
+    cam_xmat_name: str
+    light_xpos_name: str
+    light_xdir_name: str
+
+    # Raw RGBA output from Madrona (uint8)
+    out_rgba_name: str
+
+    # Shapes
     B: int
-    nq: int
-    nv: int
-    nu: int
-    nmocap: int
+    geom_xpos_shape: Tuple[int, ...]
+    geom_xmat_shape: Tuple[int, ...]
+    cam_xpos_shape: Tuple[int, ...]
+    cam_xmat_shape: Tuple[int, ...]
+    light_xpos_shape: Tuple[int, ...]
+    light_xdir_shape: Tuple[int, ...]
     H: int
     W: int
 
@@ -97,6 +110,18 @@ def _broadcast_tree_to_batch(tree, B: int):
     return jax.tree_util.tree_map(_bcast, tree)
 
 
+def _strip_leading_batch_dim(shape: Tuple[int, ...], B: int, *, unbatched_rank: int) -> Tuple[int, ...]:
+    """Strip a leading batch dim B only when the rank matches the batched case.
+
+    This avoids the common footgun where an unbatched tensor happens to have
+    its first dimension equal to B (e.g. ngeom == num_worlds).
+    """
+    shape = tuple(shape)
+    if len(shape) == unbatched_rank + 1 and shape[0] == B:
+        return tuple(shape[1:])
+    return shape
+
+
 def _stitch_stereo_uint8_rgba_to_obs_uint8(rgb_rgba_u8: np.ndarray) -> np.ndarray:
     """
     Input:  [B, 2, H, W, 4] uint8
@@ -119,7 +144,15 @@ def _renderer_worker_main(
 ):
     """
     Process A: owns Madrona renderer + render_token.
-    Produces CPU uint8 pixels in shared memory.
+    Does **only** renderer.init / renderer.render + device_get.
+    No MJX forward, no vmap/jit, no Torch.
+
+    The main process must send already-forwarded pose buffers:
+      - geom_xpos / geom_xmat
+      - cam_xpos / cam_xmat
+      - (optional) light_xpos / light_xdir
+    because Madrona-MJX supports rendering position/rotation updates for
+    rigid bodies, cameras, and lights.
     """
     try:
         env = _import_env_from_spec(env_spec)
@@ -130,31 +163,44 @@ def _renderer_worker_main(
         renderer = env.renderer    # BatchRenderer created in env __init__
         render_token = None
 
-        # Attach shared memory
-        qpos_shm = SharedMemory(name=shm.qpos_name)
-        qvel_shm = SharedMemory(name=shm.qvel_name)
-        ctrl_shm = SharedMemory(name=shm.ctrl_name)
-        mocap_pos_shm = SharedMemory(name=shm.mocap_pos_name)
-        mocap_quat_shm = SharedMemory(name=shm.mocap_quat_name)
-        out_obs_shm = SharedMemory(name=shm.out_obs_name)
+        # Attach shared memory (inputs: xforms, output: raw RGBA)
+        geom_xpos_shm = SharedMemory(name=shm.geom_xpos_name)
+        geom_xmat_shm = SharedMemory(name=shm.geom_xmat_name)
+        cam_xpos_shm = SharedMemory(name=shm.cam_xpos_name)
+        cam_xmat_shm = SharedMemory(name=shm.cam_xmat_name)
 
-        qpos_np = np.ndarray((B, shm.nq), dtype=np.float32, buffer=qpos_shm.buf)
-        qvel_np = np.ndarray((B, shm.nv), dtype=np.float32, buffer=qvel_shm.buf)
-        ctrl_np = np.ndarray((B, shm.nu), dtype=np.float32, buffer=ctrl_shm.buf)
-        mocap_pos_np = np.ndarray((B, shm.nmocap, 3), dtype=np.float32, buffer=mocap_pos_shm.buf)
-        mocap_quat_np = np.ndarray((B, shm.nmocap, 4), dtype=np.float32, buffer=mocap_quat_shm.buf)
-        out_obs_np = np.ndarray((B, shm.H, 2 * shm.W, 3), dtype=np.uint8, buffer=out_obs_shm.buf)
+        light_xpos_shm = SharedMemory(name=shm.light_xpos_name) if shm.light_xpos_name else None
+        light_xdir_shm = SharedMemory(name=shm.light_xdir_name) if shm.light_xdir_name else None
 
-        # Build a template batched mjx.Data once.
-        # We mirror your env logic: a proper mjx.Data that has all fields, then batched.
+        out_rgba_shm = SharedMemory(name=shm.out_rgba_name)
+
+        geom_xpos_np = np.ndarray((B,) + tuple(shm.geom_xpos_shape), dtype=np.float32, buffer=geom_xpos_shm.buf)
+        geom_xmat_np = np.ndarray((B,) + tuple(shm.geom_xmat_shape), dtype=np.float32, buffer=geom_xmat_shm.buf)
+        cam_xpos_np = np.ndarray((B,) + tuple(shm.cam_xpos_shape), dtype=np.float32, buffer=cam_xpos_shm.buf)
+        cam_xmat_np = np.ndarray((B,) + tuple(shm.cam_xmat_shape), dtype=np.float32, buffer=cam_xmat_shm.buf)
+
+        light_xpos_np = None
+        light_xdir_np = None
+        if light_xpos_shm is not None and light_xdir_shm is not None:
+            light_xpos_np = np.ndarray((B,) + tuple(shm.light_xpos_shape), dtype=np.float32, buffer=light_xpos_shm.buf)
+            light_xdir_np = np.ndarray((B,) + tuple(shm.light_xdir_shape), dtype=np.float32, buffer=light_xdir_shm.buf)
+
+        out_rgba_np = np.ndarray((B, 2, shm.H, shm.W, 4), dtype=np.uint8, buffer=out_rgba_shm.buf)
+
+        # Build a template mjx.Data once (NO mjx.forward here).
+        # If the model is already batched (recommended for Madrona), mjx.make_data
+        # returns a batched data structure with leading dim B. Otherwise, we
+        # broadcast a single-world template to B.
         data0 = mjx.make_data(mjx_model)
-        data0 = mjx.forward(mjx_model, data0)
-        data_b = _broadcast_tree_to_batch(data0, B)
+        qpos0 = getattr(data0, "qpos", None)
+        already_batched = (
+            hasattr(qpos0, "ndim")
+            and qpos0.ndim >= 2
+            and int(qpos0.shape[0]) == B
+        )
+        data_b = data0 if already_batched else _broadcast_tree_to_batch(data0, B)
 
-        # IMPORTANT: do NOT vmap mjx.forward over a broadcasted mjx.Data.
-        # This is the path that crashes inside MJX scan/take with cudaErrorInvalidValue.
-        # Renderer init works fine on the batched data as-is.
-        # Init token ONCE on batched data (your exact contract)
+        # Init token ONCE on batched data (renderer compiles its custom calls here)
         render_token, _init_rgb, _init_depth = renderer.init(data_b, mjx_model)
 
         print(f"[renderer-worker] ready (token init ok, compiled ok) B={B} H={shm.H} W={shm.W}", flush=True)
@@ -172,42 +218,41 @@ def _renderer_worker_main(
                 print("[renderer-worker] first request", flush=True)
                 first = False
 
-            # Read CPU state -> device
-            qpos = jp.asarray(qpos_np)
-            qvel = jp.asarray(qvel_np)
-            ctrl = jp.asarray(ctrl_np)
-            mocap_pos = jp.asarray(mocap_pos_np)
-            mocap_quat = jp.asarray(mocap_quat_np)
+            # Read poses -> device (host->device copies; no extra compute)
+            geom_xpos = jp.asarray(geom_xpos_np)
+            geom_xmat = jp.asarray(geom_xmat_np)
+            cam_xpos = jp.asarray(cam_xpos_np)
+            cam_xmat = jp.asarray(cam_xmat_np)
 
-            # Create once, near where you build data_b / init the renderer token:
-            fwd_batched = jax.jit(jax.vmap(lambda d: mjx.forward(mjx_model, d)))
-
-            # Then per request:
-            data_b = data_b.replace(
-                qpos=qpos,
-                qvel=qvel,
-                ctrl=ctrl,
-                mocap_pos=mocap_pos,
-                mocap_quat=mocap_quat,
+            repl = dict(
+                geom_xpos=geom_xpos,
+                geom_xmat=geom_xmat,
+                cam_xpos=cam_xpos,
+                cam_xmat=cam_xmat,
             )
-            data_b = fwd_batched(data_b)
+            if light_xpos_np is not None and light_xdir_np is not None:
+                repl["light_xpos"] = jp.asarray(light_xpos_np)
+                repl["light_xdir"] = jp.asarray(light_xdir_np)
+
+            data_b = data_b.replace(**repl)
 
             # Render (compiled): rgb is still unsafe as JAX value
             render_token, rgb, _depth = renderer.render(render_token, data_b, mjx_model)
             jax.block_until_ready(rgb)
 
-            # Break context poisoning: hard copy to CPU uint8
-            rgb_h = np.asarray(jax.device_get(rgb))  # expected [B,2,H,W,4] uint8
-
-            # Stitch stereo and write to shm
-            obs_h = _stitch_stereo_uint8_rgba_to_obs_uint8(rgb_h)
-            np.copyto(out_obs_np, obs_h, casting="no")
+            # Hard copy to CPU uint8 (this is the boundary between worker/main)
+            rgb_h = np.asarray(jax.device_get(rgb))  # [B,2,H,W,4] uint8
+            np.copyto(out_rgba_np, rgb_h, casting="no")
 
             done_ev.set()
 
         # cleanup
-        qpos_shm.close(); qvel_shm.close(); ctrl_shm.close()
-        mocap_pos_shm.close(); mocap_quat_shm.close(); out_obs_shm.close()
+        geom_xpos_shm.close(); geom_xmat_shm.close(); cam_xpos_shm.close(); cam_xmat_shm.close()
+        if light_xpos_shm is not None:
+            light_xpos_shm.close()
+        if light_xdir_shm is not None:
+            light_xdir_shm.close()
+        out_rgba_shm.close()
         pipe_conn.close()
 
     except Exception as e:
@@ -226,43 +271,81 @@ class _RemoteRendererClient:
     Inputs/outputs via shared memory; request/response via Events.
     """
 
-    def __init__(self, env_spec: _EnvCtorSpec, mjx_model: mjx.Model, device: torch.device):
-        self.device = device
+    def __init__(self, env_spec: _EnvCtorSpec, mjx_model: mjx.Model):
 
         B = int(env_spec.render_batch_size)
         H = int(env_spec.render_height)
         W = int(env_spec.render_width)
 
-        nq = int(mjx_model.nq)
-        nv = int(mjx_model.nv)
-        nu = int(getattr(mjx_model, "nu", 0)) or 1
-        nmocap = int(getattr(mjx_model, "nmocap", 0)) or 1
+        # Discover the exact per-world pose buffer shapes from a template mjx.Data.
+        # (No mjx.forward; this is just shape inspection.)
+        d0 = mjx.make_data(mjx_model)
 
-        # shm allocations
-        self._qpos = SharedMemory(create=True, size=B * nq * 4)
-        self._qvel = SharedMemory(create=True, size=B * nv * 4)
-        self._ctrl = SharedMemory(create=True, size=B * nu * 4)
-        self._mocap_pos = SharedMemory(create=True, size=B * nmocap * 3 * 4)
-        self._mocap_quat = SharedMemory(create=True, size=B * nmocap * 4 * 4)
-        self._out_obs = SharedMemory(create=True, size=B * H * (2 * W) * 3)
+        geom_xpos_shape = _strip_leading_batch_dim(tuple(getattr(d0, "geom_xpos").shape), B, unbatched_rank=2)
+        geom_xmat_shape = _strip_leading_batch_dim(tuple(getattr(d0, "geom_xmat").shape), B, unbatched_rank=3)
+        cam_xpos_shape = _strip_leading_batch_dim(tuple(getattr(d0, "cam_xpos").shape), B, unbatched_rank=2)
+        cam_xmat_shape = _strip_leading_batch_dim(tuple(getattr(d0, "cam_xmat").shape), B, unbatched_rank=3)
+
+        # Lights are optional depending on the MJCF.
+        has_light = hasattr(d0, "light_xpos") and hasattr(d0, "light_xdir")
+        light_xpos_shape: Tuple[int, ...] = (
+            _strip_leading_batch_dim(tuple(getattr(d0, "light_xpos").shape), B, unbatched_rank=2) if has_light else tuple()
+        )
+        light_xdir_shape: Tuple[int, ...] = (
+            _strip_leading_batch_dim(tuple(getattr(d0, "light_xdir").shape), B, unbatched_rank=2) if has_light else tuple()
+        )
+
+        def _nbytes_f32(shape: Tuple[int, ...]) -> int:
+            n = int(np.prod(shape)) if len(shape) else 0
+            return int(B * n * 4)
+
+        # shm allocations (render-only)
+        self._geom_xpos = SharedMemory(create=True, size=_nbytes_f32(geom_xpos_shape))
+        self._geom_xmat = SharedMemory(create=True, size=_nbytes_f32(geom_xmat_shape))
+        self._cam_xpos = SharedMemory(create=True, size=_nbytes_f32(cam_xpos_shape))
+        self._cam_xmat = SharedMemory(create=True, size=_nbytes_f32(cam_xmat_shape))
+
+        self._light_xpos = SharedMemory(create=True, size=_nbytes_f32(light_xpos_shape)) if has_light else None
+        self._light_xdir = SharedMemory(create=True, size=_nbytes_f32(light_xdir_shape)) if has_light else None
+
+        # Raw RGBA out: [B,2,H,W,4] uint8
+        self._out_rgba = SharedMemory(create=True, size=int(B * 2 * H * W * 4))
 
         self.shm_spec = _ShmSpec(
-            qpos_name=self._qpos.name,
-            qvel_name=self._qvel.name,
-            ctrl_name=self._ctrl.name,
-            mocap_pos_name=self._mocap_pos.name,
-            mocap_quat_name=self._mocap_quat.name,
-            out_obs_name=self._out_obs.name,
-            B=B, nq=nq, nv=nv, nu=nu, nmocap=nmocap, H=H, W=W
+            geom_xpos_name=self._geom_xpos.name,
+            geom_xmat_name=self._geom_xmat.name,
+            cam_xpos_name=self._cam_xpos.name,
+            cam_xmat_name=self._cam_xmat.name,
+            light_xpos_name=self._light_xpos.name if self._light_xpos is not None else "",
+            light_xdir_name=self._light_xdir.name if self._light_xdir is not None else "",
+            out_rgba_name=self._out_rgba.name,
+            B=B,
+            geom_xpos_shape=geom_xpos_shape,
+            geom_xmat_shape=geom_xmat_shape,
+            cam_xpos_shape=cam_xpos_shape,
+            cam_xmat_shape=cam_xmat_shape,
+            light_xpos_shape=light_xpos_shape,
+            light_xdir_shape=light_xdir_shape,
+            H=H,
+            W=W,
         )
 
         # typed views
-        self.qpos_np = np.ndarray((B, nq), dtype=np.float32, buffer=self._qpos.buf)
-        self.qvel_np = np.ndarray((B, nv), dtype=np.float32, buffer=self._qvel.buf)
-        self.ctrl_np = np.ndarray((B, nu), dtype=np.float32, buffer=self._ctrl.buf)
-        self.mocap_pos_np = np.ndarray((B, nmocap, 3), dtype=np.float32, buffer=self._mocap_pos.buf)
-        self.mocap_quat_np = np.ndarray((B, nmocap, 4), dtype=np.float32, buffer=self._mocap_quat.buf)
-        self.out_obs_np = np.ndarray((B, H, 2 * W, 3), dtype=np.uint8, buffer=self._out_obs.buf)
+        self.geom_xpos_np = np.ndarray((B,) + geom_xpos_shape, dtype=np.float32, buffer=self._geom_xpos.buf)
+        self.geom_xmat_np = np.ndarray((B,) + geom_xmat_shape, dtype=np.float32, buffer=self._geom_xmat.buf)
+        self.cam_xpos_np = np.ndarray((B,) + cam_xpos_shape, dtype=np.float32, buffer=self._cam_xpos.buf)
+        self.cam_xmat_np = np.ndarray((B,) + cam_xmat_shape, dtype=np.float32, buffer=self._cam_xmat.buf)
+
+        self.light_xpos_np = (
+            np.ndarray((B,) + light_xpos_shape, dtype=np.float32, buffer=self._light_xpos.buf)
+            if self._light_xpos is not None else None
+        )
+        self.light_xdir_np = (
+            np.ndarray((B,) + light_xdir_shape, dtype=np.float32, buffer=self._light_xdir.buf)
+            if self._light_xdir is not None else None
+        )
+
+        self.out_rgba_np = np.ndarray((B, 2, H, W, 4), dtype=np.uint8, buffer=self._out_rgba.buf)
 
         ctx = mp.get_context("spawn")
         self.req_ev = ctx.Event()
@@ -312,7 +395,13 @@ class _RemoteRendererClient:
         except Exception:
             pass
 
-        for shm in [self._qpos, self._qvel, self._ctrl, self._mocap_pos, self._mocap_quat, self._out_obs]:
+        shms = [self._geom_xpos, self._geom_xmat, self._cam_xpos, self._cam_xmat, self._out_rgba]
+        if self._light_xpos is not None:
+            shms.append(self._light_xpos)
+        if self._light_xdir is not None:
+            shms.append(self._light_xdir)
+
+        for shm in shms:
             try:
                 shm.close()
             except Exception:
@@ -328,14 +417,15 @@ class _RemoteRendererClient:
         except Exception:
             pass
 
-    def render_obs_from_cpu_state(
+    def render_rgba_from_cpu_xforms(
         self,
-        qpos_cpu: np.ndarray,
-        qvel_cpu: np.ndarray,
-        ctrl_cpu: np.ndarray,
-        mocap_pos_cpu: np.ndarray,
-        mocap_quat_cpu: np.ndarray,
-    ) -> torch.Tensor:
+        geom_xpos_cpu: np.ndarray,
+        geom_xmat_cpu: np.ndarray,
+        cam_xpos_cpu: np.ndarray,
+        cam_xmat_cpu: np.ndarray,
+        light_xpos_cpu: Optional[np.ndarray] = None,
+        light_xdir_cpu: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         if not self.proc.is_alive():
             if self._conn.poll(0.0):
                 msg, payload = self._conn.recv()
@@ -343,21 +433,21 @@ class _RemoteRendererClient:
                     raise RuntimeError(f"Renderer worker crashed: {payload.get('exc')}\n{payload.get('traceback')}")
             raise RuntimeError("Renderer worker not alive.")
 
-        np.copyto(self.qpos_np, qpos_cpu, casting="unsafe")
-        np.copyto(self.qvel_np, qvel_cpu, casting="unsafe")
-        np.copyto(self.ctrl_np, ctrl_cpu, casting="unsafe")
-        np.copyto(self.mocap_pos_np, mocap_pos_cpu, casting="unsafe")
-        np.copyto(self.mocap_quat_np, mocap_quat_cpu, casting="unsafe")
+        np.copyto(self.geom_xpos_np, geom_xpos_cpu, casting="unsafe")
+        np.copyto(self.geom_xmat_np, geom_xmat_cpu, casting="unsafe")
+        np.copyto(self.cam_xpos_np, cam_xpos_cpu, casting="unsafe")
+        np.copyto(self.cam_xmat_np, cam_xmat_cpu, casting="unsafe")
+
+        if self.light_xpos_np is not None and light_xpos_cpu is not None:
+            np.copyto(self.light_xpos_np, light_xpos_cpu, casting="unsafe")
+        if self.light_xdir_np is not None and light_xdir_cpu is not None:
+            np.copyto(self.light_xdir_np, light_xdir_cpu, casting="unsafe")
 
         self.done_ev.clear()
         self.req_ev.set()
         self.done_ev.wait()
 
-        obs_h = np.ascontiguousarray(self.out_obs_np)  # [B,H,2W,3] uint8
-        obs_t = torch.from_numpy(obs_h)
-        if self.device.type == "cuda":
-            obs_t = obs_t.to(self.device, non_blocking=True)
-        return obs_t
+        return np.ascontiguousarray(self.out_rgba_np)  # [B,2,H,W,4] uint8
 
 
 # ---------------------------
@@ -377,6 +467,9 @@ class RSLRLBraxWrapper:
         device_rank: Optional[int] = None,
         device: Optional[torch.device] = None,
     ):
+        import torch
+        from tensordict import TensorDict  # noqa: F401 (runtime import for main only)
+
         self._raw_env = env
         self.batch_size = int(batch_size)
         self.num_envs = int(batch_size)
@@ -451,44 +544,52 @@ class RSLRLBraxWrapper:
 
     def _ensure_remote(self):
         if self._remote is None:
-            self._remote = _RemoteRendererClient(self._env_spec, self._raw_env.mjx_model, self.device)
+            self._remote = _RemoteRendererClient(self._env_spec, self._raw_env.mjx_model)
 
     def _render_obs_from_state(self) -> torch.Tensor:
+        import torch
         assert self.env_state is not None
         self._ensure_remote()
 
         data = self.env_state.data
 
-        # Minimal CPU handoff
-        qpos_cpu = np.asarray(jax.device_get(data.qpos)).astype(np.float32, copy=False)
-        qvel_cpu = np.asarray(jax.device_get(data.qvel)).astype(np.float32, copy=False)
+        # Minimal CPU handoff: already-forwarded kinematics only
+        geom_xpos_cpu = np.asarray(jax.device_get(data.geom_xpos)).astype(np.float32, copy=False)
+        geom_xmat_cpu = np.asarray(jax.device_get(data.geom_xmat)).astype(np.float32, copy=False)
+        cam_xpos_cpu = np.asarray(jax.device_get(data.cam_xpos)).astype(np.float32, copy=False)
+        cam_xmat_cpu = np.asarray(jax.device_get(data.cam_xmat)).astype(np.float32, copy=False)
 
-        ctrl = getattr(data, "ctrl", None)
-        if ctrl is None:
-            ctrl_cpu = np.zeros_like(self._remote.ctrl_np)
-        else:
-            ctrl_cpu = np.asarray(jax.device_get(ctrl)).astype(np.float32, copy=False)
+        light_xpos_cpu = None
+        light_xdir_cpu = None
+        if hasattr(data, "light_xpos") and hasattr(data, "light_xdir"):
+            light_xpos_cpu = np.asarray(jax.device_get(data.light_xpos)).astype(np.float32, copy=False)
+            light_xdir_cpu = np.asarray(jax.device_get(data.light_xdir)).astype(np.float32, copy=False)
 
-        mocap_pos = getattr(data, "mocap_pos", None)
-        mocap_quat = getattr(data, "mocap_quat", None)
-        if mocap_pos is None:
-            mocap_pos_cpu = np.zeros_like(self._remote.mocap_pos_np)
-        else:
-            mocap_pos_cpu = np.asarray(jax.device_get(mocap_pos)).astype(np.float32, copy=False)
-        if mocap_quat is None:
-            mocap_quat_cpu = np.zeros_like(self._remote.mocap_quat_np)
-        else:
-            mocap_quat_cpu = np.asarray(jax.device_get(mocap_quat)).astype(np.float32, copy=False)
+        rgba = self._remote.render_rgba_from_cpu_xforms(
+            geom_xpos_cpu,
+            geom_xmat_cpu,
+            cam_xpos_cpu,
+            cam_xmat_cpu,
+            light_xpos_cpu=light_xpos_cpu,
+            light_xdir_cpu=light_xdir_cpu,
+        )  # [B,2,H,W,4] uint8
 
-        return self._remote.render_obs_from_cpu_state(qpos_cpu, qvel_cpu, ctrl_cpu, mocap_pos_cpu, mocap_quat_cpu)
+        obs_h = _stitch_stereo_uint8_rgba_to_obs_uint8(rgba)  # [B,H,2W,3] uint8
+        obs_t = torch.from_numpy(obs_h)
+        if self.device.type == "cuda":
+            obs_t = obs_t.to(self.device, non_blocking=True)
+        return obs_t
 
     def reset(self) -> TensorDict:
+        from tensordict import TensorDict
         self.env_state = self.reset_fn(self.key_reset)
 
         obs_t = self._render_obs_from_state()
         return TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
 
     def step(self, action: torch.Tensor) -> Tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+        import torch
+        from tensordict import TensorDict
         assert self.env_state is not None, "Call reset() before step()."
 
         action = torch.clamp(action, -1.0, 1.0)
