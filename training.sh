@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=50G
-#SBATCH --time=8:00:00
+#SBATCH --time=2:00:00
 #SBATCH --account=aip-aspuru-ab
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
