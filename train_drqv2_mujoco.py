@@ -100,7 +100,7 @@ def main():
     has_gpu = any(d.platform == "gpu" for d in jax.devices())
     device_rank = 0 if has_gpu else None
 
-    raw_env = StereoPickCube(render_batch_size=num_envs)
+    raw_env = StereoPickCube()
     print("Loaded env")
 
     brax_env = RSLRLBraxWrapper(
