@@ -115,50 +115,53 @@ class RSLRLBraxWrapper:
         out[:, :, :W, :].copy_(left)
         out[:, :, W:, :].copy_(right)
         return out
-
+    
     def _build_renderer_exact_debug(self):
-        """Line-for-line structure match to debug.py (init() + compile step())."""
+        """Renderer build that avoids tracing renderer.init into a big JIT compile,
+        and compiles render() with the token as an explicit argument (more cacheable)."""
         assert self.env_state is not None, "Call reset() once before building renderer."
 
         B = self.batch_size
         mjx_model = self._raw_env.mjx_model
 
-        # debug.py: renderer = BatchRenderer(mjx_model, gpu_id, num_worlds, w, w, np.array([0,1,2]), ...)
+        print("[renderer] building renderer + compiling render step ONCE")
         self._renderer = self._raw_env.make_renderer_debug(B)
 
-        # debug.py: v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, B)
+        # Matches debug intent: build batched model/in_axes
         v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, B)
+        print("[renderer] v_in_axes:", v_in_axes)
 
-        renderer = self._renderer  # local, matches debug style
+        renderer = self._renderer
 
-        # debug.py: @jax.jit def init(rng, model): ... return vmap(init_)(rng, model)
+        # --- 1) Pure MJX forward is what we JIT (fast + cacheable) ---
         @jax.jit
-        def init(rng, model):
-            def init_(rng, model):
-                data = mjx.make_data(model)
-                data = mjx.forward(model, data)
-                render_token, rgb, depth = renderer.init(data, model)
-                return data, render_token, rgb, depth
+        def make_forward(model):
+            data = mjx.make_data(model)
+            return mjx.forward(model, data)
 
-            return jax.vmap(init_, in_axes=[0, v_in_axes])(rng, model)
+        v_make_forward = jax.vmap(make_forward, in_axes=v_in_axes)
+        v_mjx_data = v_make_forward(v_mjx_model)
 
-        rng = jax.random.PRNGKey(seed=2)
-        rng, *key = jax.random.split(rng, B + 1)
-        v_mjx_data, render_token, _rgb0, _depth0 = init(jp.asarray(key), v_mjx_model)
+        # --- 2) Renderer init is NOT inside jitted code (reduces giant compile units) ---
+        def init_render_one(d, m):
+            return renderer.init(d, m)
+
+        v_init_render = jax.vmap(init_render_one, in_axes=(0, v_in_axes))
+        render_token, _rgb0, _depth0 = v_init_render(v_mjx_data, v_mjx_model)
 
         self._render_token = render_token
         self._v_mjx_data_for_compile = v_mjx_data
 
-        # debug.py: def step(data): ... return vmap(step_)(data)
-        def step(data):
-            def step_(data):
-                _, rgb, depth = renderer.render(render_token, data)
-                return data, rgb, depth
-
+        # --- 3) Compile render step with token as an explicit argument (more stable caching) ---
+        def step(token, data):
+            def step_(d):
+                _, rgb, depth = renderer.render(token, d)
+                return d, rgb, depth
             return jax.vmap(step_)(data)
 
-        # debug.py: step = jax.jit(step).lower(v_mjx_data).compile()
-        self._render_step_compiled = jax.jit(step).lower(v_mjx_data).compile()
+        # compile once
+        self._render_step_compiled = jax.jit(step).lower(self._render_token, v_mjx_data).compile()
+        print("[renderer] render step compiled")
 
     def _render_rgba_batched(self) -> jax.Array:
         """Render using debug.py compiled step; returns JAX uint8 [B,2,H,W,4]."""
@@ -168,7 +171,7 @@ class RSLRLBraxWrapper:
             self._build_renderer_exact_debug()
 
         # Render using current physics data (batched mjx.Data)
-        _data_out, rgba, _depth = self._render_step_compiled(self.env_state.data)
+        _data_out, rgba, _depth = self._render_step_compiled(self._render_token, self.env_state.data)
         return rgba
 
     def reset(self) -> TensorDict:
