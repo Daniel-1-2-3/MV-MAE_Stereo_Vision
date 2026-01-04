@@ -149,35 +149,14 @@ mkdir -p "$DEPS_PREFIX"
 export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
 
-# ---- Heartbeat + faulthandler wrapper around execute.py ----
+# ---- Run execute.py with faulthandler enabled (NO periodic traceback dumps) ----
 set +e
-stdbuf -oL -eL python -u - <<'"'"'PY'"'"' 2>&1 &
-import faulthandler, runpy, sys
+stdbuf -oL -eL python -u - <<'"'"'PY'"'"'
+import faulthandler, runpy
 faulthandler.enable()
-faulthandler.dump_traceback_later(60, repeat=True)
 runpy.run_path("execute.py", run_name="__main__")
 PY
-PY_PID=$!
-
-heartbeat () {
-  while kill -0 "$PY_PID" 2>/dev/null; do
-    ts=$(date +"%H:%M:%S")
-    cpu=$(ps -p "$PY_PID" -o %cpu=,rss=,etime=,stat= 2>/dev/null | tr -s " " | sed "s/^ //")
-    gpu="na"
-    if command -v nvidia-smi >/dev/null 2>&1; then
-      gpu=$(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "na")
-    fi
-    echo "[hb $ts] py(pid=$PY_PID) cpu(%CPU,RSSKB,ETIME,STAT)=${cpu:-na} | gpu(util%,memutil%,memMB)=${gpu:-na}"
-    sleep 30
-  done
-}
-heartbeat & HB_PID=$!
-
-wait "$PY_PID"
 RC=$?
-
-kill "$HB_PID" >/dev/null 2>&1 || true
-wait "$HB_PID" >/dev/null 2>&1 || true
 set -e
 
 echo "Training completed (exit_code=$RC)."

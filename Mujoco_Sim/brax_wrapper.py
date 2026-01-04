@@ -61,9 +61,9 @@ def _renderer_worker_main(
     shm_qpos: _ShmSpec,
     shm_qvel: _ShmSpec,
     shm_obs: _ShmSpec,
-    req_evt: mp.Event,
-    resp_evt: mp.Event,
-    stop_evt: mp.Event,
+    req_evt,
+    resp_evt,
+    stop_evt,
 ):
     """
     Process A: owns Madrona + JAX renderer. Receives qpos/qvel on CPU, renders, writes obs on CPU.
