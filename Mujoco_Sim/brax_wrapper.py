@@ -129,7 +129,6 @@ class RSLRLBraxWrapper:
 
         # Matches debug intent: build batched model/in_axes
         v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, B)
-        print("[renderer] v_in_axes:", v_in_axes)
 
         renderer = self._renderer
 
