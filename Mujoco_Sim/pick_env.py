@@ -1,8 +1,13 @@
-# Mujoco_Sim/pick_env.py
 # Copyright 2025 DeepMind Technologies Limited
 # Licensed under the Apache License, Version 2.0
 
-"""StereoPickCube (single-world physics; renderer is managed by wrapper in debug-safe way)."""
+"""StereoPickCube (single-world physics; renderer call pattern matches debug.py exactly).
+
+Key changes to match debug.py:
+- Env NO LONGER constructs BatchRenderer; wrapper owns it (like debug.py).
+- mjx.put_model is called without impl=... (debug.py style).
+- We optionally warm MJX with mjx.make_data(model) before the wrapper builds the renderer.
+"""
 
 from __future__ import annotations
 
@@ -40,7 +45,7 @@ def default_vision_config() -> config_dict.ConfigDict:
         gpu_id=0,
         render_batch_size=128,  # must equal num_envs in wrapper
         render_width=64,
-        render_height=64,
+        render_height=64,  # kept for compatibility; debug.py effectively uses width for both args
         use_rasterizer=False,
         enabled_geom_groups=[0, 1, 2],
         add_cam_debug_geo=False,
@@ -69,7 +74,7 @@ def default_config() -> config_dict.ConfigDict:
         ),
         vision=True,
         vision_config=default_vision_config(),
-        impl="jax",
+        impl="jax",  # kept, but we do NOT pass impl into mjx.put_model (debug.py style)
         nconmax=24 * 2048,
         njmax=128,
     )
@@ -123,7 +128,9 @@ class StereoPickCube(panda.PandaBase):
         mj_model.opt.timestep = float(self._config.sim_dt)
 
         self._mj_model: mujoco.MjModel = mj_model
-        self._mjx_model: mjx.Model = mjx.put_model(mj_model, impl=self._config.impl)
+
+        # MATCH debug.py: no impl=...
+        self._mjx_model: mjx.Model = mjx.put_model(mj_model)
 
         # Panda task init can mutate model; re-upload afterwards
         self._post_init(obj_name="box", keyframe="low_home")
@@ -155,29 +162,37 @@ class StereoPickCube(panda.PandaBase):
         self._floor_hand_found_sensor = [int(i) for i in floor_ids]
         self._box_hand_found_sensor = int(box_hand_ids[0]) if box_hand_ids else -1
 
-        # Renderer constructed once (token is handled by wrapper)
-        self.renderer: BatchRenderer = self._create_renderer()
+        # MATCH debug.py: touch mjx.make_data(model) before renderer init (warm-up)
+        _ = mjx.make_data(self._mjx_model)
 
     def _post_init(self, obj_name: str, keyframe: str):
         super()._post_init(obj_name, keyframe)
-        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+        # MATCH debug.py: re-upload without impl=...
+        self._mjx_model = mjx.put_model(self._mj_model)
         self._sample_orientation = False
 
-    def _create_renderer(self) -> BatchRenderer:
-        vc = self._config.vision_config
-        enabled_geom_groups = np.asarray(vc.enabled_geom_groups, dtype=np.int32)
+    # -------------------------
+    # Debug.py EXACT renderer construction helper (wrapper owns renderer)
+    # -------------------------
 
-        # Match debug.py positional signature
+    def make_renderer_debug(self, num_worlds: int) -> BatchRenderer:
+        """Construct BatchRenderer with the exact positional args used by debug.py."""
+        vc = self._config.vision_config
+        view_w = int(getattr(vc, "render_width", self.render_width))
+
+        # debug.py passes np.array([0,1,2]) without dtype cast
+        enabled_geom_groups = np.array(list(getattr(vc, "enabled_geom_groups", [0, 1, 2])))
+
         return BatchRenderer(
             self._mjx_model,
-            int(vc.gpu_id),
-            int(self.render_batch_size),
-            int(self.render_width),
-            int(self.render_height),
+            int(getattr(vc, "gpu_id", 0)),
+            int(num_worlds),
+            int(view_w),
+            int(view_w),  # debug.py passes width twice
             enabled_geom_groups,
             None,  # enabled_cameras
             bool(getattr(vc, "add_cam_debug_geo", False)),
-            bool(vc.use_rasterizer),
+            bool(getattr(vc, "use_rasterizer", False)),
             None,  # viz_gpu_hdls
         )
 

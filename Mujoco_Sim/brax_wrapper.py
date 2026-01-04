@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import jax
 import jax.numpy as jp
 from mujoco import mjx
+import numpy as np
 import torch
 from tensordict import TensorDict
 from torch.utils import dlpack as tpack
@@ -13,18 +14,33 @@ from madrona_mjx.wrapper import _identity_randomization_fn
 
 
 def _torch_to_jax(x: torch.Tensor) -> jax.Array:
+    # actions: zero-copy is fine (not a renderer output)
     try:
         return jax.dlpack.from_dlpack(x)
     except TypeError:
         return jax.dlpack.from_dlpack(tpack.to_dlpack(x))
 
 
-def _jax_to_torch(x: jax.Array) -> torch.Tensor:
-    return tpack.from_dlpack(jax.dlpack.to_dlpack(x))
+def _jax_to_torch_hostcopy(x: jax.Array, device: torch.device) -> torch.Tensor:
+    """Break any GPU pointer sharing: JAX -> host numpy -> Torch tensor -> (optional) GPU."""
+    arr = np.asarray(jax.device_get(x))
+    t = torch.from_numpy(arr)
+    if device.type == "cuda":
+        t = t.to(device, non_blocking=True)
+    return t
 
 
 class RSLRLBraxWrapper:
-    """Torch-facing vector-env wrapper using debug.py's SAFE renderer calling pattern."""
+    """Torch-facing vector-env wrapper using debug.py's EXACT renderer calling pattern.
+
+    Matches debug.py in these ways:
+      - wrapper (not env) constructs BatchRenderer
+      - init path: @jit init(rng, model) containing vmap(init_)
+      - init_ makes fresh data via mjx.make_data + mjx.forward, then renderer.init(data, model)
+      - render path: compile `step = jax.jit(step).lower(v_mjx_data).compile()`
+      - step uses `renderer.render(render_token, data)` and is vmapped over data
+      - NO extra jax.block_until_ready / healthcheck kernels inside render path
+    """
 
     def __init__(
         self,
@@ -54,7 +70,7 @@ class RSLRLBraxWrapper:
             else:
                 self.device = torch.device("cpu")
 
-        # Sanity: renderer num_worlds must match
+        # Sanity: renderer num_worlds must match (kept)
         if hasattr(self._raw_env, "render_batch_size"):
             rbs = int(getattr(self._raw_env, "render_batch_size"))
             if rbs != self.batch_size:
@@ -63,7 +79,7 @@ class RSLRLBraxWrapper:
                     f"Got render_batch_size={rbs}, num_envs={self.batch_size}."
                 )
 
-        # RNG keys per env
+        # RNG keys per env (physics)
         key = jax.random.PRNGKey(int(seed))
         self.key_reset = jax.random.split(key, self.batch_size)
 
@@ -82,13 +98,12 @@ class RSLRLBraxWrapper:
                 return jax.lax.fori_loop(0, self.action_repeat, body, state)
             self.step_fn = jax.jit(_step_repeat)
 
-        # Renderer state (debug-style)
+        # Renderer state (debug-exact)
         self.env_state = None
+        self._renderer = None
         self._render_token = None
-        self._render_compiled = None  # compiled function that renders given batched mjx.Data
-
-        # Optional: detect poisoning early (turn on only for debugging)
-        self._render_healthcheck = os.environ.get("MADRONA_RENDER_HEALTHCHECK", "0") == "1"
+        self._render_step_compiled = None  # compiled `step` from debug.py
+        self._v_mjx_data_for_compile = None
 
     @staticmethod
     def _stereo_rgba_to_torch_obs(rgba_t: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -101,82 +116,71 @@ class RSLRLBraxWrapper:
         out[:, :, W:, :].copy_(right)
         return out
 
-    def _build_renderer_like_debug(self):
-        """Create token via jit+vmap init, then compile render step once (matches debug.py)."""
+    def _build_renderer_exact_debug(self):
+        """Line-for-line structure match to debug.py (init() + compile step())."""
         assert self.env_state is not None, "Call reset() once before building renderer."
 
-        renderer = self._raw_env.renderer
-        mjx_model = self._raw_env.mjx_model
         B = self.batch_size
+        mjx_model = self._raw_env.mjx_model
 
-        # EXACTLY like debug.py: get v_mjx_model + v_in_axes from helper
+        # debug.py: renderer = BatchRenderer(mjx_model, gpu_id, num_worlds, w, w, np.array([0,1,2]), ...)
+        self._renderer = self._raw_env.make_renderer_debug(B)
+
+        # debug.py: v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, B)
         v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, B)
 
+        renderer = self._renderer  # local, matches debug style
+
+        # debug.py: @jax.jit def init(rng, model): ... return vmap(init_)(rng, model)
         @jax.jit
-        def init(keys, model):
+        def init(rng, model):
             def init_(rng, model):
-                # debug.py doesn't actually use rng; keep signature the same anyway
                 data = mjx.make_data(model)
                 data = mjx.forward(model, data)
                 render_token, rgb, depth = renderer.init(data, model)
                 return data, render_token, rgb, depth
 
-            return jax.vmap(init_, in_axes=[0, v_in_axes])(keys, model)
+            return jax.vmap(init_, in_axes=[0, v_in_axes])(rng, model)
 
-        rng = jax.random.PRNGKey(2)
-        rng, *keys = jax.random.split(rng, B + 1)
-        v_mjx_data, render_token, _rgb0, _depth0 = init(jp.asarray(keys), v_mjx_model)
+        rng = jax.random.PRNGKey(seed=2)
+        rng, *key = jax.random.split(rng, B + 1)
+        v_mjx_data, render_token, _rgb0, _depth0 = init(jp.asarray(key), v_mjx_model)
 
-        # Save the token (debug passes the same token forever; does NOT update it)
         self._render_token = render_token
+        self._v_mjx_data_for_compile = v_mjx_data
 
-        # Now compile a render step ONCE, with token closed over (like debug)
-        def render_step(data_batched):
-            def step_(data_one):
-                _tok2, rgb, depth = renderer.render(self._render_token, data_one)
-                return data_one, rgb, depth
-            return jax.vmap(step_)(data_batched)
+        # debug.py: def step(data): ... return vmap(step_)(data)
+        def step(data):
+            def step_(data):
+                _, rgb, depth = renderer.render(render_token, data)
+                return data, rgb, depth
 
-        # Compile using a representative mjx.Data structure of correct shapes.
-        # Use v_mjx_data from the same init path, just like debug.py.
-        self._render_compiled = jax.jit(render_step).lower(v_mjx_data).compile()
+            return jax.vmap(step_)(data)
 
-        # Warm-up call (optional, but keeps behavior predictable)
-        _data_out, rgb, _depth = self._render_compiled(v_mjx_data)
-        jax.block_until_ready(rgb)
+        # debug.py: step = jax.jit(step).lower(v_mjx_data).compile()
+        self._render_step_compiled = jax.jit(step).lower(v_mjx_data).compile()
 
     def _render_rgba_batched(self) -> jax.Array:
-        """Render using compiled debug-style path; returns JAX uint8 [B,2,H,W,4]."""
+        """Render using debug.py compiled step; returns JAX uint8 [B,2,H,W,4]."""
         assert self.env_state is not None, "env_state is None"
 
-        if self._render_compiled is None:
-            self._build_renderer_like_debug()
+        if self._render_step_compiled is None:
+            self._build_renderer_exact_debug()
 
-        # Render using current physics data
-        _data_out, rgba, _depth = self._render_compiled(self.env_state.data)
-        jax.block_until_ready(rgba)
-
-        if self._render_healthcheck:
-            # tiny kernel after render to detect poisoning early
-            x = jp.asarray(1, dtype=jp.int32) + jp.asarray(1, dtype=jp.int32)
-            jax.block_until_ready(x)
-
+        # Render using current physics data (batched mjx.Data)
+        _data_out, rgba, _depth = self._render_step_compiled(self.env_state.data)
         return rgba
 
     def reset(self) -> TensorDict:
         self.env_state = self.reset_fn(self.key_reset)
 
-        # Renderer init/compile happens lazily on first render
         rgba = self._render_rgba_batched()
-        print('rgba created')
 
-        rgba_t = _jax_to_torch(rgba)
-        if rgba_t.device != self.device:
-            rgba_t = rgba_t.to(self.device, non_blocking=True)
-        print('jax to torch succeed')
-        
+        # To keep renderer/data semantics identical to debug.py (no Torch touching JAX buffers),
+        # we break sharing via host copy here.
+        rgba_t = _jax_to_torch_hostcopy(rgba, self.device)
+
         obs_t = self._stereo_rgba_to_torch_obs(rgba_t, self.device)
-        print('stereo')
         return TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
 
     def step(self, action: torch.Tensor) -> Tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
@@ -188,21 +192,17 @@ class RSLRLBraxWrapper:
         self.env_state = self.step_fn(self.env_state, action_jax)
 
         rgba = self._render_rgba_batched()
-
-        rgba_t = _jax_to_torch(rgba)
-        if rgba_t.device != self.device:
-            rgba_t = rgba_t.to(self.device, non_blocking=True)
-
+        rgba_t = _jax_to_torch_hostcopy(rgba, self.device)
         obs_t = self._stereo_rgba_to_torch_obs(rgba_t, self.device)
 
-        reward_t = _jax_to_torch(self.env_state.reward).to(self.device)
-        done_t = _jax_to_torch(self.env_state.done).to(self.device)
+        # Safe (no-sharing) reward/done transfers too
+        reward_t = _jax_to_torch_hostcopy(self.env_state.reward, self.device).reshape(-1).to(torch.float32)
+        done_t = _jax_to_torch_hostcopy(self.env_state.done, self.device).reshape(-1).to(torch.bool)
 
         obs_td = TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
         info = {"truncation": obs_t.new_zeros((self.batch_size,), dtype=torch.bool)}
 
         if self.render_callback is not None:
-            # preserve your hook shape: (unused, state)
             self.render_callback(None, self.env_state)
 
         return obs_td, reward_t, done_t, info

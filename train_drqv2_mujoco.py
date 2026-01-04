@@ -1,9 +1,18 @@
+import os
+
+# Match debug.py env setup as closely as possible (must be set before JAX creates a client)
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.10")
+xla_flags = os.environ.get("XLA_FLAGS", "")
+if "--xla_gpu_triton_gemm_any=True" not in xla_flags:
+    xla_flags = (xla_flags + " --xla_gpu_triton_gemm_any=True").strip()
+os.environ["XLA_FLAGS"] = xla_flags
+
 import torch
 import jax
 from datetime import datetime
 from pathlib import Path
 
-import imageio.v2 as imageio  # NEW: simple gif writer
+import imageio.v2 as imageio
 
 from Mujoco_Sim.pick_env import StereoPickCube
 from Mujoco_Sim.brax_wrapper import RSLRLBraxWrapper
@@ -12,7 +21,6 @@ from DrQv2_Architecture.drqv2 import DrQv2Agent
 
 def _resize_uint8_hwc(frame_uint8_hwc: torch.Tensor, out_size: int) -> torch.Tensor:
     """frame: [H,W,3] uint8 -> resized [out_size,out_size,3] uint8 (Torch-only)."""
-    # Convert to NCHW float for interpolate
     x = frame_uint8_hwc.permute(2, 0, 1).unsqueeze(0).float()  # [1,3,H,W]
     x = torch.nn.functional.interpolate(x, size=(out_size, out_size), mode="bilinear", align_corners=False)
     x = x.clamp(0, 255).byte()
@@ -20,12 +28,6 @@ def _resize_uint8_hwc(frame_uint8_hwc: torch.Tensor, out_size: int) -> torch.Ten
 
 
 def eval_and_record(env, agent, num_steps: int = 10_000, video_root: Path | None = None):
-    """
-    Runs an evaluation rollout for num_steps env-steps (vectorized),
-    resets when any env is done, and records a GIF from env_id=0.
-
-    NOTE: Updated wrapper doesn’t expose env.render(); we record from obs directly.
-    """
     agent.train(training=False)
 
     if video_root is None:
@@ -51,22 +53,18 @@ def eval_and_record(env, agent, num_steps: int = 10_000, video_root: Path | None
         next_obs_td, rew_t, done_t, info = env.step(action)
         next_obs = next_obs_td["state"]
 
-        # Record env_id=0 frame from observation
-        # (If your obs is normalized float somewhere else, cast back to uint8 here.)
         frame0 = next_obs[0]  # [H,2W,3]
         if frame0.dtype != torch.uint8:
             frame0 = (frame0 * 255.0).clamp(0, 255).to(torch.uint8)
         frame0 = _resize_uint8_hwc(frame0, render_size)
         frames.append(frame0.detach().cpu().numpy())
 
-        # bookkeeping
         rew_t = rew_t.reshape(-1).to(torch.float32)
         done_t = done_t.reshape(-1).to(torch.bool)
 
         ep_rew += rew_t
         ep_len += 1
 
-        # same reset logic as before: if ANY env done -> reset all
         if done_t.any():
             finished = done_t
             mean_finished_rew = ep_rew[finished].mean().item() if finished.any() else float("nan")
@@ -94,13 +92,12 @@ def main():
     learning_starts = 50_000
     seed = 1
 
-    # keep this (even if unused) to preserve your structure
     render_trajectory = []
     def render_callback(_, state):
         render_trajectory.append(state)
 
+    # Keep your GPU detection, but JAX env vars are already set above
     has_gpu = any(d.platform == "gpu" for d in jax.devices())
-    device = "cuda:0" if has_gpu else "cpu"
     device_rank = 0 if has_gpu else None
 
     raw_env = StereoPickCube(render_batch_size=num_envs)
@@ -131,7 +128,7 @@ def main():
     print(f"[FPS] {fps:.2f} env-steps/sec")
     print(f"[Timing] {elapsed_s:.2f}s for {total_steps:,} steps")
 
-    video_root = Path(".")  # will create ./eval_video/eval.gif
+    video_root = Path(".")
     eval_and_record(brax_env, runner, num_steps=10_000, video_root=video_root)
 
 
