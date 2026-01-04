@@ -168,12 +168,15 @@ class RSLRLBraxWrapper:
 
         # Renderer init/compile happens lazily on first render
         rgba = self._render_rgba_batched()
+        print('rgba created')
 
         rgba_t = _jax_to_torch(rgba)
         if rgba_t.device != self.device:
             rgba_t = rgba_t.to(self.device, non_blocking=True)
-
+        print('jax to torch succeed')
+        
         obs_t = self._stereo_rgba_to_torch_obs(rgba_t, self.device)
+        print('stereo')
         return TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
 
     def step(self, action: torch.Tensor) -> Tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:

@@ -1,24 +1,13 @@
+# Mujoco_Sim/pick_env.py
 # Copyright 2025 DeepMind Technologies Limited
 # Licensed under the Apache License, Version 2.0
 
-"""StereoPickCube (clean renderer integration).
-
-This env is **single-world physics**. Parallelism is achieved the same way as the
-debug script: `jax.vmap` over worlds, and calling the Madrona renderer INSIDE
-the vmapped function so its batching rule kicks in.
-
-Renderer calls follow the debug script:
-  - token, rgb, depth = renderer.init(data, mjx_model)
-  - new_token, rgb, depth = renderer.render(token, data)
-
-No JAX-side RGB postprocessing (astype/concat/div) is done here.
-"""
+"""StereoPickCube (single-world physics; renderer is managed by wrapper in debug-safe way)."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Union
 from pathlib import Path
-import os
 
 import jax
 import jax.numpy as jp
@@ -49,7 +38,7 @@ def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
 def default_vision_config() -> config_dict.ConfigDict:
     return config_dict.create(
         gpu_id=0,
-        render_batch_size=128,  # should match your num_envs
+        render_batch_size=128,  # must equal num_envs in wrapper
         render_width=64,
         render_height=64,
         use_rasterizer=False,
@@ -87,12 +76,11 @@ def default_config() -> config_dict.ConfigDict:
 
 
 def _body_xpos(data: mjx.Data, body_id: int) -> jax.Array:
-    # single-world: [3]
     return data.xpos[body_id]
 
 
 class StereoPickCube(panda.PandaBase):
-    """Bring a box to a target (single-world physics; batched via vmap)."""
+    """Bring a box to a target (single-world physics; batching handled by wrapper)."""
 
     def __init__(
         self,
@@ -106,7 +94,7 @@ class StereoPickCube(panda.PandaBase):
         self.render_width = int(render_width)
         self.render_height = int(render_height)
 
-        # DO NOT call super().__init__ (keeping your constraint)
+        # DO NOT call super().__init__()
         mjx_env.MjxEnv.__init__(self, config, config_overrides)
 
         xml_path = (
@@ -144,6 +132,7 @@ class StereoPickCube(panda.PandaBase):
         hand_geom_id = self._mj_model.geom("hand_capsule").id
         self._hand_body = int(self._mj_model.geom_bodyid[hand_geom_id])
 
+        # Sensors
         sensor_names = [self._mj_model.sensor(i).name for i in range(self._mj_model.nsensor)]
         floor_ids = [
             i for i, n in enumerate(sensor_names)
@@ -166,7 +155,7 @@ class StereoPickCube(panda.PandaBase):
         self._floor_hand_found_sensor = [int(i) for i in floor_ids]
         self._box_hand_found_sensor = int(box_hand_ids[0]) if box_hand_ids else -1
 
-        # Renderer (constructed once; token is managed externally like the debug script)
+        # Renderer constructed once (token is handled by wrapper)
         self.renderer: BatchRenderer = self._create_renderer()
 
     def _post_init(self, obj_name: str, keyframe: str):
@@ -178,7 +167,7 @@ class StereoPickCube(panda.PandaBase):
         vc = self._config.vision_config
         enabled_geom_groups = np.asarray(vc.enabled_geom_groups, dtype=np.int32)
 
-        # Positional args to match the debug script style
+        # Match debug.py positional signature
         return BatchRenderer(
             self._mjx_model,
             int(vc.gpu_id),
@@ -197,7 +186,6 @@ class StereoPickCube(panda.PandaBase):
     # -------------------------
 
     def reset(self, rng: jax.Array) -> State:
-        """Single-world reset (batch externally with vmap)."""
         m = self._mjx_model
         rng, rng_box, rng_target = jax.random.split(rng, 3)
 
@@ -248,15 +236,13 @@ class StereoPickCube(panda.PandaBase):
             "truncation": jp.array(0.0, dtype=jp.float32),
         }
 
-        # Keep obs minimal here; vision is handled by renderer helpers below
-        obs = jp.zeros((1,), dtype=jp.float32)
+        obs = jp.zeros((1,), dtype=jp.float32)  # pixels handled in wrapper
         reward = jp.array(0.0, dtype=jp.float32)
         done = jp.array(False)
 
         return State(data, obs, reward, done, metrics, info)
 
     def step(self, state: State, action: jax.Array) -> State:
-        """Single-world physics step (batch externally with vmap)."""
         action_scale = float(self._config.action_scale)
         delta = action * action_scale
         ctrl = state.data.ctrl + delta
@@ -286,35 +272,6 @@ class StereoPickCube(panda.PandaBase):
             metrics=new_metrics,
             info=info,
         )
-
-    # -------------------------
-    # Renderer helpers (match debug batching pattern)
-    # -------------------------
-
-    def renderer_init_one(self, data: mjx.Data):
-        """Single-world init: token, rgb, depth = renderer.init(data, mjx_model)."""
-        return self.renderer.init(data, self._mjx_model)
-
-    def renderer_render_one(self, token: jax.Array, data: mjx.Data):
-        """Single-world render: new_token, rgb, depth = renderer.render(token, data)."""
-        return self.renderer.render(token, data)
-
-    def renderer_init_batched(self, data_batched: mjx.Data):
-        """Debug-style batching: vmap over worlds, call renderer.init per-world."""
-        def init_(d):
-            return self.renderer.init(d, self._mjx_model)
-
-        # token stays unbatched (like the debug script), rgb/depth are batched
-        token, rgb, depth = jax.vmap(init_, in_axes=0, out_axes=(None, 0, 0))(data_batched)
-        return token, rgb, depth
-
-    def renderer_render_batched(self, token: jax.Array, data_batched: mjx.Data):
-        """Debug-style batching: vmap over worlds, call renderer.render(token, d) per-world."""
-        def render_(d):
-            return self.renderer.render(token, d)
-
-        new_token, rgb, depth = jax.vmap(render_, in_axes=0, out_axes=(None, 0, 0))(data_batched)
-        return new_token, rgb, depth
 
     # -------------------------
     # Rewards / model tweaks
@@ -358,19 +315,10 @@ class StereoPickCube(panda.PandaBase):
 
     def modify_model(self, mj_model: mujoco.MjModel):
         mj_model.geom_size[mj_model.geom("floor").id, :2] = [5.0, 5.0]
-
         mesh_id = mj_model.mesh("finger_1").id
         geoms = [i for i, data_id in enumerate(mj_model.geom_dataid) if data_id == mesh_id]
         mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
         return mj_model
-
-    @property
-    def xml_path(self) -> str:
-        return self._xml_path
-
-    @property
-    def mj_model(self) -> mujoco.MjModel:
-        return self._mj_model
 
     @property
     def mjx_model(self) -> mjx.Model:

@@ -39,6 +39,10 @@ export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementati
 
 # ---------------- EGL / MuJoCo GL setup ----------------
 export APPTAINERENV_MUJOCO_GL=egl
+
+export APPTAINERENV_PYTHONUNBUFFERED=1
+export APPTAINERENV_JAX_LOG_COMPILES=1
+
 export APPTAINERENV_PYOPENGL_PLATFORM=egl
 export APPTAINERENV_MUJOCO_PLATFORM=egl
 export APPTAINERENV_DISPLAY=
