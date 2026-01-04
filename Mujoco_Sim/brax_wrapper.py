@@ -29,6 +29,32 @@ def _jax_to_torch_hostcopy(x: jax.Array, device: torch.device) -> torch.Tensor:
         t = t.to(device, non_blocking=True)
     return t
 
+def _jax_rgba_to_torch_obs_numpy(rgba: jax.Array, device: torch.device) -> torch.Tensor:
+    """
+    Render output path that avoids any post-render JAX kernels:
+      JAX -> (sync) -> host numpy (uint8) -> numpy processing -> torch -> (optional) GPU.
+    Input:  rgba JAX uint8 [B,2,H,W,4]
+    Output: obs Torch uint8 [B,H,2W,3] on `device`
+    """
+    # Ensure the custom-call completed before we touch it
+    jax.block_until_ready(rgba)
+
+    # Hard break from JAX/CUDA state: copy to host as uint8
+    rgba_h = np.asarray(jax.device_get(rgba))  # [B,2,H,W,4] uint8 on CPU
+
+    # NumPy processing: drop alpha and stitch stereo
+    rgb = rgba_h[..., :3]          # [B,2,H,W,3]
+    left = rgb[:, 0]               # [B,H,W,3]
+    right = rgb[:, 1]              # [B,H,W,3]
+    obs_h = np.concatenate([left, right], axis=2)  # [B,H,2W,3]
+
+    obs_h = np.ascontiguousarray(obs_h)  # safe for from_numpy
+    obs_t = torch.from_numpy(obs_h)
+
+    if device.type == "cuda":
+        obs_t = obs_t.to(device, non_blocking=True)
+
+    return obs_t
 
 class RSLRLBraxWrapper:
     """Torch-facing vector-env wrapper using debug.py's EXACT renderer calling pattern.
@@ -176,15 +202,9 @@ class RSLRLBraxWrapper:
     def reset(self) -> TensorDict:
         self.env_state = self.reset_fn(self.key_reset)
 
-        print("[reset] about to render first frame")
         rgba = self._render_rgba_batched()
-        print("[reset] first frame rendered")
+        obs_t = _jax_rgba_to_torch_obs_numpy(rgba, self.device)
 
-        # To keep renderer/data semantics identical to debug.py (no Torch touching JAX buffers),
-        # we break sharing via host copy here.
-        rgba_t = _jax_to_torch_hostcopy(rgba, self.device)
-
-        obs_t = self._stereo_rgba_to_torch_obs(rgba_t, self.device)
         return TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
 
     def step(self, action: torch.Tensor) -> Tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
@@ -196,8 +216,8 @@ class RSLRLBraxWrapper:
         self.env_state = self.step_fn(self.env_state, action_jax)
 
         rgba = self._render_rgba_batched()
-        rgba_t = _jax_to_torch_hostcopy(rgba, self.device)
-        obs_t = self._stereo_rgba_to_torch_obs(rgba_t, self.device)
+        obs_t = _jax_rgba_to_torch_obs_numpy(rgba, self.device)
+
 
         # Safe (no-sharing) reward/done transfers too
         reward_t = _jax_to_torch_hostcopy(self.env_state.reward, self.device).reshape(-1).to(torch.float32)
