@@ -181,7 +181,7 @@ class StereoPickCube(panda.PandaBase):
         view_w = int(getattr(vc, "render_width", self.render_width))
 
         # debug.py passes np.array([0,1,2]) without dtype cast
-        enabled_geom_groups = np.array(list(getattr(vc, "enabled_geom_groups", [0, 1, 2])))
+        enabled_geom_groups = np.array(getattr(vc, "enabled_geom_groups", [0, 1, 2]))
 
         return BatchRenderer(
             self._mjx_model,

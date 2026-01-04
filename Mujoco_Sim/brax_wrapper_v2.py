@@ -117,7 +117,7 @@ class RSLRLBraxWrapper:
         return out
     
     def _build_renderer_exact_debug(self):
-        """Build renderer + compile render step once (fast: no JIT around mjx.make_data)."""
+        """Build renderer + compile render step once (MATCHES debug.py exactly)."""
         assert self.env_state is not None, "Call reset() once before building renderer."
 
         B = self.batch_size
@@ -127,34 +127,38 @@ class RSLRLBraxWrapper:
         self._renderer = self._raw_env.make_renderer_debug(B)
         renderer = self._renderer
 
-        # --- 1) Build ONE mjx.Data (no jit), then broadcast to [B,...] ---
-        d0 = mjx.make_data(mjx_model)
-        d0 = mjx.forward(mjx_model, d0)
+        # MATCH debug.py: identity randomization + v_in_axes for vmap(model)
+        v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, B)
 
-        def _bcast(x):
-            # x is an array leaf
-            return jp.broadcast_to(x, (B,) + x.shape)
+        @jax.jit
+        def init(rng, model):
+            def init_(rng, model):
+                data = mjx.make_data(model)
+                data = mjx.forward(model, data)
+                render_token, rgb, depth = renderer.init(data, model)
+                return data, render_token, rgb, depth
 
-        v_mjx_data = jax.tree_map(_bcast, d0)
+            return jax.vmap(init_, in_axes=[0, v_in_axes])(rng, model)
 
-        # --- 2) renderer.init outside jit, vmapped over batched data ---
-        def init_one(d):
-            tok, rgb, depth = renderer.init(d, mjx_model)
-            return tok, rgb, depth
+        # MATCH debug.py: fixed seed + split into B keys
+        rng = jax.random.PRNGKey(seed=2)
+        rng, *keys = jax.random.split(rng, B + 1)
 
-        render_token, _rgb0, _depth0 = jax.vmap(init_one)(v_mjx_data)
+        v_mjx_data, render_token, _rgb0, _depth0 = init(jp.asarray(keys), v_mjx_model)
 
+        # Keep for debugging / inspection
         self._render_token = render_token
         self._v_mjx_data_for_compile = v_mjx_data
 
-        # --- 3) Compile render step once; token is explicit + batched ---
-        def step(tokens, data):
-            def step_one(tok, d):
-                _, rgb, depth = renderer.render(tok, d)
-                return d, rgb, depth
-            return jax.vmap(step_one)(tokens, data)
+        # MATCH debug.py: render_token is captured, and we vmap ONLY over data
+        def step(data):
+            def step_(data):
+                _, rgb, depth = renderer.render(render_token, data)
+                return data, rgb, depth
 
-        self._render_step_compiled = jax.jit(step).lower(self._render_token, v_mjx_data).compile()
+            return jax.vmap(step_)(data)
+
+        self._render_step_compiled = jax.jit(step).lower(v_mjx_data).compile()
         print("[renderer] render step compiled")
 
     def _render_rgba_batched(self) -> jax.Array:
@@ -164,8 +168,7 @@ class RSLRLBraxWrapper:
         if self._render_step_compiled is None:
             self._build_renderer_exact_debug()
 
-        # Render using current physics data (batched mjx.Data)
-        _data_out, rgba, _depth = self._render_step_compiled(self._render_token, self.env_state.data)
+        _data_out, rgba, _depth = self._render_step_compiled(self.env_state.data)
         return rgba
 
     def reset(self) -> TensorDict:
