@@ -1,5 +1,9 @@
 # Mujoco_Sim/brax_wrapper.py
 import os
+import importlib
+import multiprocessing as mp
+from multiprocessing.shared_memory import SharedMemory
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import jax
@@ -14,60 +18,253 @@ from madrona_mjx.wrapper import _identity_randomization_fn
 
 
 def _torch_to_jax(x: torch.Tensor) -> jax.Array:
-    # actions: zero-copy is fine (not a renderer output)
     try:
         return jax.dlpack.from_dlpack(x)
     except TypeError:
         return jax.dlpack.from_dlpack(tpack.to_dlpack(x))
 
 
-def _jax_to_torch_hostcopy(x: jax.Array, device: torch.device) -> torch.Tensor:
-    """Break any GPU pointer sharing: JAX -> host numpy -> Torch tensor -> (optional) GPU."""
-    arr = np.asarray(jax.device_get(x))
-    t = torch.from_numpy(arr)
-    if device.type == "cuda":
-        t = t.to(device, non_blocking=True)
-    return t
+# ---------------------------
+# Shared-memory renderer worker
+# ---------------------------
 
-def _jax_rgba_to_torch_obs_numpy(rgba: jax.Array, device: torch.device) -> torch.Tensor:
+@dataclass
+class _ShmSpec:
+    name: str
+    shape: Tuple[int, ...]
+    dtype: str  # numpy dtype str
+
+
+def _np_dtype(dtype_str: str):
+    return np.dtype(dtype_str)
+
+
+def _create_shm_array(spec: _ShmSpec, create: bool):
+    dtype = _np_dtype(spec.dtype)
+    nbytes = int(np.prod(spec.shape)) * dtype.itemsize
+    shm = SharedMemory(name=spec.name, create=create, size=nbytes if create else 0)
+    arr = np.ndarray(spec.shape, dtype=dtype, buffer=shm.buf)
+    return shm, arr
+
+
+def _renderer_worker_main(
+    env_module: str,
+    env_class: str,
+    env_config,
+    render_width: int,
+    render_height: int,
+    chunk: int,
+    gpu_id: int,
+    enabled_geom_groups: np.ndarray,
+    add_cam_debug_geo: bool,
+    use_rasterizer: bool,
+    shm_qpos: _ShmSpec,
+    shm_qvel: _ShmSpec,
+    shm_obs: _ShmSpec,
+    req_evt: mp.Event,
+    resp_evt: mp.Event,
+    stop_evt: mp.Event,
+):
     """
-    Render output path that avoids any post-render JAX kernels:
-      JAX -> (sync) -> host numpy (uint8) -> numpy processing -> torch -> (optional) GPU.
-    Input:  rgba JAX uint8 [B,2,H,W,4]
-    Output: obs Torch uint8 [B,H,2W,3] on `device`
+    Process A: owns Madrona + JAX renderer. Receives qpos/qvel on CPU, renders, writes obs on CPU.
     """
-    # Ensure the custom-call completed before we touch it
-    jax.block_until_ready(rgba)
+    # Import inside child
+    import jax
+    import jax.numpy as jp
+    import numpy as np
+    from mujoco import mjx
+    from madrona_mjx.wrapper import _identity_randomization_fn
 
-    # Hard break from JAX/CUDA state: copy to host as uint8
-    rgba_h = np.asarray(jax.device_get(rgba))  # [B,2,H,W,4] uint8 on CPU
+    # Build env inside worker (so it can build mjx_model the same way)
+    mod = importlib.import_module(env_module)
+    EnvCls = getattr(mod, env_class)
+    env = EnvCls(config=env_config, render_batch_size=chunk,
+                 render_width=render_width, render_height=render_height)
 
-    # NumPy processing: drop alpha and stitch stereo
-    rgb = rgba_h[..., :3]          # [B,2,H,W,3]
-    left = rgb[:, 0]               # [B,H,W,3]
-    right = rgb[:, 1]              # [B,H,W,3]
-    obs_h = np.concatenate([left, right], axis=2)  # [B,H,2W,3]
+    mjx_model = env.mjx_model
 
-    obs_h = np.ascontiguousarray(obs_h)  # safe for from_numpy
-    obs_t = torch.from_numpy(obs_h)
+    # Build renderer (debug semantics)
+    renderer = env.make_renderer_debug(chunk)
 
-    if device.type == "cuda":
-        obs_t = obs_t.to(device, non_blocking=True)
+    # Init token using debug-style init (small chunk)
+    v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, chunk)
 
-    return obs_t
+    def init_one(rng, model):
+        data = mjx.make_data(model)
+        data = mjx.forward(model, data)
+        render_token, _rgb, _depth = renderer.init(data, model)
+        return render_token
+
+    init_one_jit = jax.jit(init_one)
+    rng = jax.random.PRNGKey(2)
+    rng, *keys = jax.random.split(rng, chunk + 1)
+
+    render_token = jax.vmap(init_one_jit, in_axes=[0, v_in_axes])(jp.asarray(keys), v_mjx_model)
+
+    # Compile render step exactly like debug.py (token captured; vmap over data)
+    def step(data_batch):
+        def step_(d):
+            _, rgb, depth = renderer.render(render_token, d)
+            return d, rgb, depth
+        return jax.vmap(step_)(data_batch)
+
+    # Template data for building per-world data quickly
+    template = mjx.make_data(mjx_model)
+
+    # NOTE: we compile step on a "dummy" batch of data
+    def _bcast_data(d0):
+        return jax.tree_map(lambda x: jp.broadcast_to(x, (chunk,) + x.shape), d0)
+
+    dummy = _bcast_data(template)
+    step_compiled = jax.jit(step).lower(dummy).compile()
+
+    # Attach shared memory
+    shm_qpos_h, qpos_h = _create_shm_array(shm_qpos, create=False)
+    shm_qvel_h, qvel_h = _create_shm_array(shm_qvel, create=False)
+    shm_obs_h, obs_h = _create_shm_array(shm_obs, create=False)
+
+    try:
+        while not stop_evt.is_set():
+            # Wait for request
+            if not req_evt.wait(timeout=0.1):
+                continue
+            req_evt.clear()
+
+            # Render full batch in chunks
+            B = qpos_h.shape[0]
+            H = render_width
+            W = render_width  # debug.py uses width twice
+
+            for i in range(0, B, chunk):
+                qp = qpos_h[i:i+chunk]
+                qv = qvel_h[i:i+chunk]
+
+                # Build per-world data: template -> replace qpos/qvel -> forward
+                # Create a fresh per-world data via vmap to stay close to debug semantics.
+                def make_forward(qp1, qv1):
+                    d = template.replace(qpos=jp.asarray(qp1), qvel=jp.asarray(qv1))
+                    d = mjx.forward(mjx_model, d)
+                    return d
+
+                data_batch = jax.vmap(make_forward)(qp, qv)
+                _dout, rgba, _depth = step_compiled(data_batch)
+
+                # Immediately break from JAX: copy to CPU uint8
+                rgba_cpu = np.asarray(jax.device_get(rgba))  # [C,2,H,W,4] uint8
+                rgb = rgba_cpu[..., :3]
+                left = rgb[:, 0]
+                right = rgb[:, 1]
+                stitched = np.concatenate([left, right], axis=2)  # [C,H,2W,3] uint8
+
+                obs_h[i:i+chunk] = stitched
+
+            resp_evt.set()
+
+    finally:
+        shm_qpos_h.close()
+        shm_qvel_h.close()
+        shm_obs_h.close()
+
+
+class _RemoteRendererClient:
+    """
+    Process B side: writes qpos/qvel to shm, waits, reads obs from shm (CPU uint8).
+    """
+    def __init__(self, env, batch_size: int, chunk: int):
+        # Ensure spawn (CUDA-safe)
+        try:
+            mp.set_start_method("spawn")
+        except RuntimeError:
+            pass
+
+        self.B = int(batch_size)
+        self.chunk = int(chunk)
+
+        # Pull render config from env
+        vc = env._config.vision_config
+        self.render_w = int(getattr(vc, "render_width", getattr(env, "render_width", 64)))
+        self.render_h = int(getattr(vc, "render_height", getattr(env, "render_height", 64)))
+        self.gpu_id = int(getattr(vc, "gpu_id", 0))
+        self.enabled_geom_groups = np.array(getattr(vc, "enabled_geom_groups", [0, 1, 2]))
+        self.add_cam_debug_geo = bool(getattr(vc, "add_cam_debug_geo", False))
+        self.use_rasterizer = bool(getattr(vc, "use_rasterizer", False))
+
+        # Shapes: we need nq/nv (available once env has mjx_model)
+        nq = int(env.mjx_model.nq)
+        nv = int(env.mjx_model.nv)
+
+        # Shared memory specs
+        self._shm_qpos = _ShmSpec(name=f"shm_qpos_{os.getpid()}", shape=(self.B, nq), dtype="float32")
+        self._shm_qvel = _ShmSpec(name=f"shm_qvel_{os.getpid()}", shape=(self.B, nv), dtype="float32")
+        self._shm_obs  = _ShmSpec(name=f"shm_obs_{os.getpid()}",  shape=(self.B, self.render_w, 2*self.render_w, 3), dtype="uint8")
+
+        # Create SHM
+        self._qpos_shm, self.qpos = _create_shm_array(self._shm_qpos, create=True)
+        self._qvel_shm, self.qvel = _create_shm_array(self._shm_qvel, create=True)
+        self._obs_shm,  self.obs  = _create_shm_array(self._shm_obs,  create=True)
+
+        # Sync primitives
+        self.req_evt = mp.Event()
+        self.resp_evt = mp.Event()
+        self.stop_evt = mp.Event()
+
+        # Worker args: env reconstructed inside worker using module/class/config
+        env_module = env.__class__.__module__
+        env_class = env.__class__.__name__
+        env_config = env._config  # ConfigDict should be picklable
+
+        self.proc = mp.Process(
+            target=_renderer_worker_main,
+            args=(
+                env_module, env_class, env_config,
+                self.render_w, self.render_h, self.chunk,
+                self.gpu_id, self.enabled_geom_groups,
+                self.add_cam_debug_geo, self.use_rasterizer,
+                self._shm_qpos, self._shm_qvel, self._shm_obs,
+                self.req_evt, self.resp_evt, self.stop_evt
+            ),
+            daemon=True,
+        )
+        self.proc.start()
+
+    def render(self, qpos_cpu: np.ndarray, qvel_cpu: np.ndarray) -> np.ndarray:
+        # Write request buffers
+        self.qpos[:] = qpos_cpu.astype(np.float32, copy=False)
+        self.qvel[:] = qvel_cpu.astype(np.float32, copy=False)
+
+        # Signal + wait
+        self.resp_evt.clear()
+        self.req_evt.set()
+        self.resp_evt.wait()
+
+        # Return a view (do NOT mutate it without copying)
+        return self.obs
+
+    def close(self):
+        try:
+            self.stop_evt.set()
+            self.req_evt.set()
+            if self.proc.is_alive():
+                self.proc.join(timeout=2)
+        finally:
+            for shm in (self._qpos_shm, self._qvel_shm, self._obs_shm):
+                try:
+                    shm.close()
+                except Exception:
+                    pass
+            # unlink only from creator process
+            for shm in (self._qpos_shm, self._qvel_shm, self._obs_shm):
+                try:
+                    shm.unlink()
+                except Exception:
+                    pass
+
+
+# ---------------------------
+# Your wrapper (Process B)
+# ---------------------------
 
 class RSLRLBraxWrapper:
-    """Torch-facing vector-env wrapper using debug.py's EXACT renderer calling pattern.
-
-    Matches debug.py in these ways:
-      - wrapper (not env) constructs BatchRenderer
-      - init path: @jit init(rng, model) containing vmap(init_)
-      - init_ makes fresh data via mjx.make_data + mjx.forward, then renderer.init(data, model)
-      - render path: compile `step = jax.jit(step).lower(v_mjx_data).compile()`
-      - step uses `renderer.render(render_token, data)` and is vmapped over data
-      - NO extra jax.block_until_ready / healthcheck kernels inside render path
-    """
-
     def __init__(
         self,
         env,
@@ -79,6 +276,8 @@ class RSLRLBraxWrapper:
         randomization_fn=None,
         device_rank: Optional[int] = None,
         device: Optional[torch.device] = None,
+        remote_render: bool = True,
+        render_chunk: int = 16,   # start conservative; 16 matches debug default scale
     ):
         self._raw_env = env
         self.batch_size = int(batch_size)
@@ -87,7 +286,6 @@ class RSLRLBraxWrapper:
         self.action_repeat = int(action_repeat)
         self.render_callback = render_callback
 
-        # Torch device
         if device is not None:
             self.device = device
         else:
@@ -96,23 +294,13 @@ class RSLRLBraxWrapper:
             else:
                 self.device = torch.device("cpu")
 
-        # Sanity: renderer num_worlds must match (kept)
-        if hasattr(self._raw_env, "render_batch_size"):
-            rbs = int(getattr(self._raw_env, "render_batch_size"))
-            if rbs != self.batch_size:
-                raise ValueError(
-                    f"StereoPickCube(render_batch_size) must equal num_envs. "
-                    f"Got render_batch_size={rbs}, num_envs={self.batch_size}."
-                )
-
-        # RNG keys per env (physics)
+        # Physics RNG per env
         key = jax.random.PRNGKey(int(seed))
         self.key_reset = jax.random.split(key, self.batch_size)
 
-        # Batched physics
+        # Batched physics (still in Process B)
         self._reset_batched = jax.vmap(self._raw_env.reset)
         self._step_batched = jax.vmap(self._raw_env.step, in_axes=(0, 0), out_axes=0)
-
         self.reset_fn = jax.jit(self._reset_batched)
 
         if self.action_repeat == 1:
@@ -124,86 +312,31 @@ class RSLRLBraxWrapper:
                 return jax.lax.fori_loop(0, self.action_repeat, body, state)
             self.step_fn = jax.jit(_step_repeat)
 
-        # Renderer state (debug-exact)
         self.env_state = None
-        self._renderer = None
-        self._render_token = None
-        self._render_step_compiled = None  # compiled `step` from debug.py
-        self._v_mjx_data_for_compile = None
 
-    @staticmethod
-    def _stereo_rgba_to_torch_obs(rgba_t: torch.Tensor, device: torch.device) -> torch.Tensor:
-        """[B,2,H,W,4] uint8 -> [B,H,2W,3] uint8 (Torch-only)."""
-        left = rgba_t[:, 0, :, :, :3]
-        right = rgba_t[:, 1, :, :, :3]
-        B, H, W, C = left.shape
-        out = torch.empty((B, H, 2 * W, C), device=device, dtype=left.dtype)
-        out[:, :, :W, :].copy_(left)
-        out[:, :, W:, :].copy_(right)
-        return out
-    
-    def _build_renderer_exact_debug(self):
-        """Build renderer + compile render step once (MATCHES debug.py exactly)."""
-        assert self.env_state is not None, "Call reset() once before building renderer."
+        # Remote renderer (Process A)
+        self.remote_render = bool(remote_render)
+        self._remote = None
+        self._render_chunk = int(render_chunk)
 
-        B = self.batch_size
-        mjx_model = self._raw_env.mjx_model
-
-        print("[renderer] building renderer + compiling render step ONCE")
-        self._renderer = self._raw_env.make_renderer_debug(B)
-        renderer = self._renderer
-
-        # MATCH debug.py: identity randomization + v_in_axes for vmap(model)
-        v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, B)
-
-        # --- Option A: JIT compile a single-world init, then vmap it ---
-        def init_one(rng, model):
-            data = mjx.make_data(model)
-            data = mjx.forward(model, data)
-            render_token, rgb, depth = renderer.init(data, model)
-            return data, render_token, rgb, depth
-
-        init_one_jit = jax.jit(init_one)
-
-        # Same seeding behavior as debug.py
-        rng = jax.random.PRNGKey(seed=2)
-        rng, *keys = jax.random.split(rng, B + 1)
-
-        # Vmap over RNG + model axes (model axes defined by v_in_axes)
-        v_mjx_data, render_token, _rgb0, _depth0 = jax.vmap(
-            init_one_jit, in_axes=[0, v_in_axes]
-        )(jp.asarray(keys), v_mjx_model)
-
-        # Keep for debugging / inspection
-        self._render_token = render_token
-        self._v_mjx_data_for_compile = v_mjx_data
-
-        # MATCH debug.py: render_token is captured, and we vmap ONLY over data
-        def step(data):
-            def step_(data):
-                _, rgb, depth = renderer.render(render_token, data)
-                return data, rgb, depth
-
-            return jax.vmap(step_)(data)
-
-        self._render_step_compiled = jax.jit(step).lower(v_mjx_data).compile()
-        print("[renderer] render step compiled")
-
-    def _render_rgba_batched(self) -> jax.Array:
-        """Render using debug.py compiled step; returns JAX uint8 [B,2,H,W,4]."""
-        assert self.env_state is not None, "env_state is None"
-
-        if self._render_step_compiled is None:
-            self._build_renderer_exact_debug()
-
-        _data_out, rgba, _depth = self._render_step_compiled(self.env_state.data)
-        return rgba
+    def _ensure_remote(self):
+        if self._remote is None:
+            self._remote = _RemoteRendererClient(self._raw_env, self.batch_size, chunk=self._render_chunk)
 
     def reset(self) -> TensorDict:
         self.env_state = self.reset_fn(self.key_reset)
 
-        rgba = self._render_rgba_batched()
-        obs_t = _jax_rgba_to_torch_obs_numpy(rgba, self.device)
+        if self.remote_render:
+            self._ensure_remote()
+            # Send qpos/qvel to renderer process
+            qpos_cpu = np.asarray(jax.device_get(self.env_state.data.qpos))
+            qvel_cpu = np.asarray(jax.device_get(self.env_state.data.qvel))
+            obs_cpu = self._remote.render(qpos_cpu, qvel_cpu)  # CPU uint8 [B,H,2W,3]
+            obs_t = torch.from_numpy(np.ascontiguousarray(obs_cpu))
+            if self.device.type == "cuda":
+                obs_t = obs_t.to(self.device, non_blocking=True)
+        else:
+            raise RuntimeError("remote_render=False no longer supported in this variant.")
 
         return TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
 
@@ -215,13 +348,20 @@ class RSLRLBraxWrapper:
 
         self.env_state = self.step_fn(self.env_state, action_jax)
 
-        rgba = self._render_rgba_batched()
-        obs_t = _jax_rgba_to_torch_obs_numpy(rgba, self.device)
+        self._ensure_remote()
+        qpos_cpu = np.asarray(jax.device_get(self.env_state.data.qpos))
+        qvel_cpu = np.asarray(jax.device_get(self.env_state.data.qvel))
+        obs_cpu = self._remote.render(qpos_cpu, qvel_cpu)
+        obs_t = torch.from_numpy(np.ascontiguousarray(obs_cpu))
+        if self.device.type == "cuda":
+            obs_t = obs_t.to(self.device, non_blocking=True)
 
+        reward_t = torch.from_numpy(np.asarray(jax.device_get(self.env_state.reward))).reshape(-1).to(torch.float32)
+        done_t = torch.from_numpy(np.asarray(jax.device_get(self.env_state.done))).reshape(-1).to(torch.bool)
 
-        # Safe (no-sharing) reward/done transfers too
-        reward_t = _jax_to_torch_hostcopy(self.env_state.reward, self.device).reshape(-1).to(torch.float32)
-        done_t = _jax_to_torch_hostcopy(self.env_state.done, self.device).reshape(-1).to(torch.bool)
+        if self.device.type == "cuda":
+            reward_t = reward_t.to(self.device, non_blocking=True)
+            done_t = done_t.to(self.device, non_blocking=True)
 
         obs_td = TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
         info = {"truncation": obs_t.new_zeros((self.batch_size,), dtype=torch.bool)}
@@ -230,3 +370,8 @@ class RSLRLBraxWrapper:
             self.render_callback(None, self.env_state)
 
         return obs_td, reward_t, done_t, info
+
+    def close(self):
+        if self._remote is not None:
+            self._remote.close()
+            self._remote = None
