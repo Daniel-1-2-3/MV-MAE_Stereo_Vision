@@ -106,10 +106,6 @@ mkdir -p "$XDG_CACHE_HOME" "$CUDA_CACHE_PATH"
 # Make module loads deterministic during first calls
 export CUDA_MODULE_LOADING=EAGER
 
-# ---- XLA dump into submit dir (for slow-compile diagnostics) ----
-DUMP_DIR="'"$SLURM_SUBMIT_DIR"'"/xla_dump_${SLURM_JOB_ID}
-mkdir -p "$DUMP_DIR"
-
 # ---- JAX/XLA knobs ----
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
@@ -118,7 +114,7 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 
 # IMPORTANT: append to XLA_FLAGS (don’t clobber)
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda --xla_dump_to=${DUMP_DIR}"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda
 
 # ---- Madrona caches on /tmp (avoid scratch hiccups during first init) ----
 GPU_MODEL_LOWER="unknown"
@@ -138,7 +134,6 @@ export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
 echo "Madrona caches:"
 echo "  MWGPU: $MADRONA_MWGPU_KERNEL_CACHE"
 echo "  BVH  : $MADRONA_BVH_KERNEL_CACHE"
-echo "XLA dump dir: $DUMP_DIR"
 echo
 
 # ---- Persistent python deps prefix (your existing logic) ----

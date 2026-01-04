@@ -117,7 +117,7 @@ class RSLRLBraxWrapper:
         return out
     
     def _build_renderer_exact_debug(self):
-        """Build renderer + compile render step once (correct batched mjx.Data)."""
+        """Build renderer + compile render step once (fast: no JIT around mjx.make_data)."""
         assert self.env_state is not None, "Call reset() once before building renderer."
 
         B = self.batch_size
@@ -127,21 +127,17 @@ class RSLRLBraxWrapper:
         self._renderer = self._raw_env.make_renderer_debug(B)
         renderer = self._renderer
 
-        # --- 1) Build B batched mjx.Data like debug: vmap(make_data+forward) ---
-        @jax.jit
-        def build_data_batched(rng_keys, model):
-            def one(_key):
-                d = mjx.make_data(model)
-                d = mjx.forward(model, d)
-                return d
-            return jax.vmap(one)(rng_keys)
+        # --- 1) Build ONE mjx.Data (no jit), then broadcast to [B,...] ---
+        d0 = mjx.make_data(mjx_model)
+        d0 = mjx.forward(mjx_model, d0)
 
-        rng = jax.random.PRNGKey(0)
-        rng, *keys = jax.random.split(rng, B + 1)
-        keys = jp.asarray(keys)
-        v_mjx_data = build_data_batched(keys, mjx_model)
+        def _bcast(x):
+            # x is an array leaf
+            return jp.broadcast_to(x, (B,) + x.shape)
 
-        # --- 2) renderer.init outside jit, but vmapped over batched data ---
+        v_mjx_data = jax.tree_map(_bcast, d0)
+
+        # --- 2) renderer.init outside jit, vmapped over batched data ---
         def init_one(d):
             tok, rgb, depth = renderer.init(d, mjx_model)
             return tok, rgb, depth
