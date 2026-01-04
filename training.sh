@@ -173,7 +173,7 @@ heartbeat () {
       gpu=$(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "na")
     fi
     echo "[hb $ts] py(pid=$PY_PID) cpu(%CPU,RSSKB,ETIME,STAT)=${cpu:-na} | gpu(util%,memutil%,memMB)=${gpu:-na}"
-    sleep 5
+    sleep 30
   done
 }
 heartbeat & HB_PID=$!
