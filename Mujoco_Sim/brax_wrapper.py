@@ -151,9 +151,9 @@ def _renderer_worker_main(
         data0 = mjx.forward(mjx_model, data0)
         data_b = _broadcast_tree_to_batch(data0, B)
 
-        # Ensure forward on batched data once (optional but consistent)
-        data_b = jax.vmap(lambda d: mjx.forward(mjx_model, d))(data_b)
-
+        # IMPORTANT: do NOT vmap mjx.forward over a broadcasted mjx.Data.
+        # This is the path that crashes inside MJX scan/take with cudaErrorInvalidValue.
+        # Renderer init works fine on the batched data as-is.
         # Init token ONCE on batched data (your exact contract)
         render_token, _init_rgb, _init_depth = renderer.init(data_b, mjx_model)
 
@@ -194,9 +194,6 @@ def _renderer_worker_main(
                 mocap_pos=mocap_pos,
                 mocap_quat=mocap_quat,
             )
-
-            # Forward before render (consistent with your env)
-            data_b = jax.vmap(lambda d: mjx.forward(mjx_model, d))(data_b)
 
             # Render (compiled): rgb is still unsafe as JAX value
             render_token, rgb, _depth = render_fn_compiled(render_token, data_b)
