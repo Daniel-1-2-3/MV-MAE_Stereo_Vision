@@ -2,26 +2,45 @@ import torch
 import jax
 from datetime import datetime
 from pathlib import Path
+
+import imageio.v2 as imageio  # NEW: simple gif writer
+
 from Mujoco_Sim.pick_env import StereoPickCube
 from Mujoco_Sim.brax_wrapper import RSLRLBraxWrapper
 from DrQv2_Architecture.drqv2 import DrQv2Agent
-from DrQv2_Architecture.video import VideoRecorder
+
+
+def _resize_uint8_hwc(frame_uint8_hwc: torch.Tensor, out_size: int) -> torch.Tensor:
+    """frame: [H,W,3] uint8 -> resized [out_size,out_size,3] uint8 (Torch-only)."""
+    # Convert to NCHW float for interpolate
+    x = frame_uint8_hwc.permute(2, 0, 1).unsqueeze(0).float()  # [1,3,H,W]
+    x = torch.nn.functional.interpolate(x, size=(out_size, out_size), mode="bilinear", align_corners=False)
+    x = x.clamp(0, 255).byte()
+    return x.squeeze(0).permute(1, 2, 0)  # [out,out,3] uint8
+
 
 def eval_and_record(env, agent, num_steps: int = 10_000, video_root: Path | None = None):
     """
     Runs an evaluation rollout for num_steps env-steps (vectorized),
     resets when any env is done, and records a GIF from env_id=0.
+
+    NOTE: Updated wrapper doesn’t expose env.render(); we record from obs directly.
     """
-    # Agent eval mode
     agent.train(training=False)
 
-    recorder = VideoRecorder(video_root, render_size=256, fps=20)
-    recorder.init(env, enabled=True)
+    if video_root is None:
+        video_root = Path(".")
+    out_dir = video_root / "eval_video"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    gif_path = out_dir / "eval.gif"
+
+    render_size = 256
+    fps = 20
+    frames = []
 
     obs_td = env.reset()
-    obs = obs_td["state"]
+    obs = obs_td["state"]  # [B,H,2W,3] uint8 (from wrapper)
 
-    # Track episodic reward for logging (vectorized)
     ep_rew = torch.zeros((agent.num_envs,), device=agent.device, dtype=torch.float32)
     ep_len = torch.zeros((agent.num_envs,), device=agent.device, dtype=torch.int32)
 
@@ -32,8 +51,13 @@ def eval_and_record(env, agent, num_steps: int = 10_000, video_root: Path | None
         next_obs_td, rew_t, done_t, info = env.step(action)
         next_obs = next_obs_td["state"]
 
-        # Record one frame per step (env_id=0)
-        recorder.record(env)
+        # Record env_id=0 frame from observation
+        # (If your obs is normalized float somewhere else, cast back to uint8 here.)
+        frame0 = next_obs[0]  # [H,2W,3]
+        if frame0.dtype != torch.uint8:
+            frame0 = (frame0 * 255.0).clamp(0, 255).to(torch.uint8)
+        frame0 = _resize_uint8_hwc(frame0, render_size)
+        frames.append(frame0.detach().cpu().numpy())
 
         # bookkeeping
         rew_t = rew_t.reshape(-1).to(torch.float32)
@@ -42,14 +66,15 @@ def eval_and_record(env, agent, num_steps: int = 10_000, video_root: Path | None
         ep_rew += rew_t
         ep_len += 1
 
-        # Terminate/reset logic:
-        # Your wrapper only has reset() for the full batch, not per-env,
-        # so if ANY env is done we reset the whole batch.
+        # same reset logic as before: if ANY env done -> reset all
         if done_t.any():
             finished = done_t
             mean_finished_rew = ep_rew[finished].mean().item() if finished.any() else float("nan")
             mean_finished_len = ep_len[finished].float().mean().item() if finished.any() else float("nan")
-            print(f"[EVAL] done->reset at step {t}: mean_ep_rew={mean_finished_rew:.3f}, mean_ep_len={mean_finished_len:.1f}")
+            print(
+                f"[EVAL] done->reset at step {t}: "
+                f"mean_ep_rew={mean_finished_rew:.3f}, mean_ep_len={mean_finished_len:.1f}"
+            )
 
             obs_td = env.reset()
             obs = obs_td["state"]
@@ -58,8 +83,9 @@ def eval_and_record(env, agent, num_steps: int = 10_000, video_root: Path | None
         else:
             obs = next_obs
 
-    recorder.save("eval")
-    print("[EVAL] Saved eval_video/eval.gif")
+    imageio.mimsave(gif_path.as_posix(), frames, fps=fps)
+    print(f"[EVAL] Saved {gif_path}")
+
 
 def main():
     num_envs = 32
@@ -68,7 +94,7 @@ def main():
     learning_starts = 50_000
     seed = 1
 
-    # Store environment states during rendering (optional)
+    # keep this (even if unused) to preserve your structure
     render_trajectory = []
     def render_callback(_, state):
         render_trajectory.append(state)
@@ -79,6 +105,7 @@ def main():
 
     raw_env = StereoPickCube(render_batch_size=num_envs)
     print("Loaded env")
+
     brax_env = RSLRLBraxWrapper(
         raw_env,
         num_envs,
@@ -89,7 +116,7 @@ def main():
         randomization_fn=None,
         device_rank=device_rank,
     )
-    print("wrappeed")
+    print("wrapped")
 
     runner = DrQv2Agent(brax_env, num_envs=num_envs, episode_length=episode_length)
     print("made agent")
@@ -104,9 +131,9 @@ def main():
     print(f"[FPS] {fps:.2f} env-steps/sec")
     print(f"[Timing] {elapsed_s:.2f}s for {total_steps:,} steps")
 
-    # 10_000 vectorized steps of eval
-    video_root = Path(".") # will create ./eval_video/
+    video_root = Path(".")  # will create ./eval_video/eval.gif
     eval_and_record(brax_env, runner, num_steps=10_000, video_root=video_root)
+
 
 if __name__ == "__main__":
     main()

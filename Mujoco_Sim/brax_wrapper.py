@@ -13,7 +13,6 @@ def _torch_to_jax(x: torch.Tensor) -> jax.Array:
     try:
         return jax.dlpack.from_dlpack(x)
     except TypeError:
-        # Older stacks only accept a capsule.
         return jax.dlpack.from_dlpack(tpack.to_dlpack(x))
 
 
@@ -23,21 +22,19 @@ def _jax_to_torch(x: jax.Array) -> torch.Tensor:
 
 
 class RSLRLBraxWrapper:
-    """Batched MJX env wrapper for a Torch RL loop (DrQv2).
+    """Batched MJX env wrapper for a Torch RL loop (DrQv2 / SAC-style).
 
-    Design constraints:
-    - Physics is *single-world* inside the env and is batched here via vmap + jit.
-    - Madrona renderer init/render must NEVER run under vmap/jit.
-    - Transfers are GPU->GPU using DLPack.
+    Gold-standard batching pattern (matches debug.py):
+      state_b = jit(vmap(env.reset))(keys)
+      token, rgba, depth = jit(env.renderer_init_batched)(state_b.data)
+      loop:
+        state_b = jit(vmap(env.step))(state_b, actions)
+        token, rgba, depth = jit(env.renderer_render_batched)(token, state_b.data)
 
-    NOTE ABOUT YOUR CURRENT FAILURE MODE
-    ------------------------------------
-    If Madrona's custom call leaves the CUDA *context* on XLA's worker thread in a bad state,
-    then *any* subsequent JAX GPU kernel (even `rgb + 0`) can fail with errors like:
-        "cuModuleGetFunction ... cudaErrorInvalidValue"
-    That cannot be fully repaired from Python by calling cuCtxSetCurrent on the Python thread.
-    This wrapper therefore keeps rendering isolated (no extra JAX kernels after render),
-    and provides an explicit "render health check" you can toggle.
+    Notes:
+    - Physics is single-world in env and batched here.
+    - Renderer token is tracked here (not in env).
+    - Pixel postprocessing is Torch-only.
     """
 
     def __init__(
@@ -63,7 +60,9 @@ class RSLRLBraxWrapper:
             self.device = device
         else:
             if torch.cuda.is_available():
-                self.device = torch.device(f"cuda:{int(device_rank) if device_rank is not None else 0}")
+                self.device = torch.device(
+                    f"cuda:{int(device_rank) if device_rank is not None else 0}"
+                )
             else:
                 self.device = torch.device("cpu")
 
@@ -80,49 +79,37 @@ class RSLRLBraxWrapper:
         key = jax.random.PRNGKey(int(seed))
         self.key_reset = jax.random.split(key, self.batch_size)
 
-        # Batched physics: reset_physics / step_physics
-        self._reset_physics_batched = jax.vmap(self._raw_env.reset_physics)
-        self._step_physics_batched = jax.vmap(self._raw_env.step_physics, in_axes=(0, 0), out_axes=0)
+        # Batched physics: vmap single-world env.reset / env.step
+        # (Your current StereoPickCube uses reset(rng)->State and step(state, action)->State)
+        self._reset_batched = jax.vmap(self._raw_env.reset)
+        self._step_batched = jax.vmap(self._raw_env.step, in_axes=(0, 0), out_axes=0)
 
-        self.reset_fn = jax.jit(self._reset_physics_batched)
+        self.reset_fn = jax.jit(self._reset_batched)
 
         if self.action_repeat == 1:
-            self.step_fn = jax.jit(self._step_physics_batched)
+            self.step_fn = jax.jit(self._step_batched)
         else:
+            # Repeat the SAME action across physics steps (standard action_repeat)
             def _step_repeat(state, action):
                 def body(_, st):
-                    return self._step_physics_batched(st, action)
+                    return self._step_batched(st, action)
                 return jax.lax.fori_loop(0, self.action_repeat, body, state)
 
             self.step_fn = jax.jit(_step_repeat)
 
-        self.env_state = None  # set in reset()
+        # Renderer functions (these do vmap internally; safe to jit)
+        self._renderer_init_batched = jax.jit(self._raw_env.renderer_init_batched)
+        self._renderer_render_batched = jax.jit(self._raw_env.renderer_render_batched)
+
+        self.env_state = None  # batched State
+        self.render_token = None  # unbatched token (matches debug pattern)
 
         # Optional debugging: after a render, try a tiny JAX kernel to detect poisoning early.
-        # If this fails, the only real fixes are (a) patch Madrona custom call save/restore ctx,
-        # or (b) switch away from PJRT CUDA plugin to legacy cuda-enabled jaxlib.
         self._render_healthcheck = os.environ.get("MADRONA_RENDER_HEALTHCHECK", "0") == "1"
-
-    def _render_rgba_batched(self) -> jax.Array:
-        """Non-jit render, returns jax.Array uint8 [B,2,H,W,4]."""
-        debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
-        self._raw_env._ensure_render_token(self.env_state.data, debug)
-        rgba = self._raw_env.render_rgba(self.env_state.data)
-
-        # Ensure the render custom call has executed before we hand off via DLPack.
-        jax.block_until_ready(rgba)
-
-        if self._render_healthcheck:
-            # This is deliberately tiny; if this fails, it's strong evidence the renderer
-            # poisoned the CUDA context on XLA's worker thread.
-            _ = jp.asarray(1, dtype=jp.int32) + jp.asarray(1, dtype=jp.int32)
-            jax.block_until_ready(_)
-
-        return rgba
 
     @staticmethod
     def _stereo_rgba_to_torch_obs(rgb_t: torch.Tensor, device: torch.device) -> torch.Tensor:
-        """Convert [B,2,H,W,4] RGBA to [B,H,2W,3] RGB stitched."""
+        """Convert [B,2,H,W,4] RGBA to [B,H,2W,3] RGB stitched (Torch-only)."""
         left = rgb_t[:, 0, :, :, :3]   # [B,H,W,3]
         right = rgb_t[:, 1, :, :, :3]  # [B,H,W,3]
         B, H, W, C = left.shape
@@ -131,11 +118,34 @@ class RSLRLBraxWrapper:
         obs_t[:, :, W:, :].copy_(right)
         return obs_t
 
+    def _render_rgba_batched(self) -> jax.Array:
+        """Render (token-managed) and return JAX uint8 [B,2,H,W,4]."""
+        assert self.env_state is not None, "env_state is None"
+        data_b = self.env_state.data
+
+        if self.render_token is None:
+            token, rgba, _depth = self._renderer_init_batched(data_b)
+            self.render_token = token
+        else:
+            token, rgba, _depth = self._renderer_render_batched(self.render_token, data_b)
+            self.render_token = token
+
+        # Make sure the custom call finished before DLPack handoff
+        jax.block_until_ready(rgba)
+
+        if self._render_healthcheck:
+            # If this fails, renderer likely poisoned XLA's CUDA context.
+            x = jp.asarray(1, dtype=jp.int32) + jp.asarray(1, dtype=jp.int32)
+            jax.block_until_ready(x)
+
+        return rgba
+
     def reset(self) -> TensorDict:
         # 1) Jitted, batched physics reset
         self.env_state = self.reset_fn(self.key_reset)
 
-        # 2) Render (non-jit)
+        # 2) Renderer init (via same pattern as debug)
+        self.render_token = None
         rgba = self._render_rgba_batched()
 
         # 3) Export to Torch (GPU->GPU)
@@ -148,15 +158,16 @@ class RSLRLBraxWrapper:
 
     def step(self, action: torch.Tensor) -> Tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
         assert self.env_state is not None, "Call reset() before step()."
+        assert self.render_token is not None, "Render token missing; call reset() first."
 
         # Torch -> JAX
         action = torch.clamp(action, -1.0, 1.0)
         action_jax = _torch_to_jax(action)
 
-        # Jitted physics step
+        # Jitted physics step (optionally repeated)
         self.env_state = self.step_fn(self.env_state, action_jax)
 
-        # Render (non-jit)
+        # Render (token + data, debug-style)
         rgba = self._render_rgba_batched()
 
         # Export to Torch (GPU->GPU)
@@ -172,3 +183,4 @@ class RSLRLBraxWrapper:
         obs_td = TensorDict({"state": obs_t}, batch_size=[self.batch_size], device=self.device)
         info = {"truncation": obs_t.new_zeros((self.batch_size,), dtype=torch.bool)}
         return obs_td, reward_t, done_t, info
+    
