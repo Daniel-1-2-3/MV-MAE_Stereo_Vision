@@ -179,7 +179,10 @@ def _renderer_worker_main(
             mocap_pos = jp.asarray(mocap_pos_np)
             mocap_quat = jp.asarray(mocap_quat_np)
 
-            # Update batched data
+            # Create once, near where you build data_b / init the renderer token:
+            fwd_batched = jax.jit(jax.vmap(lambda d: mjx.forward(mjx_model, d)))
+
+            # Then per request:
             data_b = data_b.replace(
                 qpos=qpos,
                 qvel=qvel,
@@ -187,7 +190,7 @@ def _renderer_worker_main(
                 mocap_pos=mocap_pos,
                 mocap_quat=mocap_quat,
             )
-            data_b = mjx.forward(mjx_model, data_b)
+            data_b = fwd_batched(data_b)
 
             # Render (compiled): rgb is still unsafe as JAX value
             render_token, rgb, _depth = renderer.render(render_token, data_b, mjx_model)
