@@ -138,7 +138,7 @@ export FAULTHANDLER_TIMEOUT=60
 # JAX / XLA tuning (keep yours; avoid clobbering XLA_FLAGS)
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_dump_to=${DUMP_DIR} --xla_gpu_cuda_data_dir=/usr/local/cuda"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
@@ -215,10 +215,9 @@ print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
 echo "============================================"
 
-# --- XLA dump (writes into the directory you're running in) ---
 DUMP_DIR="${SLURM_SUBMIT_DIR}/xla_dump_${SLURM_JOB_ID}"
 mkdir -p "$DUMP_DIR"
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_dump_to=${DUMP_DIR}"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda --xla_dump_to=${DUMP_DIR}"
 
 # --- launch python with periodic stack dumps (every 60s) ---
 set +e
