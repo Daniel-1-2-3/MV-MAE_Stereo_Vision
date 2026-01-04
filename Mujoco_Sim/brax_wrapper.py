@@ -130,21 +130,23 @@ class RSLRLBraxWrapper:
         # MATCH debug.py: identity randomization + v_in_axes for vmap(model)
         v_mjx_model, v_in_axes = _identity_randomization_fn(mjx_model, B)
 
-        @jax.jit
-        def init(rng, model):
-            def init_(rng, model):
-                data = mjx.make_data(model)
-                data = mjx.forward(model, data)
-                render_token, rgb, depth = renderer.init(data, model)
-                return data, render_token, rgb, depth
+        # --- Option A: JIT compile a single-world init, then vmap it ---
+        def init_one(rng, model):
+            data = mjx.make_data(model)
+            data = mjx.forward(model, data)
+            render_token, rgb, depth = renderer.init(data, model)
+            return data, render_token, rgb, depth
 
-            return jax.vmap(init_, in_axes=[0, v_in_axes])(rng, model)
+        init_one_jit = jax.jit(init_one)
 
-        # MATCH debug.py: fixed seed + split into B keys
+        # Same seeding behavior as debug.py
         rng = jax.random.PRNGKey(seed=2)
         rng, *keys = jax.random.split(rng, B + 1)
 
-        v_mjx_data, render_token, _rgb0, _depth0 = init(jp.asarray(keys), v_mjx_model)
+        # Vmap over RNG + model axes (model axes defined by v_in_axes)
+        v_mjx_data, render_token, _rgb0, _depth0 = jax.vmap(
+            init_one_jit, in_axes=[0, v_in_axes]
+        )(jp.asarray(keys), v_mjx_model)
 
         # Keep for debugging / inspection
         self._render_token = render_token
