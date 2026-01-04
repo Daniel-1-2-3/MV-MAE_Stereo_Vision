@@ -122,10 +122,49 @@ echo "======================"
 
 export PYTHONUNBUFFERED=1
 
+# ---------------- NEW: move CUDA/JAX caches to local disk ----------------
+# Avoid "stalls" caused by NVRTC/nvJitLink/XLA caches landing on slow network filesystems.
+export XDG_CACHE_HOME="/tmp/${SLURM_JOB_ID}_cache"
+export CUDA_CACHE_PATH="/tmp/${SLURM_JOB_ID}_cuda_cache"
+export CUDA_CACHE_MAXSIZE=2147483648
+mkdir -p "$XDG_CACHE_HOME" "$CUDA_CACHE_PATH"
+
+# Optional but often helpful for "stuck" module loading behavior:
+export CUDA_MODULE_LOADING=LAZY
+
+# ---------------- NEW: sanitize LD_LIBRARY_PATH (your requested test) ----------------
+# The container %environment prepends /usr/local/cuda/lib64. For this test we remove CUDA toolchain
+# paths from LD_LIBRARY_PATH so we don’t accidentally prefer the toolkit libs over the pip CUDA wheels.
+ORIG_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+
+# Remove common CUDA toolkit paths (keep everything else intact)
+LD_LIBRARY_PATH_CLEAN="${ORIG_LD_LIBRARY_PATH}"
+LD_LIBRARY_PATH_CLEAN="$(echo "${LD_LIBRARY_PATH_CLEAN}" | tr ":" "\n" | \
+  grep -v "^/usr/local/cuda/lib64$" | \
+  grep -v "^/usr/local/cuda/targets/x86_64-linux/lib$" | \
+  grep -v "^/usr/local/cuda-[0-9]\+\.[0-9]\+/targets/x86_64-linux/lib$" | \
+  tr "\n" ":" | sed "s/:$//")"
+
+# Ensure madrona build dir is still visible (nanobind extensions commonly need it)
+# If you already have it in ldconfig, this is harmless.
+LD_LIBRARY_PATH="/opt/madrona_mjx/build"
+if [[ -n "${LD_LIBRARY_PATH_CLEAN}" ]]; then
+  LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${LD_LIBRARY_PATH_CLEAN}"
+fi
+export LD_LIBRARY_PATH
+
+echo "=== LD_LIBRARY_PATH test ==="
+echo "ORIG_LD_LIBRARY_PATH=${ORIG_LD_LIBRARY_PATH}"
+echo "NEW  LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+echo "============================"
+
 # JAX / XLA tuning (optional)
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
+
+# IMPORTANT FIX: do NOT overwrite XLA_FLAGS (your Python sets flags too).
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda"
+
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
@@ -191,7 +230,7 @@ export PATH="${BIN_DIR}:${PATH}"
 # ---------------- Install TensorBoard (persistently) ----------------
 echo "=== Ensuring TensorBoard is available in ${DEPS_PREFIX} ==="
 
-if python - <<'PY'
+if python - <<'"'"'PY'"'"'
 import importlib.util
 ok = importlib.util.find_spec("tensorboard") is not None
 print("tensorboard already importable:", ok)
@@ -204,7 +243,7 @@ else
   python -m pip install --upgrade --no-cache-dir --prefix "$DEPS_PREFIX" tensorboard
 fi
 
-python - <<'PY'
+python - <<'"'"'PY'"'"'
 import tensorboard
 print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
