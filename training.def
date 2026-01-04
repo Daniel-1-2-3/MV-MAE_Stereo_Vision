@@ -54,7 +54,7 @@ From: nvidia/cuda:12.8.0-devel-ubuntu24.04
     # Clean any previous partial clone from earlier builds
     rm -rf /opt/madrona_mjx
     cd /opt
-    git clone --branch main https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
+    git clone --branch geom_quat https://github.com/shacklettbp/madrona_mjx.git madrona_mjx
     cd /opt/madrona_mjx
     echo "[post] Running: git submodule update --init --recursive"
     git submodule update --init --recursive
