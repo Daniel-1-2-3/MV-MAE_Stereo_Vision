@@ -138,7 +138,7 @@ export FAULTHANDLER_TIMEOUT=60
 # JAX / XLA tuning (keep yours; avoid clobbering XLA_FLAGS)
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_dump_to=${DUMP_DIR} --xla_gpu_cuda_data_dir=/usr/local/cuda"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
@@ -215,39 +215,40 @@ print("TensorBoard version:", getattr(tensorboard, "__version__", "unknown"))
 PY
 echo "============================================"
 
-# ---------------- Heartbeat (correct PID) ----------------
+# --- XLA dump (writes into the directory you're running in) ---
+DUMP_DIR="${SLURM_SUBMIT_DIR}/xla_dump_${SLURM_JOB_ID}"
+mkdir -p "$DUMP_DIR"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_dump_to=${DUMP_DIR}"
+
+# --- launch python with periodic stack dumps (every 60s) ---
+set +e
+stdbuf -oL -eL python -u - <<'PY' 2>&1 &
+import faulthandler, runpy
+faulthandler.enable()
+faulthandler.dump_traceback_later(60, repeat=True)  # <-- this is the missing piece
+runpy.run_path("execute.py", run_name="__main__")
+PY
+PY_PID=$!
+
+# --- heartbeat AFTER PY_PID is known ---
 heartbeat () {
-  while true; do
+  while kill -0 "$PY_PID" 2>/dev/null; do
     ts=$(date +"%H:%M:%S")
-    if [[ -n "${PY_PID:-}" ]] && kill -0 "$PY_PID" 2>/dev/null; then
-      cpu=$(ps -p "$PY_PID" -o %cpu=,rss= 2>/dev/null | tr -s " " | sed "s/^ //")
-    else
-      cpu="na"
-    fi
-    if command -v nvidia-smi >/dev/null 2>&1; then
-      gpu=$(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
-    else
-      gpu="na"
-    fi
-    echo "[hb $ts] cpu(%CPU,RSSKB)=${cpu} | gpu(util%,memutil%,memMB)=${gpu}"
+    cpu=$(ps -p "$PY_PID" -o %cpu=,rss=,etime=,stat= 2>/dev/null | tr -s " " | sed "s/^ //")
+    gpu=$(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "na")
+    echo "[hb $ts] py(pid=$PY_PID) cpu(%CPU,RSSKB,ETIME,STAT)=${cpu:-na} | gpu(util%,memutil%,memMB)=${gpu:-na}"
     sleep 5
   done
 }
-
-set +e
 heartbeat & HB_PID=$!
-
-# ---------------- Run training (background so heartbeat measures the right PID) ----------------
-stdbuf -oL -eL python -X faulthandler -u execute.py 2>&1 &
-PY_PID=$!
 
 wait $PY_PID
 RC=$?
 
 kill $HB_PID >/dev/null 2>&1 || true
 wait $HB_PID >/dev/null 2>&1 || true
-
 set -e
+
 echo "Training completed (exit_code=$RC)."
 exit $RC
 '
