@@ -420,6 +420,7 @@ class StereoPickCube(panda.PandaBase):
 
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
         _, rgb, _ = self._render_fn(render_token, data_batched)
+        print('rgb made')
 
         if rgb.shape[0] == 2:
             left = rgb[0]
@@ -427,11 +428,14 @@ class StereoPickCube(panda.PandaBase):
         else:
             left = rgb[:, 0]
             right = rgb[:, 1]
+        print('fail here 1')
 
         left = left[..., :3].astype(jp.float32) / 255.0
         right = right[..., :3].astype(jp.float32) / 255.0
+        print('fail here 2')
 
         pixels = jp.concatenate([left, right], axis=2) 
+        print('fail here 3')
         return pixels
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
