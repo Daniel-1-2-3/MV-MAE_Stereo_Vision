@@ -1,4 +1,4 @@
-# Building the sif container #
+#### Building the sif container ####
 python3 -m venv .whvenv
 source .whvenv/bin/activate
 python -m pip install -U pip
@@ -31,11 +31,12 @@ export SINGULARITY_TMPDIR="$APPTAINER_TMPDIR"
 apptainer cache clean --type=all --force || true
 apptainer build training.sif training.def
 
-# Start training, see terminal output for errors #
+#### Start training, see terminal output for errors ####
 chmod +x training.sh
+
 sbatch training.sh
 
-# Important files and folders #
+#### Important files and folders ####
 - The MAE_Model/ folder contains MV-MAE files. The file containing the entire model is model.py
 - The Mujoco_Sim/ folder contains Mujoco environment files. The pick_env.py is the environment with step() and get_obs(), reset(), etc functions. The brax_wrapper.py is wraps the env for training with Brax. 
 - train_drqv2_mujoco.py is the training script. 
