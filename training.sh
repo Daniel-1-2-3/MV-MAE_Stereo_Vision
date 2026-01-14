@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=50G
-#SBATCH --time=2:00:00
+#SBATCH --time=8:00:00
 #SBATCH --account=aip-aspuru-ab
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
@@ -15,23 +15,32 @@ cd "$SLURM_SUBMIT_DIR"
 
 module load apptainer/1.3.5 || module load apptainer
 
-# Prevent host python module leakage into apptainer env forwarding
+# Prevent host python env from shadowing container
 unset PYTHONPATH
 unset PYTHONHOME
 
-# ---------------- Apptainer image ----------------
+# --------------- Apptainer image ---------------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
-[[ -f "$IMG" ]] || { echo "ERROR: $IMG not found"; exit 2; }
+if [[ ! -f "$IMG" ]]; then
+  echo "ERROR: $IMG not found"
+  exit 2
+fi
 
 # ---------------- Project layout ----------------
 HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
-[[ -f "$HOST_PROJECT_ROOT/execute.py" ]] || { echo "FATAL: execute.py not found"; exit 10; }
+
+if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
+  echo "FATAL: execute.py not found at:"
+  echo "  $HOST_PROJECT_ROOT/execute.py"
+  exit 10
+fi
 
 # ---------------- Python path inside container ----------------
 export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementation"
-export APPTAINERENV_PYTHONHOME=
-export APPTAINERENV_PYTHONUNBUFFERED=1
+
+# ---- JAX backend selection (CUDA PJRT plugin) ----
+export APPTAINERENV_JAX_PLATFORMS="cuda,cpu"
 
 # ---------------- EGL / MuJoCo GL setup ----------------
 export APPTAINERENV_MUJOCO_GL=egl
@@ -43,21 +52,25 @@ export APPTAINERENV_MESA_LOADER_DRIVER_OVERRIDE=
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export APPTAINERENV_IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
-# Keep JAX_LOG_COMPILES off unless you really need it
-export APPTAINERENV_JAX_LOG_COMPILES=0
-
 # NVIDIA EGL vendor JSON on the HOST
 VENDOR_JSON="/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
-[[ -f "$VENDOR_JSON" ]] || { echo "FATAL: $VENDOR_JSON not found on host."; exit 3; }
+if [[ ! -f "$VENDOR_JSON" ]]; then
+  echo "FATAL: $VENDOR_JSON not found on host (NVIDIA EGL ICD missing)."
+  exit 3
+fi
 export APPTAINERENV__EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
 
 # Locate libEGL_nvidia.so on HOST
 NV_EGL_DIR="$(ldconfig -p | awk '/libEGL_nvidia\.so/{print $NF; exit}' | xargs -r dirname || true)"
 for d in /usr/lib/x86_64-linux-gnu/nvidia /usr/lib/nvidia /usr/lib64/nvidia /usr/lib/x86_64-linux-gnu; do
-  [[ -z "${NV_EGL_DIR:-}" && -e "$d/libEGL_nvidia.so.0" ]] && NV_EGL_DIR="$d"
+  [[ -z "$NV_EGL_DIR" && -e "$d/libEGL_nvidia.so.0" ]] && NV_EGL_DIR="$d"
 done
-[[ -n "${NV_EGL_DIR:-}" && -d "$NV_EGL_DIR" ]] || { echo "FATAL: Could not find libEGL_nvidia.so* on host."; exit 4; }
+if [[ -z "${NV_EGL_DIR:-}" || ! -d "$NV_EGL_DIR" ]]; then
+  echo "FATAL: Could not find libEGL_nvidia.so* on host."
+  exit 4
+fi
 
+# GLVND client lib directory
 GLVND_DIR="/usr/lib/x86_64-linux-gnu"
 [[ -e "$GLVND_DIR/libEGL.so.1" ]] || GLVND_DIR="/usr/lib64"
 
@@ -74,7 +87,11 @@ BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
 # ---------------- Quick EGL + GPU probe ----------------
-apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
+apptainer exec --nv \
+  "${BIND_FLAGS[@]}" \
+  --pwd "$WORKDIR_IN_CONTAINER" \
+  "$IMG" \
+  bash -lc '
 python - << "PY"
 import torch, mujoco, OpenGL.GL as gl
 print("torch cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
@@ -87,8 +104,23 @@ PY
 '
 
 # ---------------- Training ----------------
-apptainer exec --nv "${BIND_FLAGS[@]}" --pwd "$WORKDIR_IN_CONTAINER" "$IMG" bash -lc '
+apptainer exec --nv \
+  "${BIND_FLAGS[@]}" \
+  --pwd "$WORKDIR_IN_CONTAINER" \
+  "$IMG" \
+  bash -lc '
 set -euo pipefail
+. /opt/mvmae_venv/bin/activate
+
+# --- Force CUDA runtime libs to win over any injected host libs ---
+export CUDA_HOME=/usr/local/cuda
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda ${XLA_FLAGS:-}"
+
+# Put CUDA libs first (nvJitLink lives here)
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+
+# Also ensure the dynamic linker cache sees these first in-process
+export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12:${LD_PRELOAD:-}"
 
 echo "=== MuJoCo version ==="
 python - <<'"'"'PY'"'"'
@@ -97,46 +129,33 @@ print("MuJoCo version:", mujoco.__version__)
 PY
 echo "======================"
 
-# ---- Put ALL caches on local disk to avoid network-FS stalls ----
-export XDG_CACHE_HOME="/tmp/${SLURM_JOB_ID}_xdg_cache"
-export CUDA_CACHE_PATH="/tmp/${SLURM_JOB_ID}_cuda_cache"
-export CUDA_CACHE_MAXSIZE=2147483648
-mkdir -p "$XDG_CACHE_HOME" "$CUDA_CACHE_PATH"
-
-# Make module loads deterministic during first calls
-export CUDA_MODULE_LOADING=EAGER
-
-# ---- JAX/XLA knobs ----
+export PYTHONUNBUFFERED=1
 export JAX_TRACEBACK_FILTERING=off
 export JAX_DISABLE_CUSOLVER=1
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
+export PICK_ENV_DEBUG=1
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 
-# IMPORTANT: append to XLA_FLAGS (don’t clobber)
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda"
-
-# ---- Madrona caches on /tmp (avoid scratch hiccups during first init) ----
-GPU_MODEL_LOWER="unknown"
+echo "=== Madrona + GPU detection (inside container) ==="
 if command -v nvidia-smi >/dev/null 2>&1; then
   ACTUAL_GPU=$(nvidia-smi -L 2>/dev/null | head -1)
   echo "Actual GPU: $ACTUAL_GPU"
   GPU_MODEL=$(echo "$ACTUAL_GPU" | grep -o "H100\|L40S\|A100\|V100\|RTX" | head -1 || true)
-  [[ -n "$GPU_MODEL" ]] && GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
+  [[ -z "${GPU_MODEL:-}" ]] && GPU_MODEL="unknown"
+else
+  GPU_MODEL="unknown"
 fi
-
+GPU_MODEL_LOWER=$(echo "$GPU_MODEL" | tr "[:upper:]" "[:lower:]")
 ENV_CONFIG="default"
-CACHE_BUILD_DIR="/tmp/${SLURM_JOB_ID}_madrona_build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
+
+CACHE_BUILD_DIR="'"$SLURM_SUBMIT_DIR"'/build_${GPU_MODEL_LOWER}_${ENV_CONFIG}"
 mkdir -p "$CACHE_BUILD_DIR/kernel_cache" "$CACHE_BUILD_DIR/bvh_cache"
 export MADRONA_MWGPU_KERNEL_CACHE="$CACHE_BUILD_DIR/kernel_cache/kernel.cache"
 export MADRONA_BVH_KERNEL_CACHE="$CACHE_BUILD_DIR/bvh_cache/bvh.cache"
 
-echo "Madrona caches:"
-echo "  MWGPU: $MADRONA_MWGPU_KERNEL_CACHE"
-echo "  BVH  : $MADRONA_BVH_KERNEL_CACHE"
-echo
-
-# ---- Persistent python deps prefix (your existing logic) ----
 DEPS_PREFIX="'"$SLURM_SUBMIT_DIR"'/.pydeps_prefix"
 PY_MM=$(python - <<'"'"'PY'"'"'
 import sys
@@ -146,21 +165,93 @@ PY
 SITE_PKGS="${DEPS_PREFIX}/lib/python${PY_MM}/site-packages"
 BIN_DIR="${DEPS_PREFIX}/bin"
 mkdir -p "$DEPS_PREFIX"
-export PYTHONPATH="/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
+
+# Put Madrona build FIRST so top-level _madrona_* resolves to the .so
+export PYTHONPATH="/opt/madrona_mjx/build:/workspace:${SITE_PKGS}:${PYTHONPATH:-}"
 export PATH="${BIN_DIR}:${PATH}"
+export LD_LIBRARY_PATH="/opt/madrona_mjx/build:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 
-# ---- Run execute.py with faulthandler enabled (NO periodic traceback dumps) ----
-set +e
-stdbuf -oL -eL python -u - <<'"'"'PY'"'"'
-import faulthandler, runpy
-faulthandler.enable()
-runpy.run_path("execute.py", run_name="__main__")
+echo "=== nvJitLink resolution ==="
+ldd /opt/madrona_mjx/build/libmadmjx_mgr.so | grep -i nvjitlink || true
+ldconfig -p | grep -i nvjitlink || true
+echo "==========================="
+
+echo "=== nvJitLink symbol check (the one Madrona needs) ==="
+python - <<'PY'
+import ctypes
+p = "/usr/local/cuda/lib64/libnvJitLink.so.12"
+lib = ctypes.CDLL(p)
+print("loaded:", p)
+print("has __nvJitLinkCreate_12_5:", hasattr(lib, "__nvJitLinkCreate_12_5"))
 PY
-RC=$?
-set -e
+echo "====================================================="
 
-echo "Training completed (exit_code=$RC)."
-exit $RC
+# Hard delete any shadowing python files from /workspace (host bind)
+rm -f /workspace/_madrona_mjx_batch_renderer.py /workspace/_madrona_mjx_visualizer.py
+rm -rf /workspace/__pycache__ || true
+
+echo "=== Verify top-level Madrona modules resolve to .so (no nanobind double-load) ==="
+python - <<'"'"'PY'"'"'
+import _madrona_mjx_batch_renderer as br
+import _madrona_mjx_visualizer as vz
+print("_madrona_mjx_batch_renderer:", br.__file__)
+print("_madrona_mjx_visualizer   :", vz.__file__)
+if br.__file__.endswith(".py") or vz.__file__.endswith(".py"):
+    raise SystemExit("FATAL: _madrona_mjx_* resolved to .py; shadowing still present")
+print("[ok] _madrona_mjx_* resolved to compiled .so")
+PY
+echo "==============================================================="
+
+# ---------------- NEW: GPU sanity check (Torch + JAX + Madrona init) ----------------
+echo "=== GPU sanity check (Torch + JAX + Madrona) ==="
+python - <<'"'"'PY'"'"'
+import os, sys
+
+# ---- Torch CUDA smoke ----
+import torch
+print("[torch] version:", torch.__version__)
+print("[torch] cuda available:", torch.cuda.is_available())
+if not torch.cuda.is_available():
+    raise SystemExit("[torch] FATAL: torch.cuda.is_available() is False")
+print("[torch] gpu:", torch.cuda.get_device_name(0))
+x = torch.randn(1024, 1024, device="cuda")
+y = x @ x
+torch.cuda.synchronize()
+print("[torch] matmul ok")
+
+# ---- JAX CUDA smoke ----
+os.environ["JAX_PLATFORMS"] = os.environ.get("JAX_PLATFORMS", "cuda,cpu")
+import jax, jax.numpy as jnp
+print("[jax] version:", jax.__version__)
+print("[jax] devices:", jax.devices())
+if not any(d.platform in ("cuda", "gpu") for d in jax.devices()):
+    raise SystemExit("[jax] FATAL: no CUDA/GPU device visible to JAX")
+a = jnp.ones((1024, 1024), dtype=jnp.float32)
+b = (a @ a).block_until_ready()
+dev_attr = getattr(b, "device", None)
+dev = dev_attr() if callable(dev_attr) else dev_attr
+print("[jax] matmul ok on:", dev)
+
+# ---- Madrona init smoke (catches the custom-call / cuModuleGetFunction failure early) ----
+# This does NOT run your env; it only tries to import and initialize renderer pieces.
+import mujoco
+from madrona_mjx.renderer import BatchRenderer
+
+print("[madrona] MADRONA_MWGPU_KERNEL_CACHE:", os.environ.get("MADRONA_MWGPU_KERNEL_CACHE"))
+print("[madrona] MADRONA_BVH_KERNEL_CACHE  :", os.environ.get("MADRONA_BVH_KERNEL_CACHE"))
+PY
+echo "==============================================="
+
+python - <<'PY'
+import inspect
+from madrona_mjx.renderer import BatchRenderer
+print("BatchRenderer.init :", inspect.signature(BatchRenderer.init))
+print("BatchRenderer.render:", inspect.signature(BatchRenderer.render))
+PY
+
+# Run training
+stdbuf -oL -eL python -u execute.py 2>&1
+echo "Training completed."
 '
 
 echo "Finished at $(date)"

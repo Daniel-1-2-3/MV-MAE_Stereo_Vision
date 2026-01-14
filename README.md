@@ -1,4 +1,4 @@
-##### Creating wheelhouse for offline build, and building the .sif file
+# Building the sif container #
 python3 -m venv .whvenv
 source .whvenv/bin/activate
 python -m pip install -U pip
@@ -28,25 +28,15 @@ export APPTAINER_TMPDIR="$SCRATCH/tmp"
 export SINGULARITY_CACHEDIR="$APPTAINER_CACHEDIR"
 export SINGULARITY_TMPDIR="$APPTAINER_TMPDIR"
 
-# Pick version 2
 apptainer cache clean --type=all --force || true
 apptainer build training.sif training.def
 
-##### Cluster training commands
-
-### Start training
+# Start training, see terminal output for errors #
 chmod +x training.sh
 sbatch training.sh
 
-### Live updates on file, tailing the last 30 lines, update every 0.5 secs
-watch -n 0.5 'tail -n 30 training-[NUMBER].out'
+# Important files and folders #
+- The MAE_Model/ folder contains MV-MAE files. The file containing the entire model is model.py
+- The Mujoco_Sim/ folder contains Mujoco environment files. The pick_env.py is the environment with step() and get_obs(), reset(), etc functions. The brax_wrapper.py is wraps the env for training with Brax. 
+- train_drqv2_mujoco.py is the training script. 
 
-##### Take log files from SSH and put in local computer. Run this on regular cmd, not in wsl
-scp -r `
-  ameypore@killarney.alliancecan.ca:/home/ameypore/scratch/daniel/MV-MAE_Stereo_Vision/logs `
-  "C:\Daniel\High School\Research\MV_MAE_Implementation"
-
-##### Force pull from Github
-git fetch origin
-git reset --hard origin/main
-git clean -fd
