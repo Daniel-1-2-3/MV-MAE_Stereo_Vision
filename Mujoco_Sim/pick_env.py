@@ -227,7 +227,8 @@ class StereoPickCube(panda.PandaBase):
         dev = next(iter(rng.devices())) if hasattr(rng, "devices") else None
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
             m = self._mjx_model
-            B = int(rng.shape[0])
+            # B = int(rng.shape[0])
+            B = 1
 
             if debug:
                 print(f"[pick_env] reset: B={B} render_batch_size={self.render_batch_size}")
