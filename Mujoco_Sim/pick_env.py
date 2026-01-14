@@ -333,7 +333,7 @@ class StereoPickCube(panda.PandaBase):
                         hasattr(self._mjx_model, "geom_quat"),
                     )
 
-                self._render_token, _, _ = self.renderer.init(data, self._mj_model)
+                self._render_token, _, _ = self.renderer.init(data, self._mj_model) # breaks here right now
                 jax.block_until_ready(self._render_token)
 
                 if debug:
