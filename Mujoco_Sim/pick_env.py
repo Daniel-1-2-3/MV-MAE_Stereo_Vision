@@ -148,7 +148,7 @@ class StereoPickCube(panda.PandaBase):
 
         self._mj_model: mujoco.MjModel = mj_model
         self._mjx_model: mjx.Model = mjx.put_model(mj_model, impl=self._config.impl)
-        
+
         self._post_init(obj_name="box", keyframe="low_home")
 
         self._floor_hand_geom_ids = [
@@ -196,8 +196,7 @@ class StereoPickCube(panda.PandaBase):
                 return x
             if x.ndim == 0:
                 return jp.broadcast_to(x, (B,))
-            if x.shape[0] == B:
-                return x
+            # Always prepend a batch axis; do NOT special-case x.shape[0] == B
             return jp.broadcast_to(x, (B,) + x.shape)
 
         data = jax.tree_util.tree_map(_batch_leaf, data0)
@@ -228,18 +227,19 @@ class StereoPickCube(panda.PandaBase):
         with (jax.default_device(dev) if dev is not None else contextlib.nullcontext()):
             m = self._mjx_model
             B = int(rng.shape[0])
-            print('test batch size = ', B)
+            print("test batch size = ", B)
 
             if debug:
                 print(f"[pick_env] reset: B={B} render_batch_size={self.render_batch_size}")
                 if dev is not None:
                     print(f"[pick_env] reset device: {dev}")
 
-            keys = jax.vmap(lambda k: jax.random.split(k, 4))(rng)
+            keys = jax.vmap(lambda k: jax.random.split(k, 5))(rng)
             rng_main = keys[:, 0, :]
             rng_box = keys[:, 1, :]
             rng_target = keys[:, 2, :]
             rng_brightness = keys[:, 3, :]
+            rng_robot = keys[:, 4, :]
 
             # Sample box + target positions (both [B, 3])
             min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
@@ -255,6 +255,19 @@ class StereoPickCube(panda.PandaBase):
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)
 
             data = self._make_batched_data(B)
+
+            # Make robot joints unique per-world (object qpos is set separately below).
+            eps = jp.float32(0.01)
+            qpos_noise = jax.vmap(
+                lambda k: jax.random.uniform(
+                    k, (int(self._mjx_model.nq),), minval=-eps, maxval=eps
+                )
+            )(rng_robot)
+            data = data.replace(
+                qpos=data.qpos.at[:, : self._obj_qposadr].add(
+                    qpos_noise[:, : self._obj_qposadr]
+                )
+            )
 
             # Set object position into qpos (batched)
             data = data.replace(
@@ -288,7 +301,12 @@ class StereoPickCube(panda.PandaBase):
                     backend = jax.lib.xla_bridge.get_backend()
                     print("[diag] jax/jaxlib:", jax.__version__, jaxlib.__version__)
                     print("[diag] backend:", backend.platform, "|", backend.platform_version)
-                    print("[diag] jaxlib file:", jaxlib.__file__, "mtime:", os.path.getmtime(jaxlib.__file__))
+                    print(
+                        "[diag] jaxlib file:",
+                        jaxlib.__file__,
+                        "mtime:",
+                        os.path.getmtime(jaxlib.__file__),
+                    )
 
                     for name in [
                         "madrona_mjx._madrona_mjx_batch_renderer",
@@ -302,16 +320,31 @@ class StereoPickCube(panda.PandaBase):
                     eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
                     print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype)
                     print("[diag] calling renderer.init ...")
-                    print("init mj_model type:", type(self._mj_model), "has geom_quat:", hasattr(self._mj_model, "geom_quat"))
-                    print("init mjx_model type:", type(self._mjx_model), "has geom_quat:", hasattr(self._mjx_model, "geom_quat"))
+                    print(
+                        "init mj_model type:",
+                        type(self._mj_model),
+                        "has geom_quat:",
+                        hasattr(self._mj_model, "geom_quat"),
+                    )
+                    print(
+                        "init mjx_model type:",
+                        type(self._mjx_model),
+                        "has geom_quat:",
+                        hasattr(self._mjx_model, "geom_quat"),
+                    )
 
                 self._render_token, _, _ = self.renderer.init(data, self._mj_model)
                 jax.block_until_ready(self._render_token)
 
                 if debug:
-                    print("[diag] render_token:", type(self._render_token),
-                          "dtype:", getattr(self._render_token, "dtype", None),
-                          "shape:", getattr(self._render_token, "shape", None))
+                    print(
+                        "[diag] render_token:",
+                        type(self._render_token),
+                        "dtype:",
+                        getattr(self._render_token, "dtype", None),
+                        "shape:",
+                        getattr(self._render_token, "shape", None),
+                    )
 
                     try:
                         _, rgb, _ = self.renderer.render(self._render_token, data, self._mj_model)
@@ -360,8 +393,7 @@ class StereoPickCube(panda.PandaBase):
         total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
         box_pos = data.xpos[self._obj_body]
-        out_of_bounds = jp.any(jp.abs(box_pos) > 1.0)
-        out_of_bounds |= box_pos[2] < 0.0
+        out_of_bounds = jp.any(jp.abs(box_pos) > 1.0, axis=-1) | (box_pos[:, 2] < 0.0)
 
         state.metrics.update(
             out_of_bounds=out_of_bounds.astype(jp.float32),
@@ -386,8 +418,8 @@ class StereoPickCube(panda.PandaBase):
         target_pos = info["target_pos"]
 
         gripper_pos = data.xpos[self._hand_body]
-        d_gripper_box = jp.linalg.norm(gripper_pos - box_pos)
-        d_box_target = jp.linalg.norm(box_pos - target_pos)
+        d_gripper_box = jp.linalg.norm(gripper_pos - box_pos, axis=-1)
+        d_box_target = jp.linalg.norm(box_pos - target_pos, axis=-1)
 
         reached_box = jp.minimum(info["reached_box"] + (d_gripper_box < 0.05), 1.0)
         info = {**info, "reached_box": reached_box}
@@ -421,7 +453,7 @@ class StereoPickCube(panda.PandaBase):
 
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
         _, rgb, _ = self._render_fn(render_token, data_batched)
-        print('rgb made')
+        print("rgb made")
 
         if rgb.shape[0] == 2:
             left = rgb[0]
@@ -429,14 +461,14 @@ class StereoPickCube(panda.PandaBase):
         else:
             left = rgb[:, 0]
             right = rgb[:, 1]
-        print('fail here 1')
+        print("fail here 1")
 
         left = left[..., :3].astype(jp.float32) / 255.0
         right = right[..., :3].astype(jp.float32) / 255.0
-        print('fail here 2')
+        print("fail here 2")
 
-        pixels = jp.concatenate([left, right], axis=2) 
-        print('fail here 3')
+        pixels = jp.concatenate([left, right], axis=2)
+        print("fail here 3")
         return pixels
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
@@ -452,9 +484,7 @@ class StereoPickCube(panda.PandaBase):
         # Make the finger pads white for increased visibility
         mesh_id = mj_model.mesh("finger_1").id
         geoms = [
-            idx
-            for idx, data_id in enumerate(mj_model.geom_dataid)
-            if data_id == mesh_id
+            idx for idx, data_id in enumerate(mj_model.geom_dataid) if data_id == mesh_id
         ]
         mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
         return mj_model
