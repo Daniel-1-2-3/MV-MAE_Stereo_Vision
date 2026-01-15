@@ -97,6 +97,16 @@ def _cuda_sync_and_clear_error(debug: bool = False, tag: str = "") -> int:
         print(f"[diag] {tag} cudaDeviceSynchronize rc={rc_sync} | cudaGetLastError={err} ({msg_s})")
     return int(err)
 
+def _cuda_clear_last_error(debug: bool = False, tag: str = "") -> int:
+    """Clear sticky CUDA runtime error without synchronizing (fast). Returns last error code."""
+    lib = _cudart()
+    err = lib.cudaGetLastError()  # clears per-thread error slot
+    if debug and err != 0:
+        msg = lib.cudaGetErrorString(err)
+        msg_s = msg.decode("utf-8", "replace") if msg is not None else "<null>"
+        print(f"[diag] {tag} cudaGetLastError={err} ({msg_s})")
+    return int(err)
+
 
 # ================================================================================
 
@@ -584,6 +594,9 @@ class StereoPickCube(panda.PandaBase):
           - (2, H, W, 4)     -> single world, two cameras
         """
         _, rgb, _ = self._render_fn(render_token, data_batched)
+        
+        debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
+        _cuda_clear_last_error(debug=debug, tag="after render_pixels renderer.render")
 
         try:
             B = int(data_batched.qpos.shape[0]) if data_batched.qpos.ndim >= 2 else 1
