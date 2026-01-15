@@ -463,6 +463,11 @@ class StereoPickCube(panda.PandaBase):
             _, rgb, _ = self.renderer.render(tok, data_for_init, self._mj_model)
             jax.block_until_ready(rgb)
             print("[diag] smoke render OK:", tuple(rgb.shape), rgb.dtype)
+
+            # ---------------- ADDED: cudart state after render -------------
+            _cuda_sync_and_clear_error(debug=True, tag="after renderer.render")
+            dev_after_render = _cuda_get_device()
+            print("[diag] cudart device after render:", dev_after_render)
             
             # ---- rgb sanity check (runs once; cheap) ----
             try:
@@ -497,13 +502,6 @@ class StereoPickCube(panda.PandaBase):
                     print("[diag][rgb] WARN: image appears all-white (min ~1)")
             except Exception as e:
                 print("[diag][rgb] WARN: rgb sanity check failed:", type(e).__name__, e)
-            # --------------------------------------------
-
-            # ---------------- ADDED: cudart state after render -------------
-            _cuda_sync_and_clear_error(debug=True, tag="after renderer.render")
-            dev_after_render = _cuda_get_device()
-            print("[diag] cudart device after render:", dev_after_render)
-            # ---------------------------------------------------------------
 
             # (optional) also restore after render
             ctx_after_render = _cu_ctx_get_current()
