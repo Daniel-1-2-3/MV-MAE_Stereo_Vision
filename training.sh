@@ -293,7 +293,7 @@ print("[micro] about to render")
 _, rgb, _ = r.render(tok, data, mjm)
 jax.block_until_ready(rgb)
 print("[micro] render ok:", rgb.shape, rgb.dtype)
-rgb_processed = rgb[..., :3].astype(jp.float32) / 255.0
+rgb_processed = rgb[..., :3].astype(jnp.float32) / 255.0
 print("[micro] ops after render ok: ", rgb_processed.shape)
 PY
 echo "======================================================================"
