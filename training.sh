@@ -7,6 +7,7 @@
 #SBATCH --mem=50G
 #SBATCH --time=1:00:00
 #SBATCH --account=aip-aspuru-ab
+#SBATCH --exclude=kn031
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
