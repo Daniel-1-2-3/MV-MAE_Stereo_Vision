@@ -257,9 +257,7 @@ class StereoPickCube(panda.PandaBase):
         enabled_geom_groups = np.asarray(vc.enabled_geom_groups, dtype=np.int32, order="C")
 
         cams = getattr(vc, "enabled_cameras", None)
-        if cams is None:
-            cams = [0, 1]
-        enabled_cameras = np.asarray(cams, dtype=np.int32, order="C")
+        enabled_cameras = None
 
         if self._mj_model.ncam <= int(np.max(enabled_cameras)):
             raise ValueError(
@@ -597,6 +595,7 @@ class StereoPickCube(panda.PandaBase):
         
         debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
         _cuda_clear_last_error(debug=debug, tag="after render_pixels renderer.render")
+        print("[rgb] shape", rgb.shape)
 
         try:
             B = int(data_batched.qpos.shape[0]) if data_batched.qpos.ndim >= 2 else 1
