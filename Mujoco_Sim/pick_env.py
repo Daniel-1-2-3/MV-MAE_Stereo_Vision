@@ -135,7 +135,7 @@ def default_vision_config() -> config_dict.ConfigDict:
         render_height=64,
         use_rasterizer=False,  # False => raytracer in madrona_mjx
         enabled_geom_groups=[0, 1, 2],
-        enabled_cameras=[0, 1],
+        enabled_cameras=None,
     )
 
 
