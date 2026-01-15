@@ -135,7 +135,7 @@ def default_vision_config() -> config_dict.ConfigDict:
         render_height=64,
         use_rasterizer=False,  # False => raytracer in madrona_mjx
         enabled_geom_groups=[0, 1, 2],
-        enabled_cameras=None,
+        enabled_cameras=None,  # Use all cameras (reference behavior)
     )
 
 
@@ -256,15 +256,6 @@ class StereoPickCube(panda.PandaBase):
 
         enabled_geom_groups = np.asarray(vc.enabled_geom_groups, dtype=np.int32, order="C")
 
-        cams = getattr(vc, "enabled_cameras", None)
-        enabled_cameras = None
-
-        if self._mj_model.ncam <= int(np.max(enabled_cameras)):
-            raise ValueError(
-                f"enabled_cameras={enabled_cameras.tolist()} but mj_model.ncam={self._mj_model.ncam}. "
-                "Your XML likely has fewer cameras than expected."
-            )
-
         return BatchRenderer(
             m=self._mjx_model,
             gpu_id=int(vc.gpu_id),
@@ -272,7 +263,7 @@ class StereoPickCube(panda.PandaBase):
             batch_render_view_width=int(self.render_width),
             batch_render_view_height=int(self.render_height),
             enabled_geom_groups=enabled_geom_groups,
-            enabled_cameras=enabled_cameras,
+            enabled_cameras=None,  # <<< IMPORTANT: match reference behavior
             add_cam_debug_geo=False,
             use_rasterizer=bool(vc.use_rasterizer),
             viz_gpu_hdls=None,
