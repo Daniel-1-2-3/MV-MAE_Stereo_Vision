@@ -487,7 +487,10 @@ class StereoPickCube(panda.PandaBase):
         box_pos = data.xpos[self._obj_body]          # (B, 3)
         target_pos = info["target_pos"]              # (B, 3)
 
-        gripper_pos = data.xpos[self._hand_body]     # (B, 3)
+        # Use the hand geom centers as the gripper position (no PandaBase _hand_body needed)
+        pad_ids = jp.array(self._floor_hand_geom_ids[:2], dtype=jp.int32)  # left/right pads only
+        pad_pos = data.geom_xpos[:, pad_ids, :]                            # (B, 2, 3)
+        gripper_pos = jp.mean(pad_pos, axis=1)    
         d_gripper_box = jp.linalg.norm(gripper_pos - box_pos, axis=-1)   # (B,)
         d_box_target = jp.linalg.norm(box_pos - target_pos, axis=-1)     # (B,)
 
