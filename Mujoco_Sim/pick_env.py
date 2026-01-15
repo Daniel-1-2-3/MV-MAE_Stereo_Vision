@@ -393,6 +393,7 @@ class StereoPickCube(panda.PandaBase):
             ctx_after_render = _cu_ctx_get_current()
             if debug:
                 print(f"[diag] CUDA ctx after  renderer.render: 0x{ctx_after_render:x}")
+                print(f"[diag] CUDA ctx before renderer.render: 0x{ctx_before:x}")
             if ctx_before and ctx_after_render and (ctx_after_render != ctx_before):
                 if debug:
                     print("err: renderer.render changed CUDA ctx, need restoring previous ctx")
