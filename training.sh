@@ -225,7 +225,7 @@ except Exception as e:
 PY
 echo "==========================================="
 
-echo "=== MICRO-REPRO: Madrona init on trivial XML WITH CAMERAS + 1DoF ==="
+echo "=== smalltest-REPRO: Madrona init on trivial XML WITH CAMERAS + 1DoF ==="
 python - <<'PY'
 import jax
 import jax.numpy as jnp
@@ -255,7 +255,7 @@ xml = r"""
 """
 
 mjm = mujoco.MjModel.from_xml_string(xml)
-print("[micro] nq/nv:", mjm.nq, mjm.nv, "ncam:", mjm.ncam)
+print("[smalltest] nq/nv:", mjm.nq, mjm.nv, "ncam:", mjm.ncam)
 
 m = mjx.put_model(mjm)
 
@@ -284,17 +284,17 @@ r = BatchRenderer(
     viz_gpu_hdls=None,
 )
 
-print("[micro] about to init")
+print("[smalltest] about to init")
 tok, _, _ = r.init(data, mjm)
 jax.block_until_ready(tok)
-print("[micro] init ok")
+print("[smalltest] init ok")
 
-print("[micro] about to render")
+print("[smalltest] about to render")
 _, rgb, _ = r.render(tok, data, mjm)
 jax.block_until_ready(rgb)
-print("[micro] render ok:", rgb.shape, rgb.dtype)
+print("[smalltest] render ok:", rgb.shape, rgb.dtype)
 rgb_processed = rgb[..., :3].astype(jnp.float32) / 255.0
-print("[micro] ops after render ok: ", rgb_processed.shape)
+print("[smalltest] ops after render ok: ", rgb_processed.shape)
 PY
 echo "======================================================================"
 
