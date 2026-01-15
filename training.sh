@@ -119,6 +119,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.60
 export PICK_ENV_DEBUG=1
+export PICK_ENV_SAVE_RGB=1
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 
 # Put Madrona build FIRST so top-level _madrona_* resolves to the .so
