@@ -13,6 +13,7 @@
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
+echo "NODE=$(hostname)"
 
 module load apptainer/1.3.5 || module load apptainer
 

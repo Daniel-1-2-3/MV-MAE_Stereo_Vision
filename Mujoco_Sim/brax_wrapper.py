@@ -20,7 +20,6 @@ import os
 from typing import Any, Optional, Dict
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 try:
@@ -80,9 +79,10 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
 class RSLRLBraxWrapper(VecEnv):
     """Wrapper for MJX envs (JAX) that interop with torch/RSL-RL VecEnv.
 
-    Key rule (to match micro-repro "no warning" pattern):
-      - JIT ONLY the physics step.
-      - DO NOT call Madrona renderer.render() inside a jitted function.
+    Assumptions for your current pick_env:
+      - reset takes keys [B,2] and returns env_state.obs as pixels tensor [B,H,2W,3]
+      - step takes (state, action[B,act_dim]) and returns same
+      - env_state.info has 'truncation' [B] (0/1)
     """
 
     def __init__(
@@ -134,6 +134,7 @@ class RSLRLBraxWrapper(VecEnv):
             self.v_randomization_fn = functools.partial(randomization_fn, rng=randomization_rng)
         else:
             self.v_randomization_fn = None
+        self._render_pixels_fn = getattr(env, "render_pixels", None)
 
         H = int(getattr(env, "render_height", 0) or 0)
         W = int(getattr(env, "render_width", 0) or 0)
@@ -149,39 +150,25 @@ class RSLRLBraxWrapper(VecEnv):
         self.max_episode_length = int(episode_length)
         self.success_queue = deque(maxlen=100)
 
-        # IMPORTANT: use physics-only API
-        if not hasattr(env, "reset_physics") or not hasattr(env, "step_physics") or not hasattr(env, "compute_obs"):
-            raise AttributeError(
-                "Env must provide reset_physics(), step_physics(), and compute_obs() "
-                "so rendering can remain outside jit."
-            )
-
-        print("JITing step_physics (render stays outside jit)")
-        self.reset_fn = env.reset_physics
-        self.step_fn = jax.jit(env.step_physics)
-        print("Done JITing step_physics")
+        # JIT step and keep reset unjitted
+        print("JITing step")
+        self.reset_fn = env.reset
+        self.step_fn = jax.jit(env.step)
+        print("Done JITing step")
 
         self.env_state = None
-
-    def _fill_obs_outside_jit(self):
-        """Compute pixels via Madrona outside jit (matches micro-repro behavior)."""
-        obs = self.env.compute_obs(self.env_state.data, self.env_state.info)
-        self.env_state = self.env_state.replace(obs=obs)
 
     def step(self, action):
         if torch is None:
             raise ImportError("torch is required")
 
         # action: torch tensor [B, num_actions]
-        action = torch.clip(action, -1.0, 1.0).to(dtype=torch.float32)
+        action = torch.clip(action, -1.0, 1.0)
         action = _torch_to_jax(action)
 
-        # Physics step (jitted)
         self.env_state = self.step_fn(self.env_state, action)
 
-        # Render outside jit (no XLA backend_config warnings)
-        self._fill_obs_outside_jit()
-
+        # env_state.obs is pixels tensor [B,H,2W,3]
         obs_t = _jax_to_torch(self.env_state.obs)
         obs = {"state": obs_t}
 
@@ -191,7 +178,7 @@ class RSLRLBraxWrapper(VecEnv):
         info = self.env_state.info
         trunc = info.get("truncation", None)
         if trunc is None:
-            trunc = jnp.zeros_like(self.env_state.done)
+            trunc = jax.numpy.zeros_like(self.env_state.done)
         truncation = _jax_to_torch(trunc)
 
         info_ret = {
@@ -228,17 +215,14 @@ class RSLRLBraxWrapper(VecEnv):
         self.key, key_reset = jax.random.split(self.key)
         self.key_reset = jax.random.split(key_reset, self.batch_size)
 
-        # Physics reset (not jitted)
         self.env_state = self.reset_fn(self.key_reset)
-
-        # Render outside jit
-        self._fill_obs_outside_jit()
 
         obs_t = _jax_to_torch(self.env_state.obs)
         obs = {"state": obs_t}
 
         if TensorDict is None:
             return obs
+
         return TensorDict(obs, batch_size=[self.num_envs])
 
     def get_observations(self):
