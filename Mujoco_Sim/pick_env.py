@@ -156,6 +156,7 @@ class StereoPickCube(panda.PandaBase):
             for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
         ]
         self._floor_geom_id = self._mj_model.geom("floor").id
+
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
 
@@ -168,8 +169,9 @@ class StereoPickCube(panda.PandaBase):
         self._sample_orientation = False
 
     def _create_renderer(self) -> BatchRenderer:
+        # Force C-contiguous int32 array for extension argument (avoids weird host layout edge cases)
         enabled_geom_groups = np.asarray(
-            self._config.vision_config.enabled_geom_groups, dtype=np.int32
+            self._config.vision_config.enabled_geom_groups, dtype=np.int32, order="C"
         )
         return BatchRenderer(
             m=self._mjx_model,
@@ -184,11 +186,85 @@ class StereoPickCube(panda.PandaBase):
             viz_gpu_hdls=None,
         )
 
-    def _make_batched_data(self, B: int) -> mjx.Data:
-        """Create a batched mjx.Data with leading batch axis B and overwrite qpos/qvel/ctrl."""
+    # -------------------------------------------------------------------------
+    # NEW: batched mjx.Data creation with real per-world buffers (no broadcast views)
+    # -------------------------------------------------------------------------
+    def _make_batched_data_simple(self, B: int) -> mjx.Data:
+        """Batched mjx.Data with real per-world buffers; reference-like init input."""
         m = self._mjx_model
+        # vmap(make_data) gives distinct per-world buffers (not broadcast_to views)
+        data = jax.vmap(lambda _: mjx.make_data(m))(jp.arange(B))
+        return data
 
-        # single-world data, then broadcast all leaves to [B, ...]
+    def _apply_per_world_initial_state(
+        self,
+        data: mjx.Data,
+        box_pos: jax.Array,        # (B, 3)
+        target_pos: jax.Array,     # (B, 3)
+        rng_robot: jax.Array,      # (B, 2) keys
+    ) -> mjx.Data:
+        """Write qpos/qvel/ctrl + box + mocap into an existing batched data."""
+        m = self._mjx_model
+        B = int(box_pos.shape[0])
+
+        nq = int(m.nq)
+        nv = int(m.nv)
+
+        # Base init state
+        init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[:nq]  # (nq,)
+        qpos = jp.broadcast_to(init_q0[None, :], (B, nq)).astype(jp.float32)
+
+        qvel = jp.zeros((B, nv), dtype=jp.float32)
+
+        ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
+        ctrl = jp.broadcast_to(ctrl0[None, ...], (B,) + ctrl0.shape).astype(jp.float32)
+
+        data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
+
+        # Per-world robot joint noise (only affects robot part)
+        eps = jp.float32(0.01)
+        qpos_noise = jax.vmap(
+            lambda k: jax.random.uniform(k, (nq,), minval=-eps, maxval=eps)
+        )(rng_robot).astype(jp.float32)
+
+        data = data.replace(
+            qpos=data.qpos.at[:, : self._obj_qposadr].add(qpos_noise[:, : self._obj_qposadr])
+        )
+
+        # Set object position into qpos (batched)
+        data = data.replace(
+            qpos=data.qpos.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(
+                box_pos.astype(jp.float32)
+            )
+        )
+
+        # Set target mocap (batched)
+        target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
+        target_quat = jp.broadcast_to(target_quat0[None, :], (B, 4))
+
+        mpos = data.mocap_pos
+        mquat = data.mocap_quat
+
+        # In case these are unbatched depending on mjx/model
+        if mpos.ndim == 2:
+            mpos = jp.broadcast_to(mpos[None, ...], (B,) + mpos.shape)
+        if mquat.ndim == 2:
+            mquat = jp.broadcast_to(mquat[None, ...], (B,) + mquat.shape)
+
+        mpos = mpos.at[:, 0, :].set(target_pos.astype(jp.float32))
+        mquat = mquat.at[:, 0, :].set(target_quat)
+
+        data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
+
+        return data
+
+    # -------------------------------------------------------------------------
+    # (Kept for reference) Old approach that can create broadcasted leaf views.
+    # Not used anymore for renderer init / multiworld correctness.
+    # -------------------------------------------------------------------------
+    def _make_batched_data(self, B: int) -> mjx.Data:
+        """DEPRECATED: broadcasted batched data can produce aliasing/views; kept for reference."""
+        m = self._mjx_model
         data0 = mjx.make_data(m)
 
         def _batch_leaf(x):
@@ -196,7 +272,6 @@ class StereoPickCube(panda.PandaBase):
                 return x
             if x.ndim == 0:
                 return jp.broadcast_to(x, (B,))
-            # Always prepend a batch axis; do NOT special-case x.shape[0] == B
             return jp.broadcast_to(x, (B,) + x.shape)
 
         data = jax.tree_util.tree_map(_batch_leaf, data0)
@@ -254,59 +329,18 @@ class StereoPickCube(panda.PandaBase):
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)
 
-            data = self._make_batched_data(B)
-
-            # Make robot joints unique per-world (object qpos is set separately below).
-            eps = jp.float32(0.01)
-            qpos_noise = jax.vmap(
-                lambda k: jax.random.uniform(
-                    k, (int(self._mjx_model.nq),), minval=-eps, maxval=eps
-                )
-            )(rng_robot)
-            data = data.replace(
-                qpos=data.qpos.at[:, : self._obj_qposadr].add(
-                    qpos_noise[:, : self._obj_qposadr]
-                )
-            )
-
-            # Set object position into qpos (batched)
-            data = data.replace(
-                qpos=data.qpos.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(box_pos)
-            )
-
-            # Set target mocap (batched)
-            target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
-            target_quat = jp.broadcast_to(target_quat0, (B, 4))
-
-            mpos = data.mocap_pos
-            mquat = data.mocap_quat
-
-            if mpos.ndim == 2:
-                mpos = jp.broadcast_to(mpos, (B,) + mpos.shape)
-            if mquat.ndim == 2:
-                mquat = jp.broadcast_to(mquat, (B,) + mquat.shape)
-
-            mpos = mpos.at[:, 0, :].set(target_pos)
-            mquat = mquat.at[:, 0, :].set(target_quat)
-            data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
-
-            data = jax.vmap(lambda d: mjx.forward(m, d))(data)
-            bmin, bmax = self._config.obs_noise.brightness
-            brightness = jax.vmap(
-                lambda k: jax.random.uniform(k, (1,), minval=bmin, maxval=bmax)
-            )(rng_brightness).reshape((B, 1, 1, 1))
+            # -----------------------------------------------------------------
+            # NEW: "simple" batched data for renderer init (reference-like),
+            # then apply per-world unique qpos/mocap/ctrl afterwards.
+            # -----------------------------------------------------------------
+            data_simple = self._make_batched_data_simple(B)
 
             if self._render_token is None:
                 if debug:
                     backend = jax.lib.xla_bridge.get_backend()
                     print("[diag] jax/jaxlib:", jax.__version__, jaxlib.__version__)
                     print("[diag] backend:", backend.platform, "|", backend.platform_version)
-                    print(
-                        "[diag] jaxlib file:",
-                        jaxlib.__file__,
-                        "mtime:",
-                        os.path.getmtime(jaxlib.__file__),
-                    )
+                    print("[diag] JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS", "<unset>"))
 
                     for name in [
                         "madrona_mjx._madrona_mjx_batch_renderer",
@@ -317,9 +351,10 @@ class StereoPickCube(panda.PandaBase):
                         spec = importlib.util.find_spec(name)
                         print("[diag]", name, "->", getattr(spec, "origin", None))
 
-                    eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32)
-                    print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype)
-                    print("[diag] calling renderer.init ...")
+                    eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32, order="C")
+                    print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype, "C_CONTIG:", eg.flags["C_CONTIGUOUS"])
+                    print("[diag] calling renderer.init with SIMPLE data ...")
+
                     print(
                         "init mj_model type:",
                         type(self._mj_model),
@@ -332,8 +367,13 @@ class StereoPickCube(panda.PandaBase):
                         "has geom_quat:",
                         hasattr(self._mjx_model, "geom_quat"),
                     )
+                    try:
+                        print("[diag] data_simple.qpos shape:", data_simple.qpos.shape, "dtype:", data_simple.qpos.dtype)
+                    except Exception:
+                        pass
 
-                self._render_token, _, _ = self.renderer.init(data, self._mj_model) # breaks here right now
+                # Init using the simplest possible batched data (no randomization / no forward yet)
+                self._render_token, _, _ = self.renderer.init(data_simple, self._mj_model)
                 jax.block_until_ready(self._render_token)
 
                 if debug:
@@ -346,17 +386,21 @@ class StereoPickCube(panda.PandaBase):
                         getattr(self._render_token, "shape", None),
                     )
 
-                    try:
-                        _, rgb, _ = self.renderer.render(self._render_token, data, self._mj_model)
-                        jax.block_until_ready(rgb)
-                        print("[diag] smoke render ok:", rgb.shape, rgb.dtype)
-                    except Exception as e:
-                        print("[diag] smoke render FAILED:", type(e).__name__, e)
-                        raise
+            # Now apply per-world state onto the batched data
+            data = self._apply_per_world_initial_state(
+                data=data_simple,
+                box_pos=box_pos,
+                target_pos=target_pos,
+                rng_robot=rng_robot,
+            )
 
-                    canary = jp.zeros((1,), dtype=jp.float32)
-                    jax.block_until_ready(canary)
-                    print("[diag] post-render canary ok")
+            # Forward after setting state
+            data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+
+            bmin, bmax = self._config.obs_noise.brightness
+            brightness = jax.vmap(
+                lambda k: jax.random.uniform(k, (1,), minval=bmin, maxval=bmax)
+            )(rng_brightness).reshape((B, 1, 1, 1))
 
             render_token = self._render_token
 
@@ -452,23 +496,57 @@ class StereoPickCube(panda.PandaBase):
         return info, raw_rewards
 
     def render_pixels(self, render_token: jax.Array, data_batched: mjx.Data) -> jax.Array:
-        _, rgb, _ = self._render_fn(render_token, data_batched)
-        print("rgb made")
+        """
+        Robustly handle renderer RGB output shapes.
 
-        if rgb.shape[0] == 2:
-            left = rgb[0]
-            right = rgb[1]
-        else:
+        Expected (most common for stereo):
+          - (B, 2, H, W, 4)  -> multiworld, two cameras
+          - (2, H, W, 4)     -> single world, two cameras
+
+        We explicitly avoid the old `if rgb.shape[0] == 2` heuristic,
+        because it breaks when B==2.
+        """
+        _, rgb, _ = self._render_fn(render_token, data_batched)
+
+        # Infer batch size from data (works for batched mjx.Data)
+        try:
+            B = int(data_batched.qpos.shape[0]) if data_batched.qpos.ndim >= 2 else 1
+        except Exception:
+            B = 1
+
+        # Normalize to left/right with a batch axis.
+        if rgb.ndim == 5:
+            # (B, C, H, W, 4)
+            if rgb.shape[1] < 2:
+                raise ValueError(f"Renderer returned rgb with {rgb.shape[1]} cameras, expected >=2 for stereo.")
             left = rgb[:, 0]
             right = rgb[:, 1]
-        print("fail here 1")
+        elif rgb.ndim == 4:
+            # Either (2, H, W, 4) for single-world stereo OR (B, H, W, 4) for mono.
+            if rgb.shape[0] == 2 and B == 1:
+                left = rgb[0:1]
+                right = rgb[1:2]
+            elif rgb.shape[0] == B:
+                # This looks like (B, H, W, 4) -> mono camera render, can't form stereo
+                raise ValueError(
+                    f"Renderer returned rgb shape {tuple(rgb.shape)} which looks mono (B,H,W,C). "
+                    "Expected stereo with shape (B,2,H,W,C). Check your camera config / enabled_cameras."
+                )
+            else:
+                raise ValueError(
+                    f"Unrecognized rgb shape {tuple(rgb.shape)} with inferred B={B}. "
+                    "Expected (B,2,H,W,C) or (2,H,W,C)."
+                )
+        else:
+            raise ValueError(f"Unrecognized rgb ndim={rgb.ndim}, shape={tuple(rgb.shape)}")
 
+        # Convert to float32 RGB in [0,1]
         left = left[..., :3].astype(jp.float32) / 255.0
         right = right[..., :3].astype(jp.float32) / 255.0
-        print("fail here 2")
 
+        # Concatenate along width axis:
+        # left/right are (B,H,W,3) -> axis=2 is W
         pixels = jp.concatenate([left, right], axis=2)
-        print("fail here 3")
         return pixels
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
