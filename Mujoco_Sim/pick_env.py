@@ -392,6 +392,7 @@ class StereoPickCube(panda.PandaBase):
 
             # IMPORTANT: init renderer token using safe data + forward (micro style)
             self._maybe_init_renderer(data, debug=debug)
+            print('init renderer done')
 
             # Now apply per-world state and forward for the actual start state
             data = self._apply_per_world_initial_state(
@@ -400,7 +401,9 @@ class StereoPickCube(panda.PandaBase):
                 target_pos=target_pos,
                 rng_robot=rng_robot,
             )
+            print('per world done')
             data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+            print('vmap done')
 
             # Brightness noise
             bmin, bmax = self._config.obs_noise.brightness
@@ -408,10 +411,12 @@ class StereoPickCube(panda.PandaBase):
                 lambda k: jax.random.uniform(k, (1,), minval=bmin, maxval=bmax)
             )(rng_brightness).reshape((B, 1, 1, 1))
 
+            print('brightness done')
             metrics = {
                 "out_of_bounds": jp.zeros((B,), dtype=jp.float32),
                 **{k: jp.zeros((B,), dtype=jp.float32) for k in self._config.reward_config.scales.keys()},
             }
+            print('metrics calculated')
             info = {
                 "rng": rng_main,
                 "target_pos": target_pos,

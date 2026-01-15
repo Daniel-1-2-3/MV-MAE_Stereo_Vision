@@ -317,6 +317,7 @@ class DrQv2Agent:
         num_episodes = 0
         
         obs_td = self.env.reset() # TensorDict, batch=[num_envs]
+        print('done reset')
         obs = obs_td["state"] # torch.Tensor on GPU (via dlpack)
 
         print("loop start")
