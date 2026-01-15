@@ -225,9 +225,8 @@ except Exception as e:
 PY
 echo "==========================================="
 
-echo "=== MICRO-REPRO: Madrona init on trivial XML (no assets, no your code) ==="
-# This isolates stack/ABI issues from your env/model.
-python - <<'"'"'PY'"'"'
+echo "=== MICRO-REPRO: Madrona init on trivial XML WITH CAMERAS ==="
+python - <<'PY'
 import os
 import jax
 import jax.numpy as jnp
@@ -236,22 +235,36 @@ from mujoco import mjx
 from madrona_mjx.renderer import BatchRenderer
 import numpy as np
 
-xml = """
-<mujoco>
+# Minimal scene with 2 cameras (stereo-ish), light, and simple geometry.
+xml = r"""
+<mujoco model="mini">
+  <option timestep="0.01"/>
   <worldbody>
-    <body name="b" pos="0 0 0">
-      <geom type="sphere" size="0.05"/>
+    <light name="sun" pos="0 0 1" dir="0 0 -1"/>
+    <geom name="floor" type="plane" size="2 2 0.1" rgba="0.3 0.3 0.3 1"/>
+    <body name="b" pos="0 0 0.05">
+      <geom type="sphere" size="0.05" rgba="0.8 0.2 0.2 1"/>
     </body>
+
+    <!-- Two fixed cameras -->
+    <camera name="cam0" pos="-0.15 -0.35 0.20" xyaxes="1 0 0 0 0 1" fovy="60"/>
+    <camera name="cam1" pos=" 0.15 -0.35 0.20" xyaxes="1 0 0 0 0 1" fovy="60"/>
   </worldbody>
 </mujoco>
 """
 
 mjm = mujoco.MjModel.from_xml_string(xml)
+print("[micro] mjm.ncam:", mjm.ncam, "cam names:", [mujoco.mj_id2name(mjm, mujoco.mjtObj.mjOBJ_CAMERA, i) for i in range(mjm.ncam)])
+
 m = mjx.put_model(mjm)
 
 B = 1
-# safest batched data construction for mjx
+# SAFEST batched data construction (no broadcast-tree tricks)
 data = jax.vmap(lambda _: mjx.make_data(m))(jnp.arange(B))
+data = jax.vmap(lambda d: mjx.forward(m, d))(data)
+
+enabled_geom_groups = np.asarray([0, 1, 2], dtype=np.int32, order="C")
+enabled_cameras = np.asarray([0, 1], dtype=np.int32, order="C")
 
 r = BatchRenderer(
     m=m,
@@ -259,17 +272,22 @@ r = BatchRenderer(
     num_worlds=B,
     batch_render_view_width=64,
     batch_render_view_height=64,
-    enabled_geom_groups=np.asarray([0,1,2], dtype=np.int32, order="C"),
-    enabled_cameras=None,
+    enabled_geom_groups=enabled_geom_groups,
+    enabled_cameras=enabled_cameras,   # <- explicit
     add_cam_debug_geo=False,
-    use_rasterizer=False,
+    use_rasterizer=False,              # <- raytracer path
     viz_gpu_hdls=None,
 )
 
-print("about to init")
+print("[micro] about to init (raytracer)")
 tok, _, _ = r.init(data, mjm)
 jax.block_until_ready(tok)
-print("init ok")
+print("[micro] init ok")
+
+# Smoke render (forces the custom call to actually run)
+_, rgb, _ = r.render(tok, data, mjm)
+jax.block_until_ready(rgb)
+print("[micro] render ok:", rgb.shape, rgb.dtype)
 PY
 echo "======================================================================"
 
