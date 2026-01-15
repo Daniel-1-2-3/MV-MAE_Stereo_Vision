@@ -19,13 +19,11 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Union
 
 import contextlib
-import importlib.util
 import os
 from pathlib import Path
 
 import jax
 import jax.numpy as jp
-import jaxlib
 import mujoco
 import numpy as np
 from ml_collections import config_dict
@@ -41,42 +39,11 @@ from madrona_mjx.renderer import BatchRenderer  # type: ignore
 import ctypes
 from functools import lru_cache
 
-@lru_cache(None)
-def _cuda():
-    lib = ctypes.CDLL("libcuda.so.1")
-    # minimal driver API we need
-    lib.cuInit.argtypes = [ctypes.c_uint]
-    lib.cuInit.restype = ctypes.c_int
 
-    lib.cuCtxGetCurrent.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
-    lib.cuCtxGetCurrent.restype = ctypes.c_int
-
-    lib.cuCtxSetCurrent.argtypes = [ctypes.c_void_p]
-    lib.cuCtxSetCurrent.restype = ctypes.c_int
-
-    # initialize (harmless if already done)
-    lib.cuInit(0)
-    return lib
-
-def _cu_ctx_get_current() -> int:
-    ctx = ctypes.c_void_p()
-    rc = _cuda().cuCtxGetCurrent(ctypes.byref(ctx))
-    if rc != 0:
-        # if this fails, don't crash the program—just return "unknown"
-        return 0
-    return int(ctx.value or 0)
-
-def _cu_ctx_set_current(ctx_int: int) -> None:
-    if not ctx_int:
-        return
-    _cuda().cuCtxSetCurrent(ctypes.c_void_p(ctx_int))
-
-
-# ===================== ADDED: cudart detection helpers =====================
+# ===================== cudart error detection/clearing helpers =====================
 
 @lru_cache(None)
 def _cudart():
-    # try common names
     last_err = None
     for name in ["libcudart.so.12", "libcudart.so"]:
         try:
@@ -86,7 +53,10 @@ def _cudart():
             last_err = e
             lib = None
     if lib is None:
-        raise RuntimeError(f"Could not load libcudart (tried libcudart.so.12, libcudart.so). Last error: {last_err}")
+        raise RuntimeError(
+            "Could not load libcudart (tried libcudart.so.12, libcudart.so). "
+            f"Last error: {last_err}"
+        )
 
     lib.cudaGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
     lib.cudaGetDevice.restype = ctypes.c_int
@@ -105,15 +75,19 @@ def _cudart():
 
     return lib
 
+
 def _cuda_get_device() -> int:
     d = ctypes.c_int(-1)
     rc = _cudart().cudaGetDevice(ctypes.byref(d))
     return int(d.value) if rc == 0 else -1
 
+
 def _cuda_set_device(d: int) -> None:
     _cudart().cudaSetDevice(int(d))
 
-def _cuda_sync_and_clear_error(debug: bool = False, tag: str = "") -> None:
+
+def _cuda_sync_and_clear_error(debug: bool = False, tag: str = "") -> int:
+    """Synchronize and clear CUDA runtime error (sticky per-thread). Returns the last error code."""
     lib = _cudart()
     rc_sync = lib.cudaDeviceSynchronize()
     err = lib.cudaGetLastError()  # clears per-thread error slot
@@ -121,8 +95,10 @@ def _cuda_sync_and_clear_error(debug: bool = False, tag: str = "") -> None:
         msg = lib.cudaGetErrorString(err)
         msg_s = msg.decode("utf-8", "replace") if msg is not None else "<null>"
         print(f"[diag] {tag} cudaDeviceSynchronize rc={rc_sync} | cudaGetLastError={err} ({msg_s})")
+    return int(err)
 
-# ==========================================================================
+
+# ================================================================================
 
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
@@ -149,8 +125,6 @@ def default_vision_config() -> config_dict.ConfigDict:
         render_height=64,
         use_rasterizer=False,  # False => raytracer in madrona_mjx
         enabled_geom_groups=[0, 1, 2],
-        # IMPORTANT: make cameras explicit like the micro-repro.
-        # If your XML has two cameras, they are usually indices 0 and 1.
         enabled_cameras=[0, 1],
     )
 
@@ -234,14 +208,11 @@ class StereoPickCube(panda.PandaBase):
         )
         mj_model = self.modify_model(mj_model)
         mj_model.opt.timestep = self._config.sim_dt
-
         self._mj_model: mujoco.MjModel = mj_model
 
         # ---------------------------------------------------------------------
         # 2) PandaBase post-init may mutate the MuJoCo model. Do it BEFORE mjx.put_model
         # ---------------------------------------------------------------------
-        # NOTE: PandaBase._post_init often sets up _init_q, _init_ctrl, _obj_qposadr, etc.
-        # It can also mutate the model. So we call it now, THEN create mjx_model afterwards.
         self._post_init(obj_name="box", keyframe="low_home")
 
         # ---------------------------------------------------------------------
@@ -263,6 +234,9 @@ class StereoPickCube(panda.PandaBase):
         self._render_token: Optional[jax.Array] = None
         self._render_fn = lambda token, data: self.renderer.render(token, data, self._mj_model)
 
+        # Save-image gate (debug-only)
+        self._saved_debug_rgb = False
+
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
         self._sample_orientation = False
@@ -272,14 +246,11 @@ class StereoPickCube(panda.PandaBase):
 
         enabled_geom_groups = np.asarray(vc.enabled_geom_groups, dtype=np.int32, order="C")
 
-        # Match micro-repro: explicit enabled_cameras int32 C-contiguous.
         cams = getattr(vc, "enabled_cameras", None)
         if cams is None:
-            # Fallback to [0,1] if user forgot to set it
             cams = [0, 1]
         enabled_cameras = np.asarray(cams, dtype=np.int32, order="C")
 
-        # Sanity: the MuJoCo model must actually have these camera indices.
         if self._mj_model.ncam <= int(np.max(enabled_cameras)):
             raise ValueError(
                 f"enabled_cameras={enabled_cameras.tolist()} but mj_model.ncam={self._mj_model.ncam}. "
@@ -322,20 +293,16 @@ class StereoPickCube(panda.PandaBase):
         nq = int(m.nq)
         nv = int(m.nv)
 
-        # Base init state (float32)
         init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[:nq]  # (nq,)
         qpos = jp.broadcast_to(init_q0[None, :], (B, nq)).astype(jp.float32)
-        print('broadcast passed')
 
         qvel = jp.zeros((B, nv), dtype=jp.float32)
 
         ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
         ctrl = jp.broadcast_to(ctrl0[None, ...], (B,) + ctrl0.shape).astype(jp.float32)
-        print('second broadcast passed')
 
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
 
-        # Per-world robot joint noise (only affects robot portion)
         eps = jp.float32(0.01)
         qpos_noise = jax.vmap(
             lambda k: jax.random.uniform(k, (nq,), minval=-eps, maxval=eps)
@@ -345,21 +312,18 @@ class StereoPickCube(panda.PandaBase):
             qpos=data.qpos.at[:, : self._obj_qposadr].add(qpos_noise[:, : self._obj_qposadr])
         )
 
-        # Set object position into qpos (batched)
         data = data.replace(
             qpos=data.qpos.at[:, self._obj_qposadr : self._obj_qposadr + 3].set(
                 box_pos.astype(jp.float32)
             )
         )
 
-        # Set target mocap (batched)
         target_quat0 = jp.array([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
         target_quat = jp.broadcast_to(target_quat0[None, :], (B, 4))
 
         mpos = data.mocap_pos
         mquat = data.mocap_quat
 
-        # Ensure batched mocap arrays
         if mpos.ndim == 2:
             mpos = jp.broadcast_to(mpos[None, ...], (B,) + mpos.shape)
         if mquat.ndim == 2:
@@ -373,145 +337,100 @@ class StereoPickCube(panda.PandaBase):
 
     # -------------------------------------------------------------------------
     # Renderer init: mirror micro-repro (forward before init; explicit cameras)
+    #
+    # IMPORTANT: we now explicitly *clear* cudart error state after init/render,
+    # because Madrona leaves cudaErrorInvalidValue "sticky" even if rgb is fine.
     # -------------------------------------------------------------------------
     def _maybe_init_renderer(self, data_for_init: mjx.Data, debug: bool):
         if self._render_token is not None:
             return
 
-        # Hard asserts BEFORE calling the extension.
-        # These should fail loudly in Python rather than corrupting backend_config.
+        # Ensure float32
         if data_for_init.qpos.dtype != jp.float32:
             data_for_init = data_for_init.replace(qpos=jp.asarray(data_for_init.qpos, jp.float32))
         if data_for_init.qvel.dtype != jp.float32:
             data_for_init = data_for_init.replace(qvel=jp.asarray(data_for_init.qvel, jp.float32))
         if data_for_init.ctrl.dtype != jp.float32:
             data_for_init = data_for_init.replace(ctrl=jp.asarray(data_for_init.ctrl, jp.float32))
-        ctx_before = _cu_ctx_get_current()
-
-        # ---------------- ADDED: cudart state before init ----------------
-        dev_before = _cuda_get_device()
-        if debug:
-            print("[diag] cudart device before init:", dev_before)
-            _cuda_sync_and_clear_error(debug=True, tag="before renderer.init")
-        # ---------------------------------------------------------------
 
         B = int(data_for_init.qpos.shape[0]) if data_for_init.qpos.ndim >= 2 else 1
         if B != self.render_batch_size:
-            # Renderer is built for num_worlds=self.render_batch_size.
-            # If you run B != render_batch_size, you must rebuild renderer or always reset at that size.
             raise ValueError(
                 f"Renderer num_worlds={self.render_batch_size} but init data batch B={B}. "
                 "Keep them equal."
             )
 
-        if debug:
-            backend = jax.lib.xla_bridge.get_backend()
-            print("[diag] jax/jaxlib:", jax.__version__, jaxlib.__version__)
-            print("[diag] backend:", backend.platform, "|", getattr(backend, "platform_version", None))
-            print("[diag] JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS", "<unset>"))
-
-            for name in [
-                "madrona_mjx._madrona_mjx_batch_renderer",
-                "madrona_mjx._madrona_mjx_visualizer",
-                "_madrona_mjx_batch_renderer",
-                "_madrona_mjx_visualizer",
-            ]:
-                spec = importlib.util.find_spec(name)
-                print("[diag]", name, "->", getattr(spec, "origin", None))
-
-            eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32, order="C")
-            cams = np.asarray(self._config.vision_config.enabled_cameras, dtype=np.int32, order="C")
-            print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype, "C_CONTIG:", eg.flags["C_CONTIGUOUS"])
-            print("[diag] enabled_cameras:", cams, "dtype:", cams.dtype, "C_CONTIG:", cams.flags["C_CONTIGUOUS"])
-            print("[diag] mj_model.ncam:", self._mj_model.ncam)
-            print("[diag] init data qpos:", tuple(data_for_init.qpos.shape), data_for_init.qpos.dtype)
-
         # Micro-repro does forward() before init; do the same.
         m = self._mjx_model
         data_for_init = jax.vmap(lambda d: mjx.forward(m, d))(data_for_init)
 
-        # Init renderer token
+        # Track device (should stay stable)
+        dev_before = _cuda_get_device()
         if debug:
-            print("[diag] calling renderer.init ...")
+            print("[diag] cudart device before init:", dev_before)
+            _cuda_sync_and_clear_error(debug=True, tag="before renderer.init")
+
         tok, _, _ = self.renderer.init(data_for_init, self._mj_model)
         jax.block_until_ready(tok)
-        ctx_after = _cu_ctx_get_current()
 
-        # ---------------- ADDED: cudart state after init ----------------
-        if debug:
-            _cuda_sync_and_clear_error(debug=True, tag="after renderer.init")
-            dev_after = _cuda_get_device()
-            print("[diag] cudart device after init :", dev_after)
-        else:
-            dev_after = _cuda_get_device()
+        # Clear sticky cudart error from init path
+        _cuda_sync_and_clear_error(debug=debug, tag="after renderer.init")
+
+        dev_after = _cuda_get_device()
         if dev_before >= 0 and dev_after >= 0 and (dev_after != dev_before):
             if debug:
                 print("[diag] renderer.init changed cudart device; restoring")
             _cuda_set_device(dev_before)
-            if debug:
-                _cuda_sync_and_clear_error(debug=True, tag="after restoring cudart device")
-        # ---------------------------------------------------------------
-
-        if ctx_before and ctx_after and (ctx_after != ctx_before):
-            if debug:
-                print("err: renderer.init changed CUDA ctx , need restoring previous ctx")
-            _cu_ctx_set_current(ctx_before)
+            _cuda_sync_and_clear_error(debug=debug, tag="after restoring cudart device")
 
         self._render_token = tok
 
         if debug:
             _, rgb, _ = self.renderer.render(tok, data_for_init, self._mj_model)
             jax.block_until_ready(rgb)
-            print("[diag] smoke render OK:", tuple(rgb.shape), rgb.dtype)
 
-            # ---------------- ADDED: cudart state after render -------------
+            # Clear sticky cudart error from render path
             _cuda_sync_and_clear_error(debug=True, tag="after renderer.render")
-            dev_after_render = _cuda_get_device()
-            print("[diag] cudart device after render:", dev_after_render)
-            
-            # ---- rgb sanity check (runs once; cheap) ----
+
+            # Save a debug PNG once if requested
+            # Set: PICK_ENV_SAVE_RGB=1 (optional PICK_ENV_SAVE_RGB_PATH=/workspace/debug_rgb.png)
+            save_rgb = os.environ.get("PICK_ENV_SAVE_RGB", "0") == "1"
+            if save_rgb and (not self._saved_debug_rgb):
+                try:
+                    import imageio.v2 as imageio  # type: ignore
+
+                    # rgb expected uint8 [B, C, H, W, 4] (most common)
+                    rgb_host = np.array(jax.device_get(rgb))
+                    if rgb_host.ndim == 5:
+                        # Take world 0, camera 0
+                        img = rgb_host[0, 0, :, :, :3]
+                    elif rgb_host.ndim == 4:
+                        # Maybe [C,H,W,4] or [H,W,4]
+                        if rgb_host.shape[0] in (1, 2, 3, 4) and rgb_host.shape[-1] == 4:
+                            img = rgb_host[0, :, :, :3]
+                        else:
+                            img = rgb_host[:, :, :3]
+                    else:
+                        raise ValueError(f"Unexpected rgb shape for saving: {rgb_host.shape}")
+
+                    out_path = os.environ.get("PICK_ENV_SAVE_RGB_PATH", "/workspace/debug_rgb.png")
+                    imageio.imwrite(out_path, img)
+                    print(f"[diag] wrote debug rgb to: {out_path}  shape={img.shape} dtype={img.dtype}")
+                    self._saved_debug_rgb = True
+                except Exception as e:
+                    print("[diag] WARN: failed to save debug rgb image:", type(e).__name__, e)
+
+            # Optional: simple stats (cheap)
             try:
-                # rgb expected uint8 [B, 2, H, W, 4] (or similar)
-                if rgb.dtype != jp.uint8:
-                    print("[diag][rgb] WARN: expected uint8, got", rgb.dtype)
-
-                # Convert to float32 in [0,1] and drop alpha for stats
                 rgb_f = rgb[..., :3].astype(jp.float32) / 255.0
-
-                # Force compute (still cheap at 32x2x64x64)
                 mn = jp.min(rgb_f)
                 mx = jp.max(rgb_f)
                 mean = jp.mean(rgb_f)
                 finite = jp.all(jp.isfinite(rgb_f))
-
                 mn, mx, mean, finite = jax.device_get((mn, mx, mean, finite))
                 print(f"[diag][rgb] range=[{mn:.6f}, {mx:.6f}] mean={mean:.6f} finite={bool(finite)}")
-
-                # Optional: per-camera mean if rgb is (B, C, H, W, 4)
-                if rgb.ndim == 5 and rgb.shape[1] >= 2:
-                    cam_means = jp.mean(rgb_f, axis=(0, 2, 3, 4))  # -> [C]
-                    cam_means = jax.device_get(cam_means)
-                    print("[diag][rgb] per-camera means:", cam_means.tolist())
-
-                # Optional: flag obvious “dead render” patterns
-                if not bool(finite):
-                    print("[diag][rgb] ERROR: non-finite values detected")
-                if mx <= 0.0 + 1e-6:
-                    print("[diag][rgb] WARN: image appears all-black (max ~0)")
-                if mn >= 1.0 - 1e-6:
-                    print("[diag][rgb] WARN: image appears all-white (min ~1)")
             except Exception as e:
-                print("[diag][rgb] WARN: rgb sanity check failed:", type(e).__name__, e)
-
-            # (optional) also restore after render
-            ctx_after_render = _cu_ctx_get_current()
-            if debug:
-                print(f"[diag] CUDA ctx after  renderer.render: 0x{ctx_after_render:x}")
-                print(f"[diag] CUDA ctx before renderer.render: 0x{ctx_before:x}")
-            if ctx_before and ctx_after_render and (ctx_after_render != ctx_before):
-                if debug:
-                    print("err: renderer.render changed CUDA ctx, need restoring previous ctx")
-                _cu_ctx_set_current(ctx_before)
+                print("[diag] WARN: rgb stats failed:", type(e).__name__, e)
 
     def reset(self, rng: jax.Array) -> State:
         if rng.ndim == 1:
@@ -539,7 +458,6 @@ class StereoPickCube(panda.PandaBase):
             rng_brightness = keys[:, 3, :]
             rng_robot = keys[:, 4, :]
 
-            # Sample box + target positions (both [B, 3])
             min_box = jp.array([-0.2, -0.2, 0.0], dtype=jp.float32)
             max_box = jp.array([0.2, 0.2, 0.0], dtype=jp.float32)
             min_tgt = jp.array([-0.2, -0.2, 0.2], dtype=jp.float32)
@@ -552,12 +470,10 @@ class StereoPickCube(panda.PandaBase):
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)
 
-            # Safe reference-like batched data (micro-repro style)
             data = self._make_batched_data_safe(B)
 
-            # IMPORTANT: init renderer token using safe data + forward (micro style)
+            # init renderer token using safe data + forward (micro style)
             self._maybe_init_renderer(data, debug=debug)
-            print('init renderer done')
 
             # Now apply per-world state and forward for the actual start state
             data = self._apply_per_world_initial_state(
@@ -566,9 +482,7 @@ class StereoPickCube(panda.PandaBase):
                 target_pos=target_pos,
                 rng_robot=rng_robot,
             )
-            print('per world done')
             data = jax.vmap(lambda d: mjx.forward(m, d))(data)
-            print('vmap done')
 
             # Brightness noise
             bmin, bmax = self._config.obs_noise.brightness
@@ -576,12 +490,10 @@ class StereoPickCube(panda.PandaBase):
                 lambda k: jax.random.uniform(k, (1,), minval=bmin, maxval=bmax)
             )(rng_brightness).reshape((B, 1, 1, 1))
 
-            print('brightness done')
             metrics = {
                 "out_of_bounds": jp.zeros((B,), dtype=jp.float32),
                 **{k: jp.zeros((B,), dtype=jp.float32) for k in self._config.reward_config.scales.keys()},
             }
-            print('metrics calculated')
             info = {
                 "rng": rng_main,
                 "target_pos": target_pos,
@@ -670,8 +582,6 @@ class StereoPickCube(panda.PandaBase):
         Expected (most common for stereo):
           - (B, 2, H, W, 4)  -> multiworld, two cameras
           - (2, H, W, 4)     -> single world, two cameras
-
-        We explicitly avoid if rgb.shape[0] == 2 because it breaks when B==2.
         """
         _, rgb, _ = self._render_fn(render_token, data_batched)
 
@@ -681,7 +591,6 @@ class StereoPickCube(panda.PandaBase):
             B = 1
 
         if rgb.ndim == 5:
-            # (B, C, H, W, 4)
             if rgb.shape[1] < 2:
                 raise ValueError(
                     f"Renderer returned rgb with {rgb.shape[1]} cameras, expected >=2 for stereo."
@@ -689,7 +598,6 @@ class StereoPickCube(panda.PandaBase):
             left = rgb[:, 0]
             right = rgb[:, 1]
         elif rgb.ndim == 4:
-            # Either (2, H, W, 4) for single-world stereo OR (B, H, W, 4) for mono.
             if rgb.shape[0] == 2 and B == 1:
                 left = rgb[0:1]
                 right = rgb[1:2]
@@ -718,10 +626,8 @@ class StereoPickCube(panda.PandaBase):
         return info, pixels
 
     def modify_model(self, mj_model: mujoco.MjModel):
-        # Expand floor size to non-zero so Madrona can render it
         mj_model.geom_size[mj_model.geom("floor").id, :2] = [5.0, 5.0]
 
-        # Make the finger pads white for increased visibility
         mesh_id = mj_model.mesh("finger_1").id
         geoms = [idx for idx, data_id in enumerate(mj_model.geom_dataid) if data_id == mesh_id]
         mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
