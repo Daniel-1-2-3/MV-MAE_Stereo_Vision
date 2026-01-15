@@ -169,8 +169,7 @@ class StereoPickCube(panda.PandaBase):
             for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
         ]
         self._floor_geom_id = self._mj_model.geom("floor").id
-        self._floor_clearance_margin = jp.float32(0.01)  # "touching floor" if within 1cm
-        self._hand_box_margin = jp.float32(0.05)         # "touching box" if within 5cm
+
         # ---------------------------------------------------------------------
         # 4) Create renderer from the FINAL mjx_model and mj_model (micro-repro style)
         # ---------------------------------------------------------------------
@@ -434,7 +433,7 @@ class StereoPickCube(panda.PandaBase):
         ctrl = state.data.ctrl + delta
         ctrl = jp.clip(ctrl, self._lowers, self._uppers)
 
-        data = self._physics_step(state.data, ctrl, self.n_substeps)
+        data = mjx_env.step(self._mjx_model, state.data, ctrl, self.n_substeps)
 
         info, raw_rewards = self._get_reward(data, state.info)
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in raw_rewards.items()}
@@ -460,39 +459,14 @@ class StereoPickCube(panda.PandaBase):
             metrics=state.metrics,
             info=info,
         )
-        
-    def _physics_step(self, data: mjx.Data, ctrl: jax.Array, n_substeps: int) -> mjx.Data:
-        """Steps physics for either batched [B,...] or unbatched [...] mjx.Data."""
-        m = self._mjx_model
-
-        def step_one(d_single: mjx.Data, c_single: jax.Array) -> mjx.Data:
-            # scan expects unbatched mjx.Data
-            def one_substep(d, _):
-                d = d.replace(ctrl=c_single)
-                d = mjx.step(m, d)
-                return d, ()
-            return jax.lax.scan(one_substep, d_single, (), length=n_substeps)[0]
-
-        # If batched, vmap over worlds
-        if data.qpos.ndim == 2:
-            return jax.vmap(step_one)(data, ctrl)
-        else:
-            # tolerate ctrl coming in as [1,nu]
-            if ctrl.ndim == 2:
-                ctrl = ctrl[0]
-            return step_one(data, ctrl)
 
     def _get_reward(self, data: mjx.Data, info: dict[str, Any]):
-        # NOTE: with batched MJX, these are (B, 3) when indexed by body id
-        box_pos = data.xpos[self._obj_body]          # (B, 3)
-        target_pos = info["target_pos"]              # (B, 3)
+        box_pos = data.xpos[self._obj_body]
+        target_pos = info["target_pos"]
 
-        # Use the hand geom centers as the gripper position (no PandaBase _hand_body needed)
-        pad_ids = jp.array(self._floor_hand_geom_ids[:2], dtype=jp.int32)  # left/right pads only
-        pad_pos = data.geom_xpos[:, pad_ids, :]                            # (B, 2, 3)
-        gripper_pos = jp.mean(pad_pos, axis=1)    
-        d_gripper_box = jp.linalg.norm(gripper_pos - box_pos, axis=-1)   # (B,)
-        d_box_target = jp.linalg.norm(box_pos - target_pos, axis=-1)     # (B,)
+        gripper_pos = data.xpos[self._hand_body]
+        d_gripper_box = jp.linalg.norm(gripper_pos - box_pos, axis=-1)
+        d_box_target = jp.linalg.norm(box_pos - target_pos, axis=-1)
 
         reached_box = jp.minimum(info["reached_box"] + (d_gripper_box < 0.05), 1.0)
         info = {**info, "reached_box": reached_box}
@@ -500,29 +474,15 @@ class StereoPickCube(panda.PandaBase):
         gripper_box = 1.0 - jp.tanh(5.0 * d_gripper_box)
         box_target = reached_box * (1.0 - jp.tanh(5.0 * d_box_target))
 
-        # ------------------------------------------------------------
-        # Distance-based floor + box collision (NO sensors)
-        # ------------------------------------------------------------
-        # data.geom_xpos is (B, ngeom, 3) for batched data
-        geom_xpos = data.geom_xpos
+        floor_coll = jp.zeros_like(gripper_box)
+        for sensor_id in self._floor_hand_found_sensor:
+            floor_coll = floor_coll + (
+                data.sensordata[self._mj_model.sensor_adr[sensor_id]] > 0
+            ).astype(jp.float32)
+        no_floor_collision = jp.where(floor_coll > 0, 0.0, 1.0)
 
-        # Floor reference z
-        floor_z = geom_xpos[:, self._floor_geom_id, 2]  # (B,)
-
-        # Hand geoms z positions
-        hand_geom_ids = jp.array(self._floor_hand_geom_ids, dtype=jp.int32)  # (Nh,)
-        hand_z = geom_xpos[:, hand_geom_ids, 2]  # (B, Nh)
-        min_hand_z = jp.min(hand_z, axis=1)      # (B,)
-
-        # Consider a "floor collision" if the lowest hand geom gets too close to the floor plane
-        floor_coll = (min_hand_z - floor_z) < self._floor_clearance_margin
-        no_floor_collision = jp.where(floor_coll, 0.0, 1.0).astype(jp.float32)
-
-        # Hand-box collision: any hand geom center within threshold of box center
-        hand_pos = geom_xpos[:, hand_geom_ids, :]                 # (B, Nh, 3)
-        dists = jp.linalg.norm(hand_pos - box_pos[:, None, :], axis=-1)  # (B, Nh)
-        hand_box = jp.any(dists < self._hand_box_margin, axis=1)          # (B,)
-        no_box_collision = jp.where(hand_box, 0.0, 1.0).astype(jp.float32)
+        hand_box = data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
+        no_box_collision = jp.where(hand_box, 0.0, 1.0)
 
         raw_rewards = dict(
             gripper_box=gripper_box,
@@ -541,7 +501,7 @@ class StereoPickCube(panda.PandaBase):
           - (B, 2, H, W, 4)  -> multiworld, two cameras
           - (2, H, W, 4)     -> single world, two cameras
 
-        We explicitly avoid `if rgb.shape[0] == 2` because it breaks when B==2.
+        We explicitly avoid if rgb.shape[0] == 2 because it breaks when B==2.
         """
         _, rgb, _ = self._render_fn(render_token, data_batched)
 
