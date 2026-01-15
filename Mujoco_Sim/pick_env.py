@@ -38,6 +38,39 @@ from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
 
+import ctypes
+from functools import lru_cache
+
+@lru_cache(None)
+def _cuda():
+    lib = ctypes.CDLL("libcuda.so.1")
+    # minimal driver API we need
+    lib.cuInit.argtypes = [ctypes.c_uint]
+    lib.cuInit.restype = ctypes.c_int
+
+    lib.cuCtxGetCurrent.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    lib.cuCtxGetCurrent.restype = ctypes.c_int
+
+    lib.cuCtxSetCurrent.argtypes = [ctypes.c_void_p]
+    lib.cuCtxSetCurrent.restype = ctypes.c_int
+
+    # initialize (harmless if already done)
+    lib.cuInit(0)
+    return lib
+
+def _cu_ctx_get_current() -> int:
+    ctx = ctypes.c_void_p()
+    rc = _cuda().cuCtxGetCurrent(ctypes.byref(ctx))
+    if rc != 0:
+        # if this fails, don't crash the program—just return "unknown"
+        return 0
+    return int(ctx.value or 0)
+
+def _cu_ctx_set_current(ctx_int: int) -> None:
+    if not ctx_int:
+        return
+    _cuda().cuCtxSetCurrent(ctypes.c_void_p(ctx_int))
+
 
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
@@ -239,11 +272,13 @@ class StereoPickCube(panda.PandaBase):
         # Base init state (float32)
         init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[:nq]  # (nq,)
         qpos = jp.broadcast_to(init_q0[None, :], (B, nq)).astype(jp.float32)
+        print('broadcast passed')
 
         qvel = jp.zeros((B, nv), dtype=jp.float32)
 
         ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
         ctrl = jp.broadcast_to(ctrl0[None, ...], (B,) + ctrl0.shape).astype(jp.float32)
+        print('second broadcast passed')
 
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
 
@@ -298,6 +333,7 @@ class StereoPickCube(panda.PandaBase):
             data_for_init = data_for_init.replace(qvel=jp.asarray(data_for_init.qvel, jp.float32))
         if data_for_init.ctrl.dtype != jp.float32:
             data_for_init = data_for_init.replace(ctrl=jp.asarray(data_for_init.ctrl, jp.float32))
+        ctx_before = _cu_ctx_get_current()
 
         B = int(data_for_init.qpos.shape[0]) if data_for_init.qpos.ndim >= 2 else 1
         if B != self.render_batch_size:
@@ -339,14 +375,28 @@ class StereoPickCube(panda.PandaBase):
             print("[diag] calling renderer.init ...")
         tok, _, _ = self.renderer.init(data_for_init, self._mj_model)
         jax.block_until_ready(tok)
+        ctx_after = _cu_ctx_get_current()
+        
+        if ctx_before and ctx_after and (ctx_after != ctx_before):
+            if debug:
+                print("err: renderer.init changed CUDA ctx , need restoring previous ctx")
+            _cu_ctx_set_current(ctx_before)
+        
         self._render_token = tok
-
+        
         if debug:
-            print("[diag] renderer.init OK; token:", getattr(tok, "shape", None), getattr(tok, "dtype", None))
-            # Smoke render once
             _, rgb, _ = self.renderer.render(tok, data_for_init, self._mj_model)
             jax.block_until_ready(rgb)
             print("[diag] smoke render OK:", tuple(rgb.shape), rgb.dtype)
+
+            # (optional) also restore after render
+            ctx_after_render = _cu_ctx_get_current()
+            if debug:
+                print(f"[diag] CUDA ctx after  renderer.render: 0x{ctx_after_render:x}")
+            if ctx_before and ctx_after_render and (ctx_after_render != ctx_before):
+                if debug:
+                    print("err: renderer.render changed CUDA ctx, need restoring previous ctx")
+                _cu_ctx_set_current(ctx_before)
 
     def reset(self, rng: jax.Array) -> State:
         if rng.ndim == 1:
