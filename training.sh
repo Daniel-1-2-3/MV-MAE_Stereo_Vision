@@ -19,6 +19,36 @@ module load apptainer/1.3.5 || module load apptainer
 unset PYTHONPATH
 unset PYTHONHOME
 
+# ---------------- Per-job cache isolation + reset ----------------
+# Use node-local scratch if available; otherwise fall back to /tmp.
+JOB_TMP="${SLURM_TMPDIR:-/tmp/$USER/slurm_$SLURM_JOB_ID}"
+mkdir -p "$JOB_TMP"
+
+# Put *all* caches in job-local dirs so nothing persists across runs
+export XDG_CACHE_HOME="$JOB_TMP/xdg_cache"
+export TMPDIR="$JOB_TMP/tmp"
+mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
+
+# JAX/XLA per-job compilation cache (prevents cross-job contamination)
+export JAX_COMPILATION_CACHE_DIR="$JOB_TMP/jax_cache"
+mkdir -p "$JAX_COMPILATION_CACHE_DIR"
+
+# CUDA per-job kernel cache (prevents stale/bad kernels persisting)
+export CUDA_CACHE_PATH="$JOB_TMP/cuda_cache"
+mkdir -p "$CUDA_CACHE_PATH"
+
+# Hard reset the per-job caches every run of this script
+rm -rf "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH" "$XDG_CACHE_HOME" "$TMPDIR"
+mkdir -p "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH" "$XDG_CACHE_HOME" "$TMPDIR"
+
+# Optional: also wipe global user caches (set CLEAN_GLOBAL_CACHE=1 when you want it)
+if [[ "${CLEAN_GLOBAL_CACHE:-0}" == "1" ]]; then
+  echo "=== WIPING GLOBAL USER CACHES (CLEAN_GLOBAL_CACHE=1) ==="
+  rm -rf ~/.cache/jax ~/.cache/xla ~/.cache/torch_extensions ~/.cache/mesa_shader_cache ~/.cache/glcache 2>/dev/null || true
+  rm -rf ~/.nv/ComputeCache 2>/dev/null || true
+  echo "======================================================="
+fi
+
 # --------------- Apptainer image ---------------
 IMG="$SLURM_SUBMIT_DIR/training.sif"
 if [[ ! -f "$IMG" ]]; then
@@ -40,6 +70,12 @@ export APPTAINERENV_PYTHONPATH="/workspace:/opt/src:/opt/src/MV_MAE_Implementati
 
 # ---- JAX backend selection (CUDA PJRT plugin) ----
 export APPTAINERENV_JAX_PLATFORMS="cuda,cpu"
+
+# ---------------- Pass cache isolation into container ----------------
+export APPTAINERENV_XDG_CACHE_HOME="$XDG_CACHE_HOME"
+export APPTAINERENV_TMPDIR="$TMPDIR"
+export APPTAINERENV_JAX_COMPILATION_CACHE_DIR="$JAX_COMPILATION_CACHE_DIR"
+export APPTAINERENV_CUDA_CACHE_PATH="$CUDA_CACHE_PATH"
 
 # ---------------- EGL / MuJoCo GL setup ----------------
 export APPTAINERENV_MUJOCO_GL=egl
@@ -86,6 +122,10 @@ BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
 
 echo "=== Host sanity ==="
+echo "JOB_TMP=$JOB_TMP"
+echo "XDG_CACHE_HOME=$XDG_CACHE_HOME"
+echo "JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR"
+echo "CUDA_CACHE_PATH=$CUDA_CACHE_PATH"
 echo "Host apptainer: $(command -v apptainer || true)"
 apptainer --version || true
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -104,6 +144,14 @@ apptainer exec --nv \
   bash -lc '
 set -euo pipefail
 . /opt/mvmae_venv/bin/activate
+
+# --- Ensure caches are job-local INSIDE container too ---
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/xdg_cache}"
+export TMPDIR="${TMPDIR:-/tmp}"
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/tmp/jax_cache}"
+export CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-/tmp/cuda_cache}"
+rm -rf "$XDG_CACHE_HOME" "$TMPDIR/jax-*" "$TMPDIR/xla-*" "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH" 2>/dev/null || true
+mkdir -p "$XDG_CACHE_HOME" "$TMPDIR" "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH"
 
 # --- Force container CUDA runtime libs to win over injected host libs ---
 export CUDA_HOME=/usr/local/cuda
@@ -124,28 +172,23 @@ export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 export PYTHONPATH="/opt/madrona_mjx/build:/workspace:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="/opt/madrona_mjx/build:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 
-# If you want maximum signal on a single failure, uncomment:
-# export CUDA_LAUNCH_BLOCKING=1
-
 echo "=== Container env (high signal) ==="
-echo "whoami=$(whoami)  pwd=$(pwd)"
-echo "python=$(command -v python)"
+echo "pwd=$(pwd)"
 python -V
+echo "XDG_CACHE_HOME=$XDG_CACHE_HOME"
+echo "TMPDIR=$TMPDIR"
+echo "JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR"
+echo "CUDA_CACHE_PATH=$CUDA_CACHE_PATH"
 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 echo "LD_PRELOAD=$LD_PRELOAD"
 echo "PYTHONPATH=$PYTHONPATH"
 echo "XLA_FLAGS=$XLA_FLAGS"
 echo "JAX_PLATFORMS=$JAX_PLATFORMS"
-echo "CUDA_HOME=$CUDA_HOME"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
-echo "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-<unset>}"
 echo "=================================="
 
 echo "=== Driver/GPU (inside container) ==="
-if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi -L || true
-  nvidia-smi || true
-fi
+command -v nvidia-smi >/dev/null 2>&1 && (nvidia-smi -L || true) && (nvidia-smi || true)
 command -v nvcc >/dev/null 2>&1 && nvcc --version || true
 echo "===================================="
 
@@ -157,11 +200,8 @@ print("jax   :", jax.__version__)
 print("jaxlib:", jaxlib.__version__)
 print("JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS"))
 print("devices:", jax.devices())
-try:
-    backend = jax.lib.xla_bridge.get_backend()
-    print("backend:", backend.platform, "|", getattr(backend, "platform_version", None))
-except Exception as e:
-    print("backend: <failed>", e)
+backend = jax.lib.xla_bridge.get_backend()
+print("backend:", backend.platform, "|", getattr(backend, "platform_version", None))
 PY
 echo "===================================="
 
@@ -182,7 +222,6 @@ PY
 echo "====================================="
 
 echo "=== Madrona extension resolution (must be .so) ==="
-# Remove any potential shadowing from the bind-mounted project
 rm -f /workspace/_madrona_mjx_batch_renderer.py /workspace/_madrona_mjx_visualizer.py
 rm -rf /workspace/__pycache__ || true
 python - <<'"'"'PY'"'"'
@@ -195,7 +234,7 @@ for n in names:
 PY
 echo "=============================================="
 
-echo "=== ldd (critical: libcuda/libcudart/libnvrtc/libnvjitlink paths) ==="
+echo "=== ldd (critical CUDA libs) ==="
 for so in /opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so \
           /opt/madrona_mjx/build/_madrona_mjx_visualizer*.so \
           /opt/madrona_mjx/build/libmadmjx_mgr.so; do
@@ -203,9 +242,9 @@ for so in /opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so \
   echo "----- $so -----"
   ldd "$so" | egrep -i "libcuda\.so|libcudart\.so|libnvrtc\.so|libnvjitlink\.so" || true
 done
-echo "=============================================================="
+echo "================================"
 
-echo "=== Minimal GPU sanity (torch optional) ==="
+echo "=== Minimal GPU sanity ==="
 python - <<'"'"'PY'"'"'
 import jax, jax.numpy as jnp
 a = jnp.ones((512,512), dtype=jnp.float32)
@@ -213,7 +252,6 @@ a = jnp.ones((512,512), dtype=jnp.float32)
 print("[jax] matmul ok")
 try:
     import torch
-    print("[torch] version:", torch.__version__)
     print("[torch] cuda:", torch.cuda.is_available())
     if torch.cuda.is_available():
         x = torch.randn(512, 512, device="cuda")
@@ -223,10 +261,10 @@ try:
 except Exception as e:
     print("[torch] skipped/failed:", type(e).__name__, e)
 PY
-echo "==========================================="
+echo "=========================="
 
-echo "=== smalltest-REPRO: Madrona init on trivial XML WITH CAMERAS + 1DoF ==="
-python - <<'PY'
+echo "=== smalltest-REPRO (Madrona init/render) ==="
+python - <<'"'"'PY'"'"'
 import jax
 import jax.numpy as jnp
 import mujoco
@@ -240,71 +278,36 @@ xml = r"""
   <worldbody>
     <light name="sun" pos="0 0 1" dir="0 0 -1"/>
     <geom name="floor" type="plane" size="2 2 0.1" rgba="0.3 0.3 0.3 1"/>
-
-    <!-- 1 DoF body so MJX forward() is supported -->
     <body name="b" pos="0 0 0.20">
       <joint name="hinge" type="hinge" axis="0 0 1" limited="false"/>
       <geom type="sphere" size="0.05" rgba="0.8 0.2 0.2 1"/>
     </body>
-
-    <!-- Two fixed cameras -->
     <camera name="cam0" pos="-0.15 -0.35 0.20" xyaxes="1 0 0 0 0 1" fovy="60"/>
     <camera name="cam1" pos=" 0.15 -0.35 0.20" xyaxes="1 0 0 0 0 1" fovy="60"/>
   </worldbody>
 </mujoco>
 """
-
 mjm = mujoco.MjModel.from_xml_string(xml)
-print("[smalltest] nq/nv:", mjm.nq, mjm.nv, "ncam:", mjm.ncam)
-
 m = mjx.put_model(mjm)
-
 B = 1
-# Safe batched data: make B independent Data objects
 data = jax.vmap(lambda _: mjx.make_data(m))(jnp.arange(B))
-
-# Put something non-zero in qpos to ensure paths execute
 data = data.replace(qpos=data.qpos.at[:, 0].set(jnp.array(0.25, dtype=jnp.float32)))
-
 data = jax.vmap(lambda d: mjx.forward(m, d))(data)
 
-enabled_geom_groups = np.asarray([0, 1, 2], dtype=np.int32, order="C")
-enabled_cameras = np.asarray([0, 1], dtype=np.int32, order="C")
-
 r = BatchRenderer(
-    m=m,
-    gpu_id=0,
-    num_worlds=B,
-    batch_render_view_width=64,
-    batch_render_view_height=64,
-    enabled_geom_groups=enabled_geom_groups,
-    enabled_cameras=enabled_cameras,
-    add_cam_debug_geo=False,
-    use_rasterizer=False,  # raytracer
-    viz_gpu_hdls=None,
+    m=m, gpu_id=0, num_worlds=B,
+    batch_render_view_width=64, batch_render_view_height=64,
+    enabled_geom_groups=np.asarray([0,1,2], np.int32, order="C"),
+    enabled_cameras=np.asarray([0,1], np.int32, order="C"),
+    add_cam_debug_geo=False, use_rasterizer=False, viz_gpu_hdls=None,
 )
-
-print("[smalltest] about to init")
 tok, _, _ = r.init(data, mjm)
 jax.block_until_ready(tok)
-print("[smalltest] init ok")
-
-print("[smalltest] about to render")
 _, rgb, _ = r.render(tok, data, mjm)
 jax.block_until_ready(rgb)
 print("[smalltest] render ok:", rgb.shape, rgb.dtype)
-rgb_processed = rgb[..., :3].astype(jnp.float32) / 255.0
-print("[smalltest] ops after render ok: ", rgb_processed.shape)
 PY
-echo "======================================================================"
-
-
-echo "=== XLA dump (ONLY enable for the actual crash path) ==="
-# Keep disabled by default because it can spam files. Uncomment for one run if needed.
-# export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_dump_to=/tmp/xla_dump --xla_dump_hlo_as_text"
-# mkdir -p /tmp/xla_dump || true
-# echo "XLA dump dir: /tmp/xla_dump"
-echo "========================================================"
+echo "==================================="
 
 echo "=== Run training ==="
 stdbuf -oL -eL python -u execute.py 2>&1
