@@ -72,6 +72,59 @@ def _cu_ctx_set_current(ctx_int: int) -> None:
     _cuda().cuCtxSetCurrent(ctypes.c_void_p(ctx_int))
 
 
+# ===================== ADDED: cudart detection helpers =====================
+
+@lru_cache(None)
+def _cudart():
+    # try common names
+    last_err = None
+    for name in ["libcudart.so.12", "libcudart.so"]:
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except OSError as e:
+            last_err = e
+            lib = None
+    if lib is None:
+        raise RuntimeError(f"Could not load libcudart (tried libcudart.so.12, libcudart.so). Last error: {last_err}")
+
+    lib.cudaGetDevice.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    lib.cudaGetDevice.restype = ctypes.c_int
+
+    lib.cudaSetDevice.argtypes = [ctypes.c_int]
+    lib.cudaSetDevice.restype = ctypes.c_int
+
+    lib.cudaGetLastError.argtypes = []
+    lib.cudaGetLastError.restype = ctypes.c_int
+
+    lib.cudaGetErrorString.argtypes = [ctypes.c_int]
+    lib.cudaGetErrorString.restype = ctypes.c_char_p
+
+    lib.cudaDeviceSynchronize.argtypes = []
+    lib.cudaDeviceSynchronize.restype = ctypes.c_int
+
+    return lib
+
+def _cuda_get_device() -> int:
+    d = ctypes.c_int(-1)
+    rc = _cudart().cudaGetDevice(ctypes.byref(d))
+    return int(d.value) if rc == 0 else -1
+
+def _cuda_set_device(d: int) -> None:
+    _cudart().cudaSetDevice(int(d))
+
+def _cuda_sync_and_clear_error(debug: bool = False, tag: str = "") -> None:
+    lib = _cudart()
+    rc_sync = lib.cudaDeviceSynchronize()
+    err = lib.cudaGetLastError()  # clears per-thread error slot
+    if debug:
+        msg = lib.cudaGetErrorString(err)
+        msg_s = msg.decode("utf-8", "replace") if msg is not None else "<null>"
+        print(f"[diag] {tag} cudaDeviceSynchronize rc={rc_sync} | cudaGetLastError={err} ({msg_s})")
+
+# ==========================================================================
+
+
 def _add_assets(assets: dict[str, bytes], root: Path) -> dict[str, bytes]:
     used_basenames = {Path(k).name for k in assets.keys()}
 
@@ -335,6 +388,13 @@ class StereoPickCube(panda.PandaBase):
             data_for_init = data_for_init.replace(ctrl=jp.asarray(data_for_init.ctrl, jp.float32))
         ctx_before = _cu_ctx_get_current()
 
+        # ---------------- ADDED: cudart state before init ----------------
+        dev_before = _cuda_get_device()
+        if debug:
+            print("[diag] cudart device before init:", dev_before)
+            _cuda_sync_and_clear_error(debug=True, tag="before renderer.init")
+        # ---------------------------------------------------------------
+
         B = int(data_for_init.qpos.shape[0]) if data_for_init.qpos.ndim >= 2 else 1
         if B != self.render_batch_size:
             # Renderer is built for num_worlds=self.render_batch_size.
@@ -376,18 +436,39 @@ class StereoPickCube(panda.PandaBase):
         tok, _, _ = self.renderer.init(data_for_init, self._mj_model)
         jax.block_until_ready(tok)
         ctx_after = _cu_ctx_get_current()
-        
+
+        # ---------------- ADDED: cudart state after init ----------------
+        if debug:
+            _cuda_sync_and_clear_error(debug=True, tag="after renderer.init")
+            dev_after = _cuda_get_device()
+            print("[diag] cudart device after init :", dev_after)
+        else:
+            dev_after = _cuda_get_device()
+        if dev_before >= 0 and dev_after >= 0 and (dev_after != dev_before):
+            if debug:
+                print("[diag] renderer.init changed cudart device; restoring")
+            _cuda_set_device(dev_before)
+            if debug:
+                _cuda_sync_and_clear_error(debug=True, tag="after restoring cudart device")
+        # ---------------------------------------------------------------
+
         if ctx_before and ctx_after and (ctx_after != ctx_before):
             if debug:
                 print("err: renderer.init changed CUDA ctx , need restoring previous ctx")
             _cu_ctx_set_current(ctx_before)
-        
+
         self._render_token = tok
-        
+
         if debug:
             _, rgb, _ = self.renderer.render(tok, data_for_init, self._mj_model)
             jax.block_until_ready(rgb)
             print("[diag] smoke render OK:", tuple(rgb.shape), rgb.dtype)
+
+            # ---------------- ADDED: cudart state after render -------------
+            _cuda_sync_and_clear_error(debug=True, tag="after renderer.render")
+            dev_after_render = _cuda_get_device()
+            print("[diag] cudart device after render:", dev_after_render)
+            # ---------------------------------------------------------------
 
             # (optional) also restore after render
             ctx_after_render = _cu_ctx_get_current()
