@@ -89,6 +89,9 @@ echo "=== Host sanity ==="
 echo "Host apptainer: $(command -v apptainer || true)"
 apptainer --version || true
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || true
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
+echo "Host CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "Host SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-<unset>}"
 echo "==================="
 
 # ---------------- Run (single exec) ----------------
@@ -106,7 +109,7 @@ export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda ${XLA_FLAGS:-}"
 export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="/usr/local/cuda/lib64/libnvJitLink.so.12:${LD_PRELOAD:-}"
 
-# Training/runtime knobs (keep minimal)
+# Training/runtime knobs
 export PYTHONUNBUFFERED=1
 export JAX_TRACEBACK_FILTERING=off
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -119,20 +122,44 @@ export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda,cpu}"
 export PYTHONPATH="/opt/madrona_mjx/build:/workspace:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="/opt/madrona_mjx/build:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 
-echo "=== Container runtime env (for loader) ==="
+echo "=== Container env (high signal) ==="
+echo "whoami=$(whoami)  pwd=$(pwd)"
+echo "python=$(command -v python)"
+python -V
 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 echo "LD_PRELOAD=$LD_PRELOAD"
 echo "PYTHONPATH=$PYTHONPATH"
 echo "XLA_FLAGS=$XLA_FLAGS"
 echo "JAX_PLATFORMS=$JAX_PLATFORMS"
-echo "========================================="
+echo "CUDA_HOME=$CUDA_HOME"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-<unset>}"
+echo "=================================="
+
+echo "=== System / driver info (inside container) ==="
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || true
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
+echo "--- /usr/local/cuda/version.json (if exists) ---"
+cat /usr/local/cuda/version.json 2>/dev/null || true
+echo "--- nvcc --version (if exists) ---"
+command -v nvcc >/dev/null 2>&1 && nvcc --version || true
+echo "==============================================="
+
+echo "=== Dynamic loader cache (GPU libs) ==="
+ldconfig -p | egrep -i "libcuda\.so|libcudart\.so|libnvrtc\.so|libnvjitlink\.so|libcublas\.so|libcusolver\.so|libcudnn\.so|libcusparse\.so|libcurand\.so" || true
+echo "======================================"
+
+echo "=== pip freeze (focused) ==="
+python -m pip show jax jaxlib jax-cuda12-plugin jax-cuda12-pjrt nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-nvjitlink-cu12 nvidia-cudnn-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-curand-cu12 nvidia-cufft-cu12 2>/dev/null || true
+echo "========================================"
 
 echo "=== Version sanity (mujoco / jax / jaxlib) ==="
 python - <<'"'"'PY'"'"'
-import mujoco, jax, jaxlib
+import os, mujoco, jax, jaxlib
 print("MuJoCo:", mujoco.__version__)
 print("jax   :", jax.__version__)
 print("jaxlib:", jaxlib.__version__)
+print("JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS"))
 print("devices:", jax.devices())
 try:
     backend = jax.lib.xla_bridge.get_backend()
@@ -142,63 +169,109 @@ except Exception as e:
 PY
 echo "============================================="
 
-echo "=== nvJitLink resolution + symbol (common Madrona failure) ==="
-ldconfig -p | grep -i nvjitlink || true
+echo "=== nvJitLink resolution + symbol check ==="
 python - <<'"'"'PY'"'"'
-import ctypes
-p = "/usr/local/cuda/lib64/libnvJitLink.so.12"
+import ctypes, os, subprocess, sys
+def sh(cmd):
+    try:
+        return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
+    except Exception as e:
+        return f"<failed {cmd}: {e}>"
+print("ldconfig nvjitlink:")
+print(sh(["bash","-lc","ldconfig -p | grep -i nvjitlink || true"]))
+paths = [
+    "/usr/local/cuda/lib64/libnvJitLink.so.12",
+    "/usr/local/cuda/targets/x86_64-linux/lib/libnvJitLink.so.12",
+]
+p = next((x for x in paths if os.path.exists(x)), None)
+print("using:", p)
+if not p:
+    raise SystemExit("FATAL: libnvJitLink.so.12 not found in expected locations")
 lib = ctypes.CDLL(p)
-print("loaded:", p)
-# name varies by CUDA minor; keep the one you used + show a couple common ones
 for sym in ["__nvJitLinkCreate_12_5", "__nvJitLinkCreate_12_4", "__nvJitLinkCreate_12_3"]:
     print(sym, "->", hasattr(lib, sym))
 PY
-echo "=============================================="
+echo "========================================="
 
 # Hard delete any shadowing python files from /workspace (host bind)
 rm -f /workspace/_madrona_mjx_batch_renderer.py /workspace/_madrona_mjx_visualizer.py
 rm -rf /workspace/__pycache__ || true
 
-echo "=== Where the Madrona extensions resolve (must be .so) ==="
+echo "=== Where Madrona resolves + file hashes (prove exact .so) ==="
 python - <<'"'"'PY'"'"'
-import importlib.util
-for name in ["_madrona_mjx_batch_renderer", "_madrona_mjx_visualizer",
-             "madrona_mjx._madrona_mjx_batch_renderer", "madrona_mjx._madrona_mjx_visualizer"]:
+import importlib.util, hashlib, os
+def sha256(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1024*1024), b""):
+            h.update(b)
+    return h.hexdigest()
+mods = ["_madrona_mjx_batch_renderer", "_madrona_mjx_visualizer",
+        "madrona_mjx._madrona_mjx_batch_renderer", "madrona_mjx._madrona_mjx_visualizer"]
+for name in mods:
     spec = importlib.util.find_spec(name)
-    print(name, "->", getattr(spec, "origin", None))
+    origin = getattr(spec, "origin", None)
+    print(name, "->", origin)
+    if origin and os.path.exists(origin) and origin.endswith(".so"):
+        print("  sha256:", sha256(origin))
 PY
-echo "========================================================="
+echo "=============================================================="
 
-echo "=== Link check: what CUDA libs the Madrona .so will load ==="
-ls -lah /opt/madrona_mjx/build/_madrona_mjx_*.so 2>/dev/null || true
-for so in /opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so /opt/madrona_mjx/build/_madrona_mjx_visualizer*.so; do
+echo "=== Link check: full ldd (unfiltered, for exact paths) ==="
+for so in /opt/madrona_mjx/build/_madrona_mjx_batch_renderer*.so /opt/madrona_mjx/build/_madrona_mjx_visualizer*.so /opt/madrona_mjx/build/libmadmjx_mgr.so; do
   [[ -e "$so" ]] || continue
-  echo "--- ldd $so (filtered) ---"
-  ldd "$so" | egrep -i "cuda|cudart|nvjitlink|cublas|cusolver|cudnn|curand|cusparse|stdc\+\+" || true
+  echo "----- ldd $so -----"
+  ldd "$so" || true
 done
-echo "--- ldd libmadmjx_mgr.so (filtered) ---"
-ldd /opt/madrona_mjx/build/libmadmjx_mgr.so | egrep -i "cuda|cudart|nvjitlink|cublas|cusolver|cudnn|curand|cusparse|stdc\+\+" || true
-echo "==========================================================="
+echo "========================================================"
 
-echo "=== Runtime loader trace (import-only, filtered) ==="
-LD_DEBUG=libs python - <<'"'"'PY'"'"' 2>&1 | egrep -i "(_madrona_mjx|libcuda|libcudart|libnvjitlink|libcublas|libcusolver|libcudnn|libcusparse|libcurand)" || true
+echo "=== Runtime loader trace (import-only) ==="
+# Full trace is huge; we also emit a filtered summary you can read quickly.
+LD_DEBUG=libs python - <<'"'"'PY'"'"' 2>&1 | tee /tmp/ld_debug_madrona.txt >/dev/null || true
 import _madrona_mjx_batch_renderer as br
 print("import ok:", br.__file__)
 PY
-echo "======================================================"
+echo "--- LD_DEBUG filtered summary ---"
+egrep -i "(_madrona_mjx|libcuda|libcudart|libnvjitlink|libnvrtc|libcublas|libcusolver|libcudnn|libcusparse|libcurand)" /tmp/ld_debug_madrona.txt || true
+echo "================================="
 
-echo "=== Minimal JAX GPU op (separate from Madrona) ==="
+echo "=== Process map after import (shows actual loaded .so paths) ==="
 python - <<'"'"'PY'"'"'
+import _madrona_mjx_batch_renderer  # force load
+with open("/proc/self/maps","r") as f:
+    lines = [ln.strip() for ln in f if ".so" in ln and ("cuda" in ln.lower() or "nvjit" in ln.lower() or "nvrtc" in ln.lower() or "madrona" in ln.lower())]
+print("\n".join(lines))
+PY
+echo "=============================================================="
+
+echo "=== Minimal GPU sanity: torch + jax ==="
+python - <<'"'"'PY'"'"'
+import torch
+print("[torch] version:", torch.__version__)
+print("[torch] cuda available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("[torch] gpu:", torch.cuda.get_device_name(0))
+    x = torch.randn(1024, 1024, device="cuda")
+    y = x @ x
+    torch.cuda.synchronize()
+    print("[torch] matmul ok")
 import jax, jax.numpy as jnp
 a = jnp.ones((1024,1024), dtype=jnp.float32)
 b = (a @ a).block_until_ready()
 dev_attr = getattr(b, "device", None)
 dev = dev_attr() if callable(dev_attr) else dev_attr
-print("jax matmul ok on:", dev)
+print("[jax] matmul ok on:", dev)
 PY
-echo "==============================================="
+echo "======================================"
 
-echo "=== Run training (crash should have enough context above) ==="
+echo "=== JAX compilation logging (only for crashes around custom calls) ==="
+# These can help if XLA is generating malformed backend_config for a custom call.
+export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_dump_to=/tmp/xla_dump --xla_dump_hlo_as_text --xla_dump_disable_metadata"
+mkdir -p /tmp/xla_dump || true
+echo "XLA dump dir: /tmp/xla_dump"
+echo "==============================================================="
+
+echo "=== Run training ==="
 stdbuf -oL -eL python -u execute.py 2>&1
 echo "Training completed."
 '
