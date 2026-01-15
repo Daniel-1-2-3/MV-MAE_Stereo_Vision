@@ -225,9 +225,8 @@ except Exception as e:
 PY
 echo "==========================================="
 
-echo "=== MICRO-REPRO: Madrona init on trivial XML WITH CAMERAS ==="
+echo "=== MICRO-REPRO: Madrona init on trivial XML WITH CAMERAS + 1DoF ==="
 python - <<'PY'
-import os
 import jax
 import jax.numpy as jnp
 import mujoco
@@ -235,14 +234,16 @@ from mujoco import mjx
 from madrona_mjx.renderer import BatchRenderer
 import numpy as np
 
-# Minimal scene with 2 cameras (stereo-ish), light, and simple geometry.
 xml = r"""
 <mujoco model="mini">
   <option timestep="0.01"/>
   <worldbody>
     <light name="sun" pos="0 0 1" dir="0 0 -1"/>
     <geom name="floor" type="plane" size="2 2 0.1" rgba="0.3 0.3 0.3 1"/>
-    <body name="b" pos="0 0 0.05">
+
+    <!-- 1 DoF body so MJX forward() is supported -->
+    <body name="b" pos="0 0 0.20">
+      <joint name="hinge" type="hinge" axis="0 0 1" limited="false"/>
       <geom type="sphere" size="0.05" rgba="0.8 0.2 0.2 1"/>
     </body>
 
@@ -254,13 +255,17 @@ xml = r"""
 """
 
 mjm = mujoco.MjModel.from_xml_string(xml)
-print("[micro] mjm.ncam:", mjm.ncam, "cam names:", [mujoco.mj_id2name(mjm, mujoco.mjtObj.mjOBJ_CAMERA, i) for i in range(mjm.ncam)])
+print("[micro] nq/nv:", mjm.nq, mjm.nv, "ncam:", mjm.ncam)
 
 m = mjx.put_model(mjm)
 
 B = 1
-# SAFEST batched data construction (no broadcast-tree tricks)
+# Safe batched data: make B independent Data objects
 data = jax.vmap(lambda _: mjx.make_data(m))(jnp.arange(B))
+
+# Put something non-zero in qpos to ensure paths execute
+data = data.replace(qpos=data.qpos.at[:, 0].set(jnp.array(0.25, dtype=jnp.float32)))
+
 data = jax.vmap(lambda d: mjx.forward(m, d))(data)
 
 enabled_geom_groups = np.asarray([0, 1, 2], dtype=np.int32, order="C")
@@ -273,23 +278,24 @@ r = BatchRenderer(
     batch_render_view_width=64,
     batch_render_view_height=64,
     enabled_geom_groups=enabled_geom_groups,
-    enabled_cameras=enabled_cameras,   # <- explicit
+    enabled_cameras=enabled_cameras,
     add_cam_debug_geo=False,
-    use_rasterizer=False,              # <- raytracer path
+    use_rasterizer=False,  # raytracer
     viz_gpu_hdls=None,
 )
 
-print("[micro] about to init (raytracer)")
+print("[micro] about to init")
 tok, _, _ = r.init(data, mjm)
 jax.block_until_ready(tok)
 print("[micro] init ok")
 
-# Smoke render (forces the custom call to actually run)
+print("[micro] about to render")
 _, rgb, _ = r.render(tok, data, mjm)
 jax.block_until_ready(rgb)
 print("[micro] render ok:", rgb.shape, rgb.dtype)
 PY
 echo "======================================================================"
+
 
 echo "=== XLA dump (ONLY enable for the actual crash path) ==="
 # Keep disabled by default because it can spam files. Uncomment for one run if needed.
