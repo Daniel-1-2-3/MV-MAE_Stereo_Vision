@@ -26,7 +26,7 @@ if [[ "${EXCLUDE_LAST_NODE:-1}" == "1" && -f "$LAST_NODE_FILE" ]]; then
   LAST_NODE="$(cat "$LAST_NODE_FILE" 2>/dev/null || true)"
   if [[ -n "${LAST_NODE:-}" ]]; then
     echo "NOTE: last node was: $LAST_NODE"
-    echo "      Submit next time with: sbatch --exclude=$LAST_NODE $0"
+    echo "      If you want to avoid it, submit with: sbatch --exclude=$LAST_NODE $0"
   fi
 fi
 
@@ -40,15 +40,19 @@ export JAX_COMPILATION_CACHE_DIR="$JOB_TMP/jax_cache"
 export CUDA_CACHE_PATH="$JOB_TMP/cuda_cache"
 export CUDA_CACHE_MAXSIZE="${CUDA_CACHE_MAXSIZE:-2147483648}"  # 2GB
 
+mkdir -p "$XDG_CACHE_HOME" "$TMPDIR" "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH"
+
 # Hard reset job-local caches every run (prevents cross-run contamination)
 rm -rf "$XDG_CACHE_HOME" "$TMPDIR" "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH" || true
 mkdir -p "$XDG_CACHE_HOME" "$TMPDIR" "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH"
 
 # Optional: also wipe global user caches (set CLEAN_GLOBAL_CACHE=1 when you want it)
 if [[ "${CLEAN_GLOBAL_CACHE:-0}" == "1" ]]; then
+  echo "=== WIPING GLOBAL USER CACHES (CLEAN_GLOBAL_CACHE=1) ==="
   rm -rf ~/.cache/jax ~/.cache/xla ~/.cache/torch_extensions \
          ~/.cache/mesa_shader_cache ~/.cache/glcache 2>/dev/null || true
   rm -rf ~/.nv/ComputeCache 2>/dev/null || true
+  echo "======================================================="
 fi
 
 # Optional: disable CUDA caching entirely (debug only; slower compiles)
@@ -67,7 +71,8 @@ HOST_PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 WORKDIR_IN_CONTAINER="/workspace"
 
 if [[ ! -f "$HOST_PROJECT_ROOT/execute.py" ]]; then
-  echo "FATAL: execute.py not found at: $HOST_PROJECT_ROOT/execute.py"
+  echo "FATAL: execute.py not found at:"
+  echo "  $HOST_PROJECT_ROOT/execute.py"
   exit 10
 fi
 
@@ -128,7 +133,26 @@ BIND_FLAGS+=( --bind "$NV_EGL_DIR:$NV_EGL_DIR" )
 BIND_FLAGS+=( --bind "$GLVND_DIR:$GLVND_DIR" )
 BIND_FLAGS+=( --bind "$HOST_MJP_DEPS:$MJP_DEPS_IN_CONTAINER" )
 BIND_FLAGS+=( --bind "$HOST_PROJECT_ROOT:$WORKDIR_IN_CONTAINER" )
+# Also bind job tmp so container sees the same job-local cache dirs
 BIND_FLAGS+=( --bind "$JOB_TMP:$JOB_TMP" )
+
+echo "=== Host sanity ==="
+echo "SLURM_JOB_ID=$SLURM_JOB_ID"
+echo "NODELIST=${SLURM_JOB_NODELIST:-<unset>}"
+echo "JOB_TMP=$JOB_TMP"
+echo "XDG_CACHE_HOME=$XDG_CACHE_HOME"
+echo "JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR"
+echo "CUDA_CACHE_PATH=$CUDA_CACHE_PATH"
+echo "CUDA_CACHE_DISABLE=${CUDA_CACHE_DISABLE:-0}"
+echo "Host apptainer: $(command -v apptainer || true)"
+apptainer --version || true
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi -L || true
+  nvidia-smi || true
+fi
+echo "Host CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "Host SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-<unset>}"
+echo "==================="
 
 # ---------------- Run (single exec) ----------------
 apptainer exec --nv \
@@ -158,10 +182,14 @@ rm -rf "$XDG_CACHE_HOME" "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH" \
        "$TMPDIR/jax-*" "$TMPDIR/xla-*" 2>/dev/null || true
 mkdir -p "$XDG_CACHE_HOME" "$TMPDIR" "$JAX_COMPILATION_CACHE_DIR" "$CUDA_CACHE_PATH"
 
-# Optional: attempt to kill leftover *your-user* processes (off by default)
+# Optional: attempt to kill leftover *your-user* GPU processes on this node
 if [[ "${KILL_LEFTOVERS:-0}" == "1" ]]; then
+  echo "=== Attempting to kill leftover GPU processes for user $(whoami) ==="
+  command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || true
+  # kill any python processes owned by you (safe-ish; only affects this job user)
   pkill -u "$(whoami)" -f "python" 2>/dev/null || true
   sleep 1
+  echo "=============================================================="
 fi
 
 # --- Force container CUDA runtime libs to win over injected host libs ---
@@ -189,11 +217,40 @@ if [[ "${NO_REUSE_DEBUG:-0}" == "1" ]]; then
   export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_disable_async_compilation=true ${XLA_FLAGS:-}"
 fi
 
-# The only print you asked to keep:
+echo "=== Container env (high signal) ==="
 echo "node=$(hostname)"
+echo "pwd=$(pwd)"
+python -V
+echo "XDG_CACHE_HOME=$XDG_CACHE_HOME"
+echo "TMPDIR=$TMPDIR"
+echo "JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR"
+echo "CUDA_CACHE_PATH=$CUDA_CACHE_PATH"
+echo "CUDA_CACHE_DISABLE=$CUDA_CACHE_DISABLE"
+echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+echo "LD_PRELOAD=$LD_PRELOAD"
+echo "PYTHONPATH=$PYTHONPATH"
+echo "XLA_FLAGS=$XLA_FLAGS"
+echo "JAX_PLATFORMS=$JAX_PLATFORMS"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "=================================="
 
-# Run training
+echo "=== Driver/GPU (inside container) ==="
+command -v nvidia-smi >/dev/null 2>&1 && (nvidia-smi -L || true) && (nvidia-smi || true)
+command -v nvcc >/dev/null 2>&1 && nvcc --version || true
+echo "===================================="
+
+echo "=== Minimal GPU sanity ==="
+python - <<'"'"'PY'"'"'
+import jax, jax.numpy as jnp
+a = jnp.ones((512,512), dtype=jnp.float32)
+(a @ a).block_until_ready()
+print("[jax] matmul ok")
+PY
+echo "=========================="
+
+echo "=== Run training ==="
 stdbuf -oL -eL python -u execute.py 2>&1
+echo "Training completed."
 '
 
 echo "Finished at $(date)"
