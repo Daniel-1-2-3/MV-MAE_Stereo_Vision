@@ -30,12 +30,10 @@ import mujoco
 import numpy as np
 from ml_collections import config_dict
 from mujoco import mjx
-from mujoco.mjx._src import math
 
 from Custom_Mujoco_Playground._src import mjx_env
 from Custom_Mujoco_Playground._src.mjx_env import State
 from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda
-from Custom_Mujoco_Playground._src.manipulation.franka_emika_panda import panda_kinematics
 
 # Madrona MJX renderer
 from madrona_mjx.renderer import BatchRenderer  # type: ignore
@@ -63,8 +61,11 @@ def default_vision_config() -> config_dict.ConfigDict:
         render_batch_size=1024,
         render_width=64,
         render_height=64,
-        use_rasterizer=False,
+        use_rasterizer=False,  # False => raytracer in madrona_mjx
         enabled_geom_groups=[0, 1, 2],
+        # IMPORTANT: make cameras explicit like the micro-repro.
+        # If your XML has two cameras, they are usually indices 0 and 1.
+        enabled_cameras=[0, 1],
     )
 
 
@@ -138,61 +139,86 @@ class StereoPickCube(panda.PandaBase):
         )
         self._model_assets = _add_assets(self._model_assets, menagerie_dir)
 
-        mj_model = self.modify_model(
-            mujoco.MjModel.from_xml_string(
-                xml_path.read_text(),
-                assets=self._model_assets,
-            )
+        # ---------------------------------------------------------------------
+        # 1) Build MuJoCo model
+        # ---------------------------------------------------------------------
+        mj_model = mujoco.MjModel.from_xml_string(
+            xml_path.read_text(),
+            assets=self._model_assets,
         )
+        mj_model = self.modify_model(mj_model)
         mj_model.opt.timestep = self._config.sim_dt
 
         self._mj_model: mujoco.MjModel = mj_model
-        self._mjx_model: mjx.Model = mjx.put_model(mj_model, impl=self._config.impl)
 
+        # ---------------------------------------------------------------------
+        # 2) PandaBase post-init may mutate the MuJoCo model. Do it BEFORE mjx.put_model
+        # ---------------------------------------------------------------------
+        # NOTE: PandaBase._post_init often sets up _init_q, _init_ctrl, _obj_qposadr, etc.
+        # It can also mutate the model. So we call it now, THEN create mjx_model afterwards.
         self._post_init(obj_name="box", keyframe="low_home")
 
+        # ---------------------------------------------------------------------
+        # 3) Now freeze the MJX model from the final MuJoCo model
+        # ---------------------------------------------------------------------
+        self._mjx_model: mjx.Model = mjx.put_model(self._mj_model, impl=self._config.impl)
+
+        # Convenience ids
         self._floor_hand_geom_ids = [
             self._mj_model.geom(geom).id
             for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
         ]
         self._floor_geom_id = self._mj_model.geom("floor").id
 
+        # ---------------------------------------------------------------------
+        # 4) Create renderer from the FINAL mjx_model and mj_model (micro-repro style)
+        # ---------------------------------------------------------------------
         self.renderer: BatchRenderer = self._create_renderer()
         self._render_token: Optional[jax.Array] = None
-
         self._render_fn = lambda token, data: self.renderer.render(token, data, self._mj_model)
 
     def _post_init(self, obj_name, keyframe):
         super()._post_init(obj_name, keyframe)
-        # PandaBase post-init can mutate MuJoCo model
-        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
         self._sample_orientation = False
 
     def _create_renderer(self) -> BatchRenderer:
-        # Force C-contiguous int32 array for extension argument (avoids weird host layout edge cases)
-        enabled_geom_groups = np.asarray(
-            self._config.vision_config.enabled_geom_groups, dtype=np.int32, order="C"
-        )
+        vc = self._config.vision_config
+
+        enabled_geom_groups = np.asarray(vc.enabled_geom_groups, dtype=np.int32, order="C")
+
+        # Match micro-repro: explicit enabled_cameras int32 C-contiguous.
+        cams = getattr(vc, "enabled_cameras", None)
+        if cams is None:
+            # Fallback to [0,1] if user forgot to set it
+            cams = [0, 1]
+        enabled_cameras = np.asarray(cams, dtype=np.int32, order="C")
+
+        # Sanity: the MuJoCo model must actually have these camera indices.
+        if self._mj_model.ncam <= int(np.max(enabled_cameras)):
+            raise ValueError(
+                f"enabled_cameras={enabled_cameras.tolist()} but mj_model.ncam={self._mj_model.ncam}. "
+                "Your XML likely has fewer cameras than expected."
+            )
+
         return BatchRenderer(
             m=self._mjx_model,
-            gpu_id=int(self._config.vision_config.gpu_id),
+            gpu_id=int(vc.gpu_id),
             num_worlds=int(self.render_batch_size),
             batch_render_view_width=int(self.render_width),
             batch_render_view_height=int(self.render_height),
             enabled_geom_groups=enabled_geom_groups,
-            enabled_cameras=None,
+            enabled_cameras=enabled_cameras,
             add_cam_debug_geo=False,
-            use_rasterizer=bool(self._config.vision_config.use_rasterizer),
+            use_rasterizer=bool(vc.use_rasterizer),
             viz_gpu_hdls=None,
         )
 
     # -------------------------------------------------------------------------
-    # NEW: batched mjx.Data creation with real per-world buffers (no broadcast views)
+    # Batched mjx.Data creation that matches micro-repro exactly.
     # -------------------------------------------------------------------------
-    def _make_batched_data_simple(self, B: int) -> mjx.Data:
-        """Batched mjx.Data with real per-world buffers; reference-like init input."""
+    def _make_batched_data_safe(self, B: int) -> mjx.Data:
+        """Create B independent Data objects (no broadcast views), like the micro-repro."""
         m = self._mjx_model
-        # vmap(make_data) gives distinct per-world buffers (not broadcast_to views)
         data = jax.vmap(lambda _: mjx.make_data(m))(jp.arange(B))
         return data
 
@@ -210,7 +236,7 @@ class StereoPickCube(panda.PandaBase):
         nq = int(m.nq)
         nv = int(m.nv)
 
-        # Base init state
+        # Base init state (float32)
         init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[:nq]  # (nq,)
         qpos = jp.broadcast_to(init_q0[None, :], (B, nq)).astype(jp.float32)
 
@@ -221,7 +247,7 @@ class StereoPickCube(panda.PandaBase):
 
         data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
 
-        # Per-world robot joint noise (only affects robot part)
+        # Per-world robot joint noise (only affects robot portion)
         eps = jp.float32(0.01)
         qpos_noise = jax.vmap(
             lambda k: jax.random.uniform(k, (nq,), minval=-eps, maxval=eps)
@@ -245,7 +271,7 @@ class StereoPickCube(panda.PandaBase):
         mpos = data.mocap_pos
         mquat = data.mocap_quat
 
-        # In case these are unbatched depending on mjx/model
+        # Ensure batched mocap arrays
         if mpos.ndim == 2:
             mpos = jp.broadcast_to(mpos[None, ...], (B,) + mpos.shape)
         if mquat.ndim == 2:
@@ -255,40 +281,72 @@ class StereoPickCube(panda.PandaBase):
         mquat = mquat.at[:, 0, :].set(target_quat)
 
         data = data.replace(mocap_pos=mpos, mocap_quat=mquat)
-
         return data
 
     # -------------------------------------------------------------------------
-    # (Kept for reference) Old approach that can create broadcasted leaf views.
-    # Not used anymore for renderer init / multiworld correctness.
+    # Renderer init: mirror micro-repro (forward before init; explicit cameras)
     # -------------------------------------------------------------------------
-    def _make_batched_data(self, B: int) -> mjx.Data:
-        """DEPRECATED: broadcasted batched data can produce aliasing/views; kept for reference."""
+    def _maybe_init_renderer(self, data_for_init: mjx.Data, debug: bool):
+        if self._render_token is not None:
+            return
+
+        # Hard asserts BEFORE calling the extension.
+        # These should fail loudly in Python rather than corrupting backend_config.
+        if data_for_init.qpos.dtype != jp.float32:
+            data_for_init = data_for_init.replace(qpos=jp.asarray(data_for_init.qpos, jp.float32))
+        if data_for_init.qvel.dtype != jp.float32:
+            data_for_init = data_for_init.replace(qvel=jp.asarray(data_for_init.qvel, jp.float32))
+        if data_for_init.ctrl.dtype != jp.float32:
+            data_for_init = data_for_init.replace(ctrl=jp.asarray(data_for_init.ctrl, jp.float32))
+
+        B = int(data_for_init.qpos.shape[0]) if data_for_init.qpos.ndim >= 2 else 1
+        if B != self.render_batch_size:
+            # Renderer is built for num_worlds=self.render_batch_size.
+            # If you run B != render_batch_size, you must rebuild renderer or always reset at that size.
+            raise ValueError(
+                f"Renderer num_worlds={self.render_batch_size} but init data batch B={B}. "
+                "Keep them equal."
+            )
+
+        if debug:
+            backend = jax.lib.xla_bridge.get_backend()
+            print("[diag] jax/jaxlib:", jax.__version__, jaxlib.__version__)
+            print("[diag] backend:", backend.platform, "|", getattr(backend, "platform_version", None))
+            print("[diag] JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS", "<unset>"))
+
+            for name in [
+                "madrona_mjx._madrona_mjx_batch_renderer",
+                "madrona_mjx._madrona_mjx_visualizer",
+                "_madrona_mjx_batch_renderer",
+                "_madrona_mjx_visualizer",
+            ]:
+                spec = importlib.util.find_spec(name)
+                print("[diag]", name, "->", getattr(spec, "origin", None))
+
+            eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32, order="C")
+            cams = np.asarray(self._config.vision_config.enabled_cameras, dtype=np.int32, order="C")
+            print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype, "C_CONTIG:", eg.flags["C_CONTIGUOUS"])
+            print("[diag] enabled_cameras:", cams, "dtype:", cams.dtype, "C_CONTIG:", cams.flags["C_CONTIGUOUS"])
+            print("[diag] mj_model.ncam:", self._mj_model.ncam)
+            print("[diag] init data qpos:", tuple(data_for_init.qpos.shape), data_for_init.qpos.dtype)
+
+        # Micro-repro does forward() before init; do the same.
         m = self._mjx_model
-        data0 = mjx.make_data(m)
+        data_for_init = jax.vmap(lambda d: mjx.forward(m, d))(data_for_init)
 
-        def _batch_leaf(x):
-            if not hasattr(x, "ndim"):
-                return x
-            if x.ndim == 0:
-                return jp.broadcast_to(x, (B,))
-            return jp.broadcast_to(x, (B,) + x.shape)
+        # Init renderer token
+        if debug:
+            print("[diag] calling renderer.init ...")
+        tok, _, _ = self.renderer.init(data_for_init, self._mj_model)
+        jax.block_until_ready(tok)
+        self._render_token = tok
 
-        data = jax.tree_util.tree_map(_batch_leaf, data0)
-
-        nq = int(m.nq)
-        nv = int(m.nv)
-
-        init_q0 = jp.asarray(self._init_q, dtype=jp.float32)[..., :nq]  # (nq,)
-        qpos = jp.broadcast_to(init_q0, (B, nq))
-
-        qvel = jp.zeros((B, nv), dtype=jp.float32)
-
-        ctrl0 = jp.asarray(self._init_ctrl, dtype=jp.float32)
-        ctrl = jp.broadcast_to(ctrl0, (B,) + ctrl0.shape)
-
-        data = data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
-        return data
+        if debug:
+            print("[diag] renderer.init OK; token:", getattr(tok, "shape", None), getattr(tok, "dtype", None))
+            # Smoke render once
+            _, rgb, _ = self.renderer.render(tok, data_for_init, self._mj_model)
+            jax.block_until_ready(rgb)
+            print("[diag] smoke render OK:", tuple(rgb.shape), rgb.dtype)
 
     def reset(self, rng: jax.Array) -> State:
         if rng.ndim == 1:
@@ -329,80 +387,26 @@ class StereoPickCube(panda.PandaBase):
             box_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_box, min_box, max_box)
             target_pos = jax.vmap(_sample_pos, in_axes=(0, None, None))(rng_target, min_tgt, max_tgt)
 
-            # -----------------------------------------------------------------
-            # NEW: "simple" batched data for renderer init (reference-like),
-            # then apply per-world unique qpos/mocap/ctrl afterwards.
-            # -----------------------------------------------------------------
-            data_simple = self._make_batched_data_simple(B)
+            # Safe reference-like batched data (micro-repro style)
+            data = self._make_batched_data_safe(B)
 
-            if self._render_token is None:
-                if debug:
-                    backend = jax.lib.xla_bridge.get_backend()
-                    print("[diag] jax/jaxlib:", jax.__version__, jaxlib.__version__)
-                    print("[diag] backend:", backend.platform, "|", backend.platform_version)
-                    print("[diag] JAX_PLATFORMS:", os.environ.get("JAX_PLATFORMS", "<unset>"))
+            # IMPORTANT: init renderer token using safe data + forward (micro style)
+            self._maybe_init_renderer(data, debug=debug)
 
-                    for name in [
-                        "madrona_mjx._madrona_mjx_batch_renderer",
-                        "madrona_mjx._madrona_mjx_visualizer",
-                        "_madrona_mjx_batch_renderer",
-                        "_madrona_mjx_visualizer",
-                    ]:
-                        spec = importlib.util.find_spec(name)
-                        print("[diag]", name, "->", getattr(spec, "origin", None))
-
-                    eg = np.asarray(self._config.vision_config.enabled_geom_groups, dtype=np.int32, order="C")
-                    print("[diag] enabled_geom_groups:", eg, "dtype:", eg.dtype, "C_CONTIG:", eg.flags["C_CONTIGUOUS"])
-                    print("[diag] calling renderer.init with SIMPLE data ...")
-
-                    print(
-                        "init mj_model type:",
-                        type(self._mj_model),
-                        "has geom_quat:",
-                        hasattr(self._mj_model, "geom_quat"),
-                    )
-                    print(
-                        "init mjx_model type:",
-                        type(self._mjx_model),
-                        "has geom_quat:",
-                        hasattr(self._mjx_model, "geom_quat"),
-                    )
-                    try:
-                        print("[diag] data_simple.qpos shape:", data_simple.qpos.shape, "dtype:", data_simple.qpos.dtype)
-                    except Exception:
-                        pass
-
-                # Init using the simplest possible batched data (no randomization / no forward yet)
-                self._render_token, _, _ = self.renderer.init(data_simple, self._mj_model)
-                jax.block_until_ready(self._render_token)
-
-                if debug:
-                    print(
-                        "[diag] render_token:",
-                        type(self._render_token),
-                        "dtype:",
-                        getattr(self._render_token, "dtype", None),
-                        "shape:",
-                        getattr(self._render_token, "shape", None),
-                    )
-
-            # Now apply per-world state onto the batched data
+            # Now apply per-world state and forward for the actual start state
             data = self._apply_per_world_initial_state(
-                data=data_simple,
+                data=data,
                 box_pos=box_pos,
                 target_pos=target_pos,
                 rng_robot=rng_robot,
             )
-
-            # Forward after setting state
             data = jax.vmap(lambda d: mjx.forward(m, d))(data)
 
+            # Brightness noise
             bmin, bmax = self._config.obs_noise.brightness
             brightness = jax.vmap(
                 lambda k: jax.random.uniform(k, (1,), minval=bmin, maxval=bmax)
             )(rng_brightness).reshape((B, 1, 1, 1))
-
-            render_token = self._render_token
 
             metrics = {
                 "out_of_bounds": jp.zeros((B,), dtype=jp.float32),
@@ -413,7 +417,7 @@ class StereoPickCube(panda.PandaBase):
                 "target_pos": target_pos,
                 "reached_box": jp.zeros((B,), dtype=jp.float32),
                 "truncation": jp.zeros((B,), dtype=jp.float32),
-                "render_token": render_token,
+                "render_token": self._render_token,
                 "brightness": brightness,
             }
 
@@ -421,7 +425,6 @@ class StereoPickCube(panda.PandaBase):
 
             reward = jp.zeros((B,), dtype=jp.float32)
             done = jp.zeros((B,), dtype=jp.float32)
-
             return State(data, obs, reward, done, metrics, info)
 
     def step(self, state: State, action: jax.Array) -> State:
@@ -468,11 +471,9 @@ class StereoPickCube(panda.PandaBase):
         reached_box = jp.minimum(info["reached_box"] + (d_gripper_box < 0.05), 1.0)
         info = {**info, "reached_box": reached_box}
 
-        # reward components
         gripper_box = 1.0 - jp.tanh(5.0 * d_gripper_box)
         box_target = reached_box * (1.0 - jp.tanh(5.0 * d_box_target))
 
-        # Penalize collision with the floor.
         floor_coll = jp.zeros_like(gripper_box)
         for sensor_id in self._floor_hand_found_sensor:
             floor_coll = floor_coll + (
@@ -480,10 +481,7 @@ class StereoPickCube(panda.PandaBase):
             ).astype(jp.float32)
         no_floor_collision = jp.where(floor_coll > 0, 0.0, 1.0)
 
-        # Penalize collision with box (hand-box contact sensor).
-        hand_box = (
-            data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
-        )
+        hand_box = data.sensordata[self._mj_model.sensor_adr[self._box_hand_found_sensor]] > 0
         no_box_collision = jp.where(hand_box, 0.0, 1.0)
 
         raw_rewards = dict(
@@ -503,22 +501,21 @@ class StereoPickCube(panda.PandaBase):
           - (B, 2, H, W, 4)  -> multiworld, two cameras
           - (2, H, W, 4)     -> single world, two cameras
 
-        We explicitly avoid the old `if rgb.shape[0] == 2` heuristic,
-        because it breaks when B==2.
+        We explicitly avoid `if rgb.shape[0] == 2` because it breaks when B==2.
         """
         _, rgb, _ = self._render_fn(render_token, data_batched)
 
-        # Infer batch size from data (works for batched mjx.Data)
         try:
             B = int(data_batched.qpos.shape[0]) if data_batched.qpos.ndim >= 2 else 1
         except Exception:
             B = 1
 
-        # Normalize to left/right with a batch axis.
         if rgb.ndim == 5:
             # (B, C, H, W, 4)
             if rgb.shape[1] < 2:
-                raise ValueError(f"Renderer returned rgb with {rgb.shape[1]} cameras, expected >=2 for stereo.")
+                raise ValueError(
+                    f"Renderer returned rgb with {rgb.shape[1]} cameras, expected >=2 for stereo."
+                )
             left = rgb[:, 0]
             right = rgb[:, 1]
         elif rgb.ndim == 4:
@@ -527,10 +524,9 @@ class StereoPickCube(panda.PandaBase):
                 left = rgb[0:1]
                 right = rgb[1:2]
             elif rgb.shape[0] == B:
-                # This looks like (B, H, W, 4) -> mono camera render, can't form stereo
                 raise ValueError(
                     f"Renderer returned rgb shape {tuple(rgb.shape)} which looks mono (B,H,W,C). "
-                    "Expected stereo with shape (B,2,H,W,C). Check your camera config / enabled_cameras."
+                    "Expected stereo (B,2,H,W,C). Check camera config."
                 )
             else:
                 raise ValueError(
@@ -540,13 +536,9 @@ class StereoPickCube(panda.PandaBase):
         else:
             raise ValueError(f"Unrecognized rgb ndim={rgb.ndim}, shape={tuple(rgb.shape)}")
 
-        # Convert to float32 RGB in [0,1]
         left = left[..., :3].astype(jp.float32) / 255.0
         right = right[..., :3].astype(jp.float32) / 255.0
-
-        # Concatenate along width axis:
-        # left/right are (B,H,W,3) -> axis=2 is W
-        pixels = jp.concatenate([left, right], axis=2)
+        pixels = jp.concatenate([left, right], axis=2)  # concat along width
         return pixels
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> tuple[dict[str, Any], jax.Array]:
@@ -561,9 +553,7 @@ class StereoPickCube(panda.PandaBase):
 
         # Make the finger pads white for increased visibility
         mesh_id = mj_model.mesh("finger_1").id
-        geoms = [
-            idx for idx, data_id in enumerate(mj_model.geom_dataid) if data_id == mesh_id
-        ]
+        geoms = [idx for idx, data_id in enumerate(mj_model.geom_dataid) if data_id == mesh_id]
         mj_model.geom_matid[geoms] = mj_model.mat("off_white").id
         return mj_model
 
