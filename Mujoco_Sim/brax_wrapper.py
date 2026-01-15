@@ -1,57 +1,38 @@
-# Copyright 2025 DeepMind Technologies Limited
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-"""Wrappers for MuJoCo Playground environments that interop with torch."""
-
 from collections import deque
 import functools
 import os
-from typing import Any, Optional, Dict
+from typing import Any
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 try:
-    from rsl_rl.env import VecEnv  # pytype: disable=import-error
-except ImportError:
-    VecEnv = object
-
-try:
-    import torch  # pytype: disable=import-error
+    import torch
 except ImportError:
     torch = None
 
 try:
-    from tensordict import TensorDict  # pytype: disable=import-error
+    from tensordict import TensorDict
 except ImportError:
     TensorDict = None
 
+try:
+    from rsl_rl.env import VecEnv
+except ImportError:
+    VecEnv = object
+
 
 def _jax_to_torch(tensor):
-    import torch.utils.dlpack as tpack  # pytype: disable=import-error # pylint: disable=import-outside-toplevel
+    import torch.utils.dlpack as tpack
     return tpack.from_dlpack(tensor)
 
 
 def _torch_to_jax(tensor):
-    from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
+    from jax.dlpack import from_dlpack
     return from_dlpack(tensor)
 
 
 class RSLRLBraxWrapper(VecEnv):
-    """MJX env wrapper that keeps Madrona rendering OUTSIDE jit."""
-
     def __init__(
         self,
         env,
@@ -64,7 +45,7 @@ class RSLRLBraxWrapper(VecEnv):
         device_rank=None,
     ):
         if torch is None:
-            raise ImportError("torch is required for RSLRLBraxWrapper")
+            raise ImportError("torch is required")
 
         self.env = env
         self._raw_env = env
@@ -77,37 +58,22 @@ class RSLRLBraxWrapper(VecEnv):
         self.key = jax.random.PRNGKey(self.seed)
 
         if device_rank is not None:
-            gpu_devices = jax.devices("gpu")
-            if not gpu_devices:
-                raise RuntimeError("device_rank was set but no GPU devices are visible to JAX.")
-            if device_rank < 0 or device_rank >= len(gpu_devices):
-                raise ValueError(f"device_rank={device_rank} out of range for {len(gpu_devices)} GPUs.")
-            self.key = jax.device_put(self.key, gpu_devices[device_rank])
+            gpus = jax.devices("gpu")
+            if not gpus:
+                raise RuntimeError("No GPU devices visible to JAX.")
+            self.key = jax.device_put(self.key, gpus[device_rank])
             self.device = f"cuda:{device_rank}"
-            print(f"Device -- {gpu_devices[device_rank]}")
+            print(f"Device -- {gpus[device_rank]}")
             print(f"Key device -- {self.key.devices()}")
         else:
             self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-        # require the split APIs
-        if not hasattr(env, "reset_physics") or not hasattr(env, "step_physics") or not hasattr(env, "compute_obs"):
-            raise AttributeError(
-                "Env must implement reset_physics(), step_physics(), and compute_obs() "
-                "so rendering can stay outside jax.jit."
-            )
+        # REQUIRE the split API so render stays out of jit
+        if not (hasattr(env, "reset_physics") and hasattr(env, "step_physics") and hasattr(env, "compute_obs")):
+            raise AttributeError("Env must implement reset_physics/step_physics/compute_obs.")
 
-        # Reset stays non-jit, step_physics is jitted
         self.reset_fn = env.reset_physics
         self.step_fn = jax.jit(env.step_physics)
-
-        # split key into per-env keys
-        key_reset, _ = jax.random.split(self.key)
-        self.key_reset = jax.random.split(key_reset, self.batch_size)
-
-        H = int(getattr(env, "render_height", 0) or 0)
-        W = int(getattr(env, "render_width", 0) or 0)
-        if H > 0 and W > 0:
-            print(f"obs (env_state.obs) expected shape: [B, {H}, {2*W}, 3]")
 
         self.num_actions = int(getattr(env, "action_size"))
         self.max_episode_length = int(episode_length)
@@ -123,10 +89,7 @@ class RSLRLBraxWrapper(VecEnv):
         action = torch.clip(action, -1.0, 1.0).to(dtype=torch.float32)
         action = _torch_to_jax(action)
 
-        # physics (jitted)
         self.env_state = self.step_fn(self.env_state, action)
-
-        # render (NOT jitted) -> removes backend_config warnings
         self._render_outside_jit()
 
         obs_t = _jax_to_torch(self.env_state.obs)
@@ -138,7 +101,7 @@ class RSLRLBraxWrapper(VecEnv):
         info = self.env_state.info
         trunc = info.get("truncation", None)
         if trunc is None:
-            trunc = jnp.zeros_like(self.env_state.done)
+            trunc = jax.numpy.zeros_like(self.env_state.done)
         truncation = _jax_to_torch(trunc)
 
         info_ret = {
@@ -156,9 +119,9 @@ class RSLRLBraxWrapper(VecEnv):
 
     def reset(self):
         self.key, key_reset = jax.random.split(self.key)
-        self.key_reset = jax.random.split(key_reset, self.batch_size)
+        keys = jax.random.split(key_reset, self.batch_size)
 
-        self.env_state = self.reset_fn(self.key_reset)
+        self.env_state = self.reset_fn(keys)
         self._render_outside_jit()
 
         obs_t = _jax_to_torch(self.env_state.obs)
