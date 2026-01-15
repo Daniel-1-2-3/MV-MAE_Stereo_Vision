@@ -259,7 +259,7 @@ print("[smalltest] nq/nv:", mjm.nq, mjm.nv, "ncam:", mjm.ncam)
 
 m = mjx.put_model(mjm)
 
-B = 1
+B = 32
 # Safe batched data: make B independent Data objects
 data = jax.vmap(lambda _: mjx.make_data(m))(jnp.arange(B))
 
@@ -301,7 +301,7 @@ echo "======================================================================"
 
 echo "=== XLA dump (ONLY enable for the actual crash path) ==="
 # Keep disabled by default because it can spam files. Uncomment for one run if needed.
-# export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda --xla_dump_to=/tmp/xla_dump --xla_dump_hlo_as_text"
+# export XLA_FLAGS="--xla_gpu_enable_async_compilation=false --xla_gpu_cuda_data_dir=/usr/local/cuda --xla_dump_to=/tmp/xla_dump --xla_dump_hlo_as_text"
 # mkdir -p /tmp/xla_dump || true
 # echo "XLA dump dir: /tmp/xla_dump"
 echo "========================================================"

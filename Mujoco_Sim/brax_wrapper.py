@@ -14,21 +14,20 @@
 # ==============================================================================
 """Wrappers for MuJoCo Playground environments that interop with torch.
 
-Key rule for Madrona MJX:
-  - DO NOT call renderer.init / renderer.render inside jax.jit / pjit / vmap.
-So this wrapper:
-  - JITs physics-only step if available (env.step_physics)
-  - Keeps rendering strictly eager (env.render_pixels)
-  - Falls back safely if physics-only APIs are not present
+Important:
+- step_physics is jitted (fast)
+- rendering is NEVER jitted
+- we "warm up" JAX kernels BEFORE initializing Madrona renderer to avoid
+  post-Madrona first-time compilation (your current failure mode).
 """
 
 from collections import deque
 import functools
 import os
-from typing import Any, Optional, Dict, Callable, Tuple
+from typing import Any, Optional, Dict
 
 import jax
-import jax.numpy as jp
+import jax.numpy as jnp
 import numpy as np
 
 try:
@@ -48,57 +47,29 @@ except ImportError:
 
 
 def _jax_to_torch(tensor):
-    """Zero-copy JAX->Torch via DLPack (device stays on GPU)."""
-    import torch.utils.dlpack as tpack  # pytype: disable=import-error # pylint: disable=import-outside-toplevel
+    import torch.utils.dlpack as tpack  # pylint: disable=import-outside-toplevel
     return tpack.from_dlpack(tensor)
 
 
 def _torch_to_jax(tensor):
-    """Zero-copy Torch->JAX via DLPack (device stays on GPU)."""
     from jax.dlpack import from_dlpack  # pylint: disable=import-outside-toplevel
     return from_dlpack(tensor)
 
 
-def get_load_path(root, load_run=-1, checkpoint=-1):
+def _arr_device(x):
     try:
-        runs = os.listdir(root)
-        runs.sort()
-        if "exported" in runs:
-            runs.remove("exported")
-        last_run = os.path.join(root, runs[-1])
-    except Exception as exc:
-        raise ValueError("No runs in this directory: " + root) from exc
-
-    if load_run == -1 or load_run == "-1":
-        load_run = last_run
-    else:
-        load_run = os.path.join(root, load_run)
-
-    if checkpoint == -1:
-        models = [file for file in os.listdir(load_run) if "model" in file]
-        models.sort(key=lambda m: m.zfill(15))
-        model = models[-1]
-    else:
-        model = f"model_{checkpoint}.pt"
-
-    load_path = os.path.join(load_run, model)
-    return load_path
+        return x.device()
+    except TypeError:
+        return x.device
+    except Exception:
+        try:
+            return next(iter(x.devices()))
+        except Exception:
+            return None
 
 
 class RSLRLBraxWrapper(VecEnv):
-    """Wrapper for MJX envs (JAX) that interop with torch/RSL-RL VecEnv.
-
-    Fast + safe mode (recommended):
-      - env.reset_physics(keys[B,2]) -> State (NO rendering)
-      - env.step_physics(state, action[B,act_dim]) -> State (NO rendering)
-      - env.render_pixels(render_token, data_batched) -> pixels[B,H,2W,3]  (eager only)
-      - State.info contains:
-          - 'render_token' (or env has env._render_token), and optionally 'brightness'
-
-    Safe fallback:
-      - If env.step_physics/reset_physics do not exist, wrapper will NOT jit env.step,
-        because your env.step currently renders inside, which will crash under jit.
-    """
+    """MJX env (JAX) interop with torch/RSL-RL VecEnv."""
 
     def __init__(
         self,
@@ -127,7 +98,6 @@ class RSLRLBraxWrapper(VecEnv):
 
         self.key = jax.random.PRNGKey(self.seed)
 
-        # Pin keys to a specific GPU if requested.
         if device_rank is not None:
             gpu_devices = jax.devices("gpu")
             if not gpu_devices:
@@ -137,11 +107,11 @@ class RSLRLBraxWrapper(VecEnv):
             self.key = jax.device_put(self.key, gpu_devices[device_rank])
             self.device = f"cuda:{device_rank}"
             print(f"Device -- {gpu_devices[device_rank]}")
-            print(f"Key device -- {self.key.devices()}")
+            print(f"Key device -- {self.key.devices() if hasattr(self.key, 'devices') else self.key.device}")
         else:
             self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-        # Split key into two for reset and randomization
+        # per-env keys
         key_reset, key_randomization = jax.random.split(self.key)
         self.key_reset = jax.random.split(key_reset, self.batch_size)
 
@@ -151,18 +121,12 @@ class RSLRLBraxWrapper(VecEnv):
         else:
             self.v_randomization_fn = None
 
-        # Rendering hook (must be eager)
-        self._render_pixels_fn = getattr(env, "render_pixels", None)
-        if self._render_pixels_fn is None:
-            raise AttributeError("env must expose a render_pixels(render_token, data_batched) method.")
-
-        # Observation metadata
         H = int(getattr(env, "render_height", 0) or 0)
         W = int(getattr(env, "render_width", 0) or 0)
         C = 3
         if H > 0 and W > 0:
             self.num_obs = H * (2 * W) * C
-            print(f"obs (env_state.obs) expected shape: [B, {H}, {2*W}, {C}]")
+            print(f"obs (pixels) expected shape: [B, {H}, {2*W}, {C}]")
         else:
             self.num_obs = 0
             print("obs shape metadata unknown (env has no render_height/render_width).")
@@ -171,87 +135,75 @@ class RSLRLBraxWrapper(VecEnv):
         self.max_episode_length = int(episode_length)
         self.success_queue = deque(maxlen=100)
 
-        # ---------------------------------------------------------------------
-        # Choose physics-only API when available.
-        # ---------------------------------------------------------------------
+        # Functions:
+        # - reset_physics is NOT jitted
+        # - step_physics IS jitted
         self.reset_physics_fn = getattr(env, "reset_physics", None)
         self.step_physics_fn = getattr(env, "step_physics", None)
+        if self.reset_physics_fn is None or self.step_physics_fn is None:
+            raise AttributeError("Env must implement reset_physics and step_physics for this wrapper.")
 
-        # Fallback to original env methods.
-        self.reset_fn = env.reset
-        self.step_fn = env.step
-
-        # JIT physics step ONLY if it does not render.
-        self._use_physics_api = (self.reset_physics_fn is not None) and (self.step_physics_fn is not None)
-
-        if self._use_physics_api:
-            print("JITing step_physics (render stays eager)")
-            # donate_argnums=0 can help performance if your State is large, but only if it's safe in your codebase.
-            # If you see weirdness, remove donate_argnums.
-            self.step_physics_jit = jax.jit(self.step_physics_fn, donate_argnums=(0,))
-            print("Done JITing step_physics")
-        else:
-            self.step_physics_jit = None
-            print(
-                "No physics-only API found (reset_physics/step_physics). "
-                "Running env.step unjitted to keep Madrona render out of jit."
-            )
+        print("JITing step_physics")
+        self.step_physics_fn = jax.jit(self.step_physics_fn, donate_argnums=(0,))
+        print("Done JITing step_physics")
 
         self.env_state = None
 
-    # ---------------------------
-    # Rendering (eager only)
-    # ---------------------------
-    def _render_obs_eager(self, state) -> Tuple[Any, Any]:
-        """Returns (new_info, pixels[B,H,2W,3]) without jitting."""
-        info = state.info if hasattr(state, "info") else {}
-        data = state.data
+        # Warmup JAX kernels BEFORE touching Madrona renderer
+        self._warmup_jax_then_init_renderer()
 
-        # Prefer token from info, else env private token.
-        tok = info.get("render_token", None)
-        if tok is None:
-            tok = getattr(self.env, "_render_token", None)
-        if tok is None:
-            raise RuntimeError("No render_token found in state.info and env has no _render_token.")
+    def _warmup_jax_then_init_renderer(self):
+        debug = os.environ.get("PICK_ENV_DEBUG", "0") == "1"
 
-        pixels = self._render_pixels_fn(tok, data)
+        # 1) Warmup reset_physics (compiles common ops used in reset path)
+        st = self.reset_physics_fn(self.key_reset)
+        # Force sync on something simple from the state
+        jax.block_until_ready(st.data.qpos)
 
-        # Optional brightness postproc (kept eager to avoid any chance of tracing into render)
-        brightness = info.get("brightness", None)
-        if brightness is not None:
-            pixels = jp.clip(pixels * brightness, 0.0, 1.0)
+        # 2) Warmup step_physics (compiles the big step kernel)
+        zero_act = jnp.zeros((self.batch_size, self.num_actions), dtype=jnp.float32)
+        st2 = self.step_physics_fn(st, zero_act)
+        jax.block_until_ready(st2.data.qpos)
 
-        return info, pixels
+        # 3) Now init renderer exactly once (eager), and store token into env + state
+        tok = self.env.init_renderer_once(self.key_reset, debug=debug)
+        jax.block_until_ready(tok)
 
-    def _to_obs_tensordict(self, pixels_jax):
-        obs_t = _jax_to_torch(pixels_jax)
-        obs = {"state": obs_t}
-        if TensorDict is None:
-            return obs
-        return TensorDict(obs, batch_size=[self.num_envs])
+        # Update the state we’ll keep, so first reset() doesn’t need to redo anything
+        info = dict(st2.info)
+        info["render_token"] = tok
+        self.env_state = st2.replace(info=info)
 
-    # ---------------------------
-    # VecEnv API
-    # ---------------------------
+        if debug:
+            # Smoke render once here (still eager)
+            pix = self.env.render_pixels(tok, self.env_state.data)
+            pix = self.env.postprocess_pixels(pix, self.env_state.info)
+            jax.block_until_ready(pix)
+            print("[diag] wrapper warmup render OK:", tuple(pix.shape), pix.dtype)
+
     def step(self, action):
         if torch is None:
             raise ImportError("torch is required")
 
-        # action: torch tensor [B, num_actions]
+        # action: torch [B, A]
         action = torch.clip(action, -1.0, 1.0)
-        action_jax = _torch_to_jax(action)
+        action_j = _torch_to_jax(action).astype(jnp.float32)
 
-        if self._use_physics_api:
-            # JIT physics only
-            self.env_state = self.step_physics_jit(self.env_state, action_jax)
-            # Eager render
-            info, pixels = self._render_obs_eager(self.env_state)
-            self.env_state = self.env_state.replace(obs=pixels, info=info)
-        else:
-            # Safe fallback: do not jit env.step if it renders inside
-            self.env_state = self.step_fn(self.env_state, action_jax)
+        # JIT fast path: physics only
+        self.env_state = self.step_physics_fn(self.env_state, action_j)
 
-        obs_td = self._to_obs_tensordict(self.env_state.obs)
+        # EAGER: render pixels and overwrite obs
+        tok = self.env_state.info.get("render_token", None)
+        if tok is None:
+            tok = self.env.init_renderer_once(self.key_reset, debug=False)
+            info = dict(self.env_state.info)
+            info["render_token"] = tok
+            self.env_state = self.env_state.replace(info=info)
+
+        pixels = self.env.render_pixels(tok, self.env_state.data)
+        pixels = self.env.postprocess_pixels(pixels, self.env_state.info)
+        obs_t = _jax_to_torch(pixels)
+        obs = {"state": obs_t}
 
         reward = _jax_to_torch(self.env_state.reward)
         done = _jax_to_torch(self.env_state.done)
@@ -259,7 +211,7 @@ class RSLRLBraxWrapper(VecEnv):
         info = self.env_state.info
         trunc = info.get("truncation", None)
         if trunc is None:
-            trunc = jp.zeros_like(self.env_state.done)
+            trunc = jnp.zeros_like(self.env_state.done)
         truncation = _jax_to_torch(trunc)
 
         info_ret = {
@@ -268,7 +220,6 @@ class RSLRLBraxWrapper(VecEnv):
             "log": {},
         }
 
-        # Success logging (optional)
         last_episode_success_count = []
         if "last_episode_success_count" in info:
             lec = _jax_to_torch(info["last_episode_success_count"])
@@ -285,37 +236,46 @@ class RSLRLBraxWrapper(VecEnv):
             float(np.mean(self.success_queue)) if len(self.success_queue) > 0 else 0.0
         )
 
-        # Metrics logging
-        try:
-            for k, v in self.env_state.metrics.items():
-                if k not in info_ret["log"]:
-                    info_ret["log"][k] = _jax_to_torch(v).float().mean().item()
-        except Exception:
-            pass
+        for k, v in self.env_state.metrics.items():
+            if k not in info_ret["log"]:
+                info_ret["log"][k] = _jax_to_torch(v).float().mean().item()
 
+        if TensorDict is None:
+            return obs, reward, done, info_ret
+
+        obs_td = TensorDict(obs, batch_size=[self.num_envs])
         return obs_td, reward, done, info_ret
 
     def reset(self):
-        # Per-env keys each reset
+        # new keys
         self.key, key_reset = jax.random.split(self.key)
         self.key_reset = jax.random.split(key_reset, self.batch_size)
 
-        if self._use_physics_api:
-            # reset_physics is expected to NOT render, so it is safe to keep eager or jit if you want.
-            # We keep it eager so renderer.init definitely stays out of jit.
-            self.env_state = self.reset_physics_fn(self.key_reset)
-            info, pixels = self._render_obs_eager(self.env_state)
-            self.env_state = self.env_state.replace(obs=pixels, info=info)
-        else:
-            # env.reset is already eager here (safe for Madrona init/render)
-            self.env_state = self.reset_fn(self.key_reset)
+        # reset physics (no render)
+        self.env_state = self.reset_physics_fn(self.key_reset)
 
-        return self._to_obs_tensordict(self.env_state.obs)
+        # ensure renderer token is initialized (should already be from warmup)
+        tok = self.env_state.info.get("render_token", None)
+        if tok is None:
+            tok = self.env.init_renderer_once(self.key_reset, debug=False)
+            info = dict(self.env_state.info)
+            info["render_token"] = tok
+            self.env_state = self.env_state.replace(info=info)
+
+        # render eagerly
+        pixels = self.env.render_pixels(tok, self.env_state.data)
+        pixels = self.env.postprocess_pixels(pixels, self.env_state.info)
+        obs_t = _jax_to_torch(pixels)
+        obs = {"state": obs_t}
+
+        if TensorDict is None:
+            return obs
+        return TensorDict(obs, batch_size=[self.num_envs])
 
     def get_observations(self):
         return self.reset()
 
-    def render(self, mode="human"):  # pylint: disable=unused-argument
+    def render(self, mode="human"):
         if self.render_callback is not None:
             self.render_callback(self.env.env.env, self.env_state)
         else:
