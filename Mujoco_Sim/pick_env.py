@@ -463,6 +463,41 @@ class StereoPickCube(panda.PandaBase):
             _, rgb, _ = self.renderer.render(tok, data_for_init, self._mj_model)
             jax.block_until_ready(rgb)
             print("[diag] smoke render OK:", tuple(rgb.shape), rgb.dtype)
+            
+            # ---- rgb sanity check (runs once; cheap) ----
+            try:
+                # rgb expected uint8 [B, 2, H, W, 4] (or similar)
+                if rgb.dtype != jp.uint8:
+                    print("[diag][rgb] WARN: expected uint8, got", rgb.dtype)
+
+                # Convert to float32 in [0,1] and drop alpha for stats
+                rgb_f = rgb[..., :3].astype(jp.float32) / 255.0
+
+                # Force compute (still cheap at 32x2x64x64)
+                mn = jp.min(rgb_f)
+                mx = jp.max(rgb_f)
+                mean = jp.mean(rgb_f)
+                finite = jp.all(jp.isfinite(rgb_f))
+
+                mn, mx, mean, finite = jax.device_get((mn, mx, mean, finite))
+                print(f"[diag][rgb] range=[{mn:.6f}, {mx:.6f}] mean={mean:.6f} finite={bool(finite)}")
+
+                # Optional: per-camera mean if rgb is (B, C, H, W, 4)
+                if rgb.ndim == 5 and rgb.shape[1] >= 2:
+                    cam_means = jp.mean(rgb_f, axis=(0, 2, 3, 4))  # -> [C]
+                    cam_means = jax.device_get(cam_means)
+                    print("[diag][rgb] per-camera means:", cam_means.tolist())
+
+                # Optional: flag obvious “dead render” patterns
+                if not bool(finite):
+                    print("[diag][rgb] ERROR: non-finite values detected")
+                if mx <= 0.0 + 1e-6:
+                    print("[diag][rgb] WARN: image appears all-black (max ~0)")
+                if mn >= 1.0 - 1e-6:
+                    print("[diag][rgb] WARN: image appears all-white (min ~1)")
+            except Exception as e:
+                print("[diag][rgb] WARN: rgb sanity check failed:", type(e).__name__, e)
+            # --------------------------------------------
 
             # ---------------- ADDED: cudart state after render -------------
             _cuda_sync_and_clear_error(debug=True, tag="after renderer.render")
