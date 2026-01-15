@@ -440,7 +440,8 @@ class StereoPickCube(panda.PandaBase):
         rewards = {k: v * self._config.reward_config.scales[k] for k, v in raw_rewards.items()}
         total_reward = jp.clip(sum(rewards.values()), -1e4, 1e4)
 
-        box_pos = data.xpos[self._obj_body]
+        box_pos = data.xpos[:, self._obj_body, :]  # (B, 3)
+
         out_of_bounds = jp.any(jp.abs(box_pos) > 1.0, axis=-1) | (box_pos[:, 2] < 0.0)
 
         state.metrics.update(
@@ -484,7 +485,9 @@ class StereoPickCube(panda.PandaBase):
 
     def _get_reward(self, data: mjx.Data, info: dict[str, Any]):
         # NOTE: with batched MJX, these are (B, 3) when indexed by body id
-        box_pos = data.xpos[self._obj_body]          # (B, 3)
+        box_pos = data.xpos[:, self._obj_body, :]  # (B, 3)
+        
+        assert box_pos.ndim == 2 and box_pos.shape[1] == 3, box_pos.shape
         target_pos = info["target_pos"]              # (B, 3)
 
         # Use the hand geom centers as the gripper position (no PandaBase _hand_body needed)

@@ -1,15 +1,16 @@
 import torch
 
+
 class ReplayBuffer:
     def __init__(
         self,
         capacity: int,
-        obs_shape: tuple,   # (C, H, W) or (H, W, C) - choose one and be consistent
+        obs_shape: tuple,   # e.g. (H, 2W, 3) if channels_last True
         act_dim: int,
         device: torch.device,
         *,
         store_on_gpu: bool = False,
-        channels_last: bool = False,  # True if obs is HWC; False if CHW
+        channels_last: bool = False,
         pin_memory: bool = True,
     ):
         self.capacity = int(capacity)
@@ -41,26 +42,105 @@ class ReplayBuffer:
         self.ptr = 0
         self.size = 0
 
+    @staticmethod
+    def _ensure_batch_dim(x: torch.Tensor, want_ndim: int, name: str) -> torch.Tensor:
+        """
+        If x is missing a leading batch dim, add it.
+        Example: obs (H,W,C) -> (1,H,W,C)
+        """
+        if x.ndim == want_ndim - 1:
+            return x.unsqueeze(0)
+        return x
+
+    @staticmethod
+    def _as_1d(x: torch.Tensor, name: str) -> torch.Tensor:
+        """
+        Ensure scalar fields are shape (B,), not (B,1) or ().
+        """
+        if x.ndim == 0:
+            return x.view(1)
+        if x.ndim == 2 and x.shape[-1] == 1:
+            return x.squeeze(-1)
+        return x
+
     @torch.no_grad()
     def add_batch(self, obs_u8, action, reward, discount, next_obs_u8, done):
         """
         Insert a batch of transitions.
-        Shapes:
+
+        Expected:
           obs_u8:      [B, *obs_shape] uint8
+          next_obs_u8: [B, *obs_shape] uint8
           action:      [B, act_dim] float32
           reward:      [B] float32
           discount:    [B] float32
-          next_obs_u8: [B, *obs_shape] uint8
           done:        [B] bool
         """
-        B = obs_u8.shape[0]
-        assert B > 0
+        # Convert to tensors if caller passed numpy/etc.
+        if not torch.is_tensor(obs_u8):      obs_u8 = torch.as_tensor(obs_u8)
+        if not torch.is_tensor(next_obs_u8): next_obs_u8 = torch.as_tensor(next_obs_u8)
+        if not torch.is_tensor(action):     action = torch.as_tensor(action)
+        if not torch.is_tensor(reward):     reward = torch.as_tensor(reward)
+        if not torch.is_tensor(discount):   discount = torch.as_tensor(discount)
+        if not torch.is_tensor(done):       done = torch.as_tensor(done)
 
-        # Ensure types (avoid accidental float images)
+        # Normalize dtypes
         if obs_u8.dtype != torch.uint8:
             obs_u8 = obs_u8.to(torch.uint8)
         if next_obs_u8.dtype != torch.uint8:
             next_obs_u8 = next_obs_u8.to(torch.uint8)
+
+        action = action.to(torch.float32)
+        reward = reward.to(torch.float32)
+        discount = discount.to(torch.float32)
+        done = done.to(torch.bool)
+
+        # Allow missing batch dim for convenience
+        obs_u8 = self._ensure_batch_dim(obs_u8, want_ndim=self.obs.ndim, name="obs_u8")
+        next_obs_u8 = self._ensure_batch_dim(next_obs_u8, want_ndim=self.next_obs.ndim, name="next_obs_u8")
+        action = self._ensure_batch_dim(action, want_ndim=2, name="action")
+
+        reward = self._as_1d(reward, "reward")
+        discount = self._as_1d(discount, "discount")
+        done = self._as_1d(done, "done")
+
+        # Infer B from obs (since that's what we actually store)
+        B = int(obs_u8.shape[0])
+        if B <= 0:
+            raise ValueError("add_batch got empty batch")
+
+        # Hard shape checks (THIS is what will catch your current bug cleanly)
+        def _shape(x): return tuple(x.shape)
+
+        problems = []
+        if next_obs_u8.shape[0] != B: problems.append(f"next_obs_u8 B={next_obs_u8.shape[0]} != obs_u8 B={B}")
+        if action.shape[0] != B:      problems.append(f"action B={action.shape[0]} != obs_u8 B={B}")
+        if reward.shape[0] != B:      problems.append(f"reward B={reward.shape[0]} != obs_u8 B={B}")
+        if discount.shape[0] != B:    problems.append(f"discount B={discount.shape[0]} != obs_u8 B={B}")
+        if done.shape[0] != B:        problems.append(f"done B={done.shape[0]} != obs_u8 B={B}")
+
+        # Check obs shapes match buffer layout
+        if tuple(obs_u8.shape[1:]) != tuple(self.obs.shape[1:]):
+            problems.append(f"obs_u8 trailing shape {_shape(obs_u8)[1:]} != expected {tuple(self.obs.shape[1:])}")
+        if tuple(next_obs_u8.shape[1:]) != tuple(self.next_obs.shape[1:]):
+            problems.append(f"next_obs_u8 trailing shape {_shape(next_obs_u8)[1:]} != expected {tuple(self.next_obs.shape[1:])}")
+
+        # Check action last dim
+        if action.ndim != 2 or action.shape[1] != self.action.shape[1]:
+            problems.append(f"action shape {_shape(action)} != expected (B,{self.action.shape[1]})")
+
+        if problems:
+            raise RuntimeError(
+                "ReplayBuffer.add_batch got inconsistent shapes:\n"
+                + "\n".join(f"  - {p}" for p in problems)
+                + "\n\nGot:\n"
+                + f"  obs_u8      {tuple(obs_u8.shape)} {obs_u8.dtype} {obs_u8.device}\n"
+                + f"  next_obs_u8 {tuple(next_obs_u8.shape)} {next_obs_u8.dtype} {next_obs_u8.device}\n"
+                + f"  action      {tuple(action.shape)} {action.dtype} {action.device}\n"
+                + f"  reward      {tuple(reward.shape)} {reward.dtype} {reward.device}\n"
+                + f"  discount    {tuple(discount.shape)} {discount.dtype} {discount.device}\n"
+                + f"  done        {tuple(done.shape)} {done.dtype} {done.device}\n"
+            )
 
         # Move to storage device if needed
         storage_dev = self.obs.device
@@ -107,23 +187,16 @@ class ReplayBuffer:
 
     @torch.no_grad()
     def sample(self, batch_size: int):
-        """
-        Returns batch on self.device for training.
-        obs/next_obs returned as uint8 with shape [B, H, 2W, 3] (channels-last),
-        matching pick_env_v4.render_pixels().
-        """
         assert self.size > 0, "Replay is empty"
         idx = torch.randint(0, self.size, (batch_size,), device=self.obs.device)
 
         obs_u8 = self.obs[idx]
         next_obs_u8 = self.next_obs[idx]
-
         action = self.action[idx]
         reward = self.reward[idx]
         discount = self.discount[idx]
         done = self.done[idx]
 
-        # If storage is CPU, push to GPU non-blocking
         if obs_u8.device != self.device:
             obs_u8 = obs_u8.to(self.device, non_blocking=True)
             next_obs_u8 = next_obs_u8.to(self.device, non_blocking=True)
