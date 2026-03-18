@@ -9,7 +9,6 @@ from scipy.spatial.transform import Rotation
 
 from Metaworld.metaworld.asset_path_utils import full_V3_path_for
 from Sawyer_Sim.sawyer_base_env import RenderMode, SawyerXYZEnv
-from SB3_Architecture.debugger import Debugger
 from Metaworld.metaworld.types import InitConfigDict
 from Metaworld.metaworld.utils import reward_utils
 
