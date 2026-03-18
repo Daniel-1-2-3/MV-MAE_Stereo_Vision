@@ -112,7 +112,6 @@ class Workshop:
         img_h_size: int = 64,
         img_w_size: int = 64,
     ):  
-        self.perf = PerfTracker(device=self.device, print_every=200)
         # Overall obs space expects frame stacked obs, sawyer env expects single image
         self.overall_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels), dtype=np.float32)
         self.sawyer_env_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels // 3), dtype=np.float32)
@@ -166,6 +165,8 @@ class Workshop:
         # Evaluation
         self.eval_every_frames = 10000
         self.num_eval_episodes = 10
+        
+        self.perf = PerfTracker(device=self.device, print_every=200)
         
     def make_agent(self):
         # DrQv2 agent takes action_shape as (A, ) tuple
