@@ -11,7 +11,7 @@ timm
 tokenizers
 torch
 torchvision
-metaworld
+Metaworld_Stereo
 tqdm
 einops
 omegaconf

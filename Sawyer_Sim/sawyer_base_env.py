@@ -19,9 +19,9 @@ from gymnasium.utils.ezpickle import EzPickle
 from typing_extensions import TypeAlias
 from dm_env import StepType
 
-from Metaworld.metaworld.types import XYZ, ObservationDict
-from Metaworld.metaworld.sawyer_xyz_env import SawyerMocapBase
-from Metaworld.metaworld.utils import reward_utils
+from Metaworld_Stereo.metaworld.types import XYZ, ObservationDict
+from Metaworld_Stereo.metaworld.sawyer_xyz_env import SawyerMocapBase
+from Metaworld_Stereo.metaworld.utils import reward_utils
 from MAE_Model.prepare_input import Prepare
 
 RenderMode: TypeAlias = Literal['human', 'rgb_array', 'depth_array']

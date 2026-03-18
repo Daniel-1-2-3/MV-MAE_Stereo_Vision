@@ -7,10 +7,10 @@ import numpy.typing as npt
 from gymnasium.spaces import Box
 from scipy.spatial.transform import Rotation
 
-from Metaworld.metaworld.asset_path_utils import full_V3_path_for
+from Metaworld_Stereo.metaworld.asset_path_utils import full_V3_path_for
 from Sawyer_Sim.sawyer_base_env import RenderMode, SawyerXYZEnv
-from Metaworld.metaworld.types import InitConfigDict
-from Metaworld.metaworld.utils import reward_utils
+from Metaworld_Stereo.metaworld.types import InitConfigDict
+from Metaworld_Stereo.metaworld.utils import reward_utils
 
 class SawyerReachEnvV3(SawyerXYZEnv):
     def __init__(
