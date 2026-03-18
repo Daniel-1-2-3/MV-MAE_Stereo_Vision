@@ -277,7 +277,8 @@ class Workshop:
                 metrics = self.agent.update(self.replay_iter, self.global_step)
                 self.logger.log_metrics(metrics, self.global_frame, ty='train')
             t1 = time.perf_counter()
-            print(f"Training step: {1/(t1 - t0):.2f} steps/sec, step {self.global_step}")
+            if self.global_step % 5000 == 0:
+                print(f"Training step: {1/(t1 - t0):.2f} steps/sec, step {self.global_step}")
 
             # Take env step
             time_step = self.train_env.step(action)
