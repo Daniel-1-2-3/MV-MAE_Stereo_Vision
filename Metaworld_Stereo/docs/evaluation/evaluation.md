@@ -6,11 +6,11 @@ firstpage:
 
 # Evaluation
 
-In Metaworld_Stereo, agents are to be evaluated using their **success rate** on a set of tasks and goal positions, not the episodic reward achieved during training.
+In Metaworld, agents are to be evaluated using their **success rate** on a set of tasks and goal positions, not the episodic reward achieved during training.
 
 Each environment computes a success flag which is available through the `info` dictionary's `"success"` key, which is `0` when the task has not yet been accomplished, and `1` when success has been achieved.
 
-To aid in easier evaluation of agents, the benchmark provides two evaluation utility functions through the `Metaworld_Stereo.evaluation` package, one for multi-task reinforcement learning and one for meta-reinforcement learning respectively.
+To aid in easier evaluation of agents, the benchmark provides two evaluation utility functions through the `metaworld.evaluation` package, one for multi-task reinforcement learning and one for meta-reinforcement learning respectively.
 
 ## Methodology
 
@@ -85,10 +85,10 @@ def metalearning_eval(agent, eval_envs, adaptation_steps = 1, adaptation_episode
    return success_rate
 ```
 
-#### The `num_evals` parameter, and meta batch size in Metaworld_Stereo
+#### The `num_evals` parameter, and meta batch size in Metaworld
 The pseudocode assumes a meta batch size of 1 and 40 total tasks to go through (`num_evals`). For example this could work for ML1 with 40 test goals. In practice, meta batch size would be higher, e.g. 20, and the value of `num_evals` becomes a bit less intuitive.
 
-In meta-reinforcement learning, we typically use a vectorised environment where each environment instance is assigned to a given task. The number of tasks we are processing in parallel at a given iteration is known as the **meta batch size**. In typical meta-reinforcement learning where we just have parametric task variations, the vector that specifies the variation is the task. In Metaworld_Stereo, things are a little more complicated. We have both distinct tasks (e.g. `reach-v3` or `sweep-into-v3`) and different goal positions within each task. The task space in Metaworld_Stereo is considered to be the combinatorial space of tasks and goal positions.
+In meta-reinforcement learning, we typically use a vectorised environment where each environment instance is assigned to a given task. The number of tasks we are processing in parallel at a given iteration is known as the **meta batch size**. In typical meta-reinforcement learning where we just have parametric task variations, the vector that specifies the variation is the task. In Metaworld, things are a little more complicated. We have both distinct tasks (e.g. `reach-v3` or `sweep-into-v3`) and different goal positions within each task. The task space in Metaworld is considered to be the combinatorial space of tasks and goal positions.
 
 For ML10 and ML45, we have 5 test tasks, each of which has 40 test goal positions. We can therefore use a meta batch size of 20, and create 4 instances of each task within the vectorised environment for this meta batch, each of which will have 10 distinct goal positions. Therefore, to iterate over all `(task,goal)` combinations during evaluation, we would need `num_evals=10`.
 
@@ -99,7 +99,7 @@ For ML1, `num_evals` would depend on the meta batch size. We can either have a m
 
 ## Utility functions
 
-To avoid the need to implement the evaluation procedure from scratch, implementations for both the multi-task and meta-reinforcement learning evaluation procedures can be found in the `Metaworld_Stereo.evaluation` package under the functions `evaluation` and `metalearning_evaluation` respectively.
+To avoid the need to implement the evaluation procedure from scratch, implementations for both the multi-task and meta-reinforcement learning evaluation procedures can be found in the `metaworld.evaluation` package under the functions `evaluation` and `metalearning_evaluation` respectively.
 
 ### The `Agent` / `MetaLearningAgent` protocols
 
@@ -160,5 +160,5 @@ The evaluation utilities output multiple items, not just the overall success rat
 The evaluation utilities assume that you have instantiated the environments required using `gym.make`. If not, then these are the implicit assumptions for the `envs` / `eval_envs` provided into the utilities:
 - The object is `SyncVectorEnv` or `AsyncVectorEnv`.
 - Each sub-env has the following wrappers:
-  - `Metaworld_Stereo.wrappers.RandomTaskSelectWrapper` or `Metaworld_Stereo.wrappers.PseudoRandomTaskSelectWrapper`, which have been initialised with the correct set of tasks.
-  - `Metaworld_Stereo.wrappers.AutoTerminateOnSuccessWrapper`.
+  - `metaworld.wrappers.RandomTaskSelectWrapper` or `metaworld.wrappers.PseudoRandomTaskSelectWrapper`, which have been initialised with the correct set of tasks.
+  - `metaworld.wrappers.AutoTerminateOnSuccessWrapper`.

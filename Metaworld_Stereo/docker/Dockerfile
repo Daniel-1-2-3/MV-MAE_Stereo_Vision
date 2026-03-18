@@ -12,12 +12,12 @@ RUN apt-get -y update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY . /usr/local/Metaworld_Stereo/
-WORKDIR /usr/local/Metaworld_Stereo/
+COPY . /usr/local/metaworld/
+WORKDIR /usr/local/metaworld/
 RUN free -g
 RUN pip install .[testing]
 RUN git clone https://github.com/Farama-Foundation/Gymnasium.git
 RUN pip install -e Gymnasium
 
 
-ENTRYPOINT ["/usr/local/Metaworld_Stereo/docker/entrypoint"]
+ENTRYPOINT ["/usr/local/metaworld/docker/entrypoint"]

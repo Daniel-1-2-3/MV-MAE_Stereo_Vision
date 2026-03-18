@@ -7,7 +7,7 @@ Upon environment creation a user can select a render mode in ```('rgb_array', 'h
 For example:
 
 ```python
-import Metaworld_Stereo
+import metaworld
 import random
 
 env_name = '' # Pick an environment name

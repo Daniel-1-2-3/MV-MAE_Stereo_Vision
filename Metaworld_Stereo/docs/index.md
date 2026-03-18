@@ -4,8 +4,8 @@ firstpage:
 lastpage:
 ---
 
-```{project-logo} ../Metaworld_Stereo-text-banner.svg
-:alt: Metaworld_Stereo Logo
+```{project-logo} ../metaworld-text-banner.svg
+:alt: Metaworld Logo
 ```
 
 ```{project-heading}
@@ -21,7 +21,7 @@ Meta-World is an open-source simulated benchmark for meta-reinforcement learning
 
 ```{code-block} python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 env = gym.make('Meta-World/MT1', env_name='reach-v3')
 
@@ -58,8 +58,8 @@ benchmark/resetting
 :hidden:
 :caption: Development
 
-Github <https://github.com/Farama-Foundation/Metaworld_Stereo>
+Github <https://github.com/Farama-Foundation/Metaworld>
 citation
 release_notes/index
-Contribute to the Docs <https://github.com/Farama-Foundation/Metaworld_Stereo/blob/main/docs/README.md>
+Contribute to the Docs <https://github.com/Farama-Foundation/Metaworld/blob/main/docs/README.md>
 ```

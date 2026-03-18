@@ -15,7 +15,7 @@ import numpy.typing as npt
 # noqa: D104
 from gymnasium.envs.registration import register
 
-import metaworld.env_dict as _env_dict
+import Metaworld_Stereo.metaworld.env_dict as _env_dict
 from Metaworld_Stereo.metaworld.env_dict import (
     ALL_V3_ENVIRONMENTS,
     ALL_V3_ENVIRONMENTS_GOAL_HIDDEN,

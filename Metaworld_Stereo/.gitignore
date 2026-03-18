@@ -121,7 +121,7 @@ dmypy.json
 .pyre/
 
 
-# Metaworld_Stereo-specific stuff below this line
+# metaworld-specific stuff below this line
 MUJOCO_LOG.TXT
 
 # Other IDEs and editors

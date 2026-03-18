@@ -11,7 +11,6 @@ from Metaworld_Stereo.metaworld.sawyer_xyz_env import RenderMode, SawyerXYZEnv
 from Metaworld_Stereo.metaworld.types import InitConfigDict
 from Metaworld_Stereo.metaworld.utils import reward_utils
 
-
 class SawyerBasketballEnvV3(SawyerXYZEnv):
     PAD_SUCCESS_MARGIN: float = 0.06
     TARGET_RADIUS: float = 0.08

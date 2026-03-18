@@ -12,7 +12,7 @@ from typing import Sequence, Union
 import numpy as np
 from typing_extensions import TypeAlias
 
-from metaworld import envs
+from Metaworld_Stereo.metaworld import envs
 from Metaworld_Stereo.metaworld.sawyer_xyz_env import SawyerXYZEnv
 
 # Utils

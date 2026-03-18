@@ -1,20 +1,20 @@
-[![Python](https://img.shields.io/pypi/pyversions/Metaworld_Stereo.svg)](https://badge.fury.io/py/Metaworld_Stereo)
-[![PyPI](https://badge.fury.io/py/Metaworld_Stereo.svg)](https://badge.fury.io/py/Metaworld_Stereo.svg)
+[![Python](https://img.shields.io/pypi/pyversions/metaworld.svg)](https://badge.fury.io/py/metaworld)
+[![PyPI](https://badge.fury.io/py/metaworld.svg)](https://badge.fury.io/py/metaworld.svg)
 [![arXiv](https://img.shields.io/badge/arXiv-2505.11289-b31b1b.svg)](https://arxiv.org/pdf/2505.11289)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://pre-commit.com/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 <p align="center">
-    <img src="https://github.com/reginald-mclean/Metaworld_Stereo/blob/newReadMe/Metaworld_Stereo-text-banner.svg" width="500px"/>
+    <img src="https://github.com/reginald-mclean/Metaworld/blob/newReadMe/metaworld-text-banner.svg" width="500px"/>
 </p>
 
 Meta-World is an open source benchmark for developing and evaluating multi-task and meta reinforcement learning algorithms for continuous control robotic manipulation environments, with various benchmarks to evaluate different aspects of reinforcement learning algorithms.
 
-The documentation website is at [Metaworld_Stereo.farama.org](https://Metaworld_Stereo.farama.org), and we have a public discord server (which we also use to coordinate development work) that you can join here: https://discord.gg/bnJ6kubTg6
+The documentation website is at [metaworld.farama.org](https://metaworld.farama.org), and we have a public discord server (which we also use to coordinate development work) that you can join here: https://discord.gg/bnJ6kubTg6
 
 ## Installation
 
-To install Meta-World, use `pip install Metaworld_Stereo`
+To install Meta-World, use `pip install metaworld`
 
 We support and test for Python 3.8, 3.9, 3.10, 3.11 on Linux and macOS. We will accept PRs related to Windows, but do not officially support it.
 
@@ -26,7 +26,7 @@ To create a benchmark and interact with it:
 
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 
 env = gym.make("Meta-World/MT1", env_name="reach-v3")
@@ -55,7 +55,7 @@ The ML1 benchmark tests for few-shot adaptation to goal variations within a sing
 ### MT1
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 seed = 42 # for reproducibility
 
@@ -72,7 +72,7 @@ MT10 has two different versions that can be returned by ```gym.make```. The firs
 For users with limited compute resources, the synchronous option needs the least resources.
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 seed = 42
 
@@ -94,7 +94,7 @@ envs = gym.make_vec('Meta-World/MT10', vector_strategy='async', seed=seed) # thi
 MT50 also contains two different versions, a synchronous and an asynchronous version, of the environments.
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 seed = 42
 
@@ -118,7 +118,7 @@ Each Meta-reinforcement learning benchmark has training and testing environments
 ### ML1
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 seed = 42
 
@@ -138,7 +138,7 @@ Similar to the Multi-Task benchmarks, the ML10 and ML45 environments can be run 
 
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 train_envs = gym.make_vec('Meta-World/ML10-train', vector_strategy='sync', seed=seed) # or vector_strategy='async'
 test_envs = gym.make_vec('Meta-World/ML10-test', vector_strategy='sync', seed=seed) # or vector_strategy='async'
@@ -148,7 +148,7 @@ test_envs = gym.make_vec('Meta-World/ML10-test', vector_strategy='sync', seed=se
 ### ML45
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 train_envs = gym.make_vec('Meta-World/ML45-train', vector_strategy='sync', seed=seed) # or vector_strategy='async'
 test_envs = gym.make_vec('Meta-World/ML45-test', vector_strategy='sync', seed=seed) # or vector_strategy='async'
@@ -164,7 +164,7 @@ In order to create a custom benchmark, the user must provide a list of environme
 
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 envs = gym.make_vec('Meta-World/custom-mt-envs',vector_strategy='sync', envs_list=['env_name_1-v3', 'env_name_2-v3', 'env_name_3-v3'], seed=seed) # or vector_strategy='async'
 envs = gym.make_vec('Meta-World/custom-ml-envs',vector_strategy='sync', envs_list=['env_name_1-v3', 'env_name_2-v3', 'env_name_3-v3'], seed=seed) # or vector_strategy='async'
@@ -172,11 +172,11 @@ envs = gym.make_vec('Meta-World/custom-ml-envs',vector_strategy='sync', envs_lis
 
 ## Development Roadmap
 
-We have a roadmap for future development work for Gymnasium available here: https://github.com/Farama-Foundation/Metaworld_Stereo/issues/500
+We have a roadmap for future development work for Gymnasium available here: https://github.com/Farama-Foundation/Metaworld/issues/500
 
 ## Benchmark Code
 
-Code for producing results found in the paper can be found at: https://github.com/rainx0r/Metaworld_Stereo-algorithms
+Code for producing results found in the paper can be found at: https://github.com/rainx0r/metaworld-algorithms
 
 ## Citation
 
@@ -184,7 +184,7 @@ You can cite Meta-World using our related paper (https://openreview.net/forum?id
 
 ```
 @inproceedings{
-mclean2025Metaworld_Stereo,
+mclean2025metaworld,
 title={Meta-World+: An Improved, Standardized, {RL} Benchmark},
 author={Reginald McLean and Evangelos Chatzaroulas and Luc McCutcheon and Frank R{\"o}der and Tianhe Yu and Zhanpeng He and K.R. Zentner and Ryan Julian and J K Terry and Isaac Woungang and Nariman Farsad and Pablo Samuel Castro},
 booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems Datasets and Benchmarks Track},

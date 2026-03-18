@@ -15,8 +15,8 @@ The below example provides sample code for the reach environment. This code can 
 
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
-from Metaworld_Stereo.policies.sawyer_reach_v3_policy import SawyerReachV3Policy
+import metaworld
+from metaworld.policies.sawyer_reach_v3_policy import SawyerReachV3Policy
 
 env = gym.make('Meta-World/MT1', env_name='reach-v3')
 

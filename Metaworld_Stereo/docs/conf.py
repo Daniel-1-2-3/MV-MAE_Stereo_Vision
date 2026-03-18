@@ -17,18 +17,18 @@
 # -- Project information -----------------------------------------------------
 import os
 
-# import Metaworld_Stereo
+# import metaworld
 
 # from typing import Any, Dict
 
 
-project = "Metaworld_Stereo"
+project = "Metaworld"
 copyright = "2023 Farama Foundation"
 author = "Farama Foundation"
 
 # The full version, including alpha/beta/rc tags
-# TODO: Replace Metaworld_Stereo, remove comment and remove this line
-# release = Metaworld_Stereo.__version__
+# TODO: Replace metaworld, remove comment and remove this line
+# release = metaworld.__version__
 release = "0.0.1"
 
 
@@ -70,21 +70,21 @@ autodoc_preserve_defaults = True
 # a list of builtin themes.
 #
 html_theme = "furo"
-html_title = "Metaworld_Stereo Documentation"
-html_baseurl = "https://Metaworld_Stereo.farama.org"
+html_title = "Metaworld Documentation"
+html_baseurl = "https://metaworld.farama.org"
 html_copy_source = False
 html_favicon = "_static/img/favicon.svg"
 html_theme_options = {
-    "light_logo": "img/Metaworld_Stereo_black.svg",
-    "dark_logo": "img/Metaworld_Stereo_white.svg",
+    "light_logo": "img/metaworld_black.svg",
+    "dark_logo": "img/metaworld_white.svg",
     "gtag": "",
     "description": (
         "Collections of robotics environments geared towards "
         "benchmarking multi-task and meta reinforcement learning"
     ),
-    "image": "img/Metaworld_Stereo_black-github.png",
+    "image": "img/metaworld_black-github.png",
     "versioning": True,
-    "source_repository": "https://github.com/Farama-Foundation/Metaworld_Stereo/",
+    "source_repository": "https://github.com/Farama-Foundation/Metaworld/",
     "source_branch": "master",
     "source_directory": "docs/",
 }

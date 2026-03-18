@@ -12,6 +12,7 @@ from Metaworld_Stereo.metaworld.sawyer_xyz_env import RenderMode, SawyerXYZEnv
 from Metaworld_Stereo.metaworld.types import InitConfigDict, ObservationDict
 from Metaworld_Stereo.metaworld.utils.reward_utils import tolerance
 
+
 class SawyerNutAssemblyEnvV3(SawyerXYZEnv):
     WRENCH_HANDLE_LENGTH: float = 0.02
 

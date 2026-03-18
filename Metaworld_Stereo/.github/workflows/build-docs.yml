@@ -20,7 +20,7 @@ jobs:
       - name: Install docs dependencies
         run: pip install -r docs/requirements.txt
 
-      - name: Install Metaworld_Stereo
+      - name: Install Metaworld
         run: pip install .
 
       - name: Build

@@ -21,7 +21,7 @@ The ML1 benchmark tests for few-shot adaptation to goal variations within a sing
 ### MT1
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 SEED = 0  # some seed number here
 env = gym.make('Meta-World/MT1', env_name='reach-v3', seed=seed)
@@ -36,7 +36,7 @@ MT10 has two different versions that can be returned by ```gym.make```. The firs
 For users with limited compute resources, the synchronous option needs the least resources.
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 seed = 42
 
@@ -58,7 +58,7 @@ envs = gym.make_vec('Meta-World/MT10' vector_strategy='async', seed=seed) # this
 MT50 also contains two different versions, a synchronous and an asynchronous version, of the environments.
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 seed = 42
 
@@ -82,7 +82,7 @@ Each Meta-reinforcement learning benchmark has training and testing environments
 ### ML1
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 seed = 42
 
@@ -101,7 +101,7 @@ Similar to the Multi-Task benchmarks, the ML10 and ML45 environments can be run 
 
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 train_envs = gym.make_vec('Meta-World/ML10-train', vector_strategy='sync', seed=seed)
 test_envs = gym.make_vec('Meta-World/ML10-test', vector_strategy='sync', seed=seed)
 ```
@@ -110,7 +110,7 @@ test_envs = gym.make_vec('Meta-World/ML10-test', vector_strategy='sync', seed=se
 ### ML45
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 train_envs = gym.make_vec('Meta-World/ML45-train', vector_strategy='sync', seed=seed)
 test_envs = gym.make_vec('Meta-World/ML45-test', vector_strategy='sync', seed=seed)
@@ -126,7 +126,7 @@ In order to create a custom benchmark, the user must provide a list of environme
 
 ```python
 import gymnasium as gym
-import Metaworld_Stereo
+import metaworld
 
 envs = gym.make_vec('Meta-World/custom-mt-envs', vector_strategy='sync', envs_list=['env_name_1-v3', 'env_name_2-v3', 'env_name_3-v3'], seed=seed)
 envs = gym.make_vec('Meta-World/custom-ml-envs', vector_strategy='sync', envs_list=['env_name_1-v3', 'env_name_2-v3', 'env_name_3-v3'], seed=seed)

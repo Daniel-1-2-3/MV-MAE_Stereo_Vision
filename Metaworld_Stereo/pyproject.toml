@@ -4,7 +4,7 @@ requires = ["setuptools >= 61.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "Metaworld_Stereo"
+name = "metaworld"
 version = "3.0.0"
 description = "Collections of robotics environments geared towards benchmarking multi-task and meta reinforcement learning."
 readme = "README.md"
@@ -38,18 +38,18 @@ dev = ["black", "isort", "mypy"]
 
 [project.urls]
 Homepage = "https://farama.org"
-Repository = "https://github.com/Farama-Foundation/Metaworld_Stereo"
-Documentation = "https://Metaworld_Stereo.github.io/"
-"Bug Report" = "https://github.com/Farama-Foundation/Metaworld_Stereo/issues"
+Repository = "https://github.com/Farama-Foundation/Metaworld"
+Documentation = "https://metaworld.github.io/"
+"Bug Report" = "https://github.com/Farama-Foundation/Metaworld/issues"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.package-data]
-Metaworld_Stereo = ["py.typed"]
+metaworld = ["py.typed"]
 
 [tool.setuptools.packages.find]
-include = ["Metaworld_Stereo", "Metaworld_Stereo.*"]
+include = ["metaworld", "metaworld.*"]
 
 # Linters and Test tools #######################################################
 [tool.black]
@@ -58,7 +58,7 @@ safe = true
 [tool.isort]
 atomic = true
 profile = "black"
-src_paths = ["Metaworld_Stereo", "tests"]
+src_paths = ["metaworld", "tests"]
 
 [tool.mypy]
 plugins = ["numpy.typing.mypy_plugin"]

@@ -15,8 +15,8 @@ jobs:
       - run: |
            docker build -f docker/Dockerfile \
              --build-arg PYTHON_VERSION=${{ matrix.python-version }} \
-             --tag Metaworld_Stereo-docker .
+             --tag metaworld-docker .
       - name: Run tests
-        run: docker run Metaworld_Stereo-docker pytest tests/*
+        run: docker run metaworld-docker pytest tests/*
 #      - name: Run doctests
-#        run: docker run Metaworld_Stereo-docker pytest --doctest-modules Metaworld_Stereo/
+#        run: docker run metaworld-docker pytest --doctest-modules metaworld/

@@ -33,7 +33,7 @@ To be submitted, a pull request must satisfy the following criteria:
 These criteria may be satisfied in any order, but in practice your PR is unlikely to get attention from contributors until 1-3 are satisfied. Maintainer attention is a scarce resource, so generally maintainers wait for a review from a non-maintainer contributor before reviewing your PR.
 
 ## Preparing your repo to make contributions
-First, install the Metaworld_Stereo locally in editable mode, with testing dependencies:
+First, install the Metaworld locally in editable mode, with testing dependencies:
 
 ```
 pip install -e .[dev]
@@ -54,7 +54,7 @@ pre-commit install
 Once you've installed pre-commit, it will automatically run every time you type `git commit`, or you can run it manually using `pre-commit run --all-files`.
 
 ## Code style
-The Python code in Metaworld_Stereo conforms to the [PEP8](https://www.python.org/dev/peps/pep-0008/) standard. Please read and understand it in detail.
+The Python code in metaworld conforms to the [PEP8](https://www.python.org/dev/peps/pep-0008/) standard. Please read and understand it in detail.
 
 ### Meta-World specific Python style
 These are Meta-World specific rules which are not part of the aforementioned style guides.
@@ -69,52 +69,52 @@ These are Meta-World specific rules which are not part of the aforementioned sty
 * Add convenience imports in `__init__.py` of a package for shallow first-level repetitive imports, but not for subpackages, even if that subpackage is defined in a single `.py` file.
 
     For instance, if an import line reads `from
-    .foo.bar import Bar` then you should add `from Metaworld_Stereo.foo.bar import Bar` to `Metaworld_Stereo/foo/__init__.py` so that users may instead write `from Metaworld_Stereo.foo import Bar`. However, if an import line reads `from Metaworld_Stereo.foo.bar.stuff import Baz`, *do not* add `from Metaworld_Stereo.foo.bar.stuff import Baz` to `Metaworld_Stereo/foo/__init__.py`, because that obscures the `stuff` subpackage.
+    .foo.bar import Bar` then you should add `from metaworld.foo.bar import Bar` to `metaworld/foo/__init__.py` so that users may instead write `from metaworld.foo import Bar`. However, if an import line reads `from metaworld.foo.bar.stuff import Baz`, *do not* add `from metaworld.foo.bar.stuff import Baz` to `metaworld/foo/__init__.py`, because that obscures the `stuff` subpackage.
 
     *Do*
 
-    `Metaworld_Stereo/foo/__init__.py`:
+    `metaworld/foo/__init__.py`:
     ```python
     """Foo package."""
-    from Metaworld_Stereo.foo.bar import Bar
+    from metaworld.foo.bar import Bar
     ```
-    `Metaworld_Stereo/barp/bux.py`:
+    `metaworld/barp/bux.py`:
     ```python
     """Bux tools for barps."""
-    from Metaworld_Stereo.foo import Bar
-    from Metaworld_Stereo.foo.stuff import Baz
+    from metaworld.foo import Bar
+    from metaworld.foo.stuff import Baz
     ```
 
     *Don't*
 
-    `Metaworld_Stereo/foo/__init__.py`:
+    `metaworld/foo/__init__.py`:
     ```python
     """Foo package."""
-    from Metaworld_Stereo.foo.bar import Bar
-    from Metaworld_Stereo.foo.bar.stuff import Baz
+    from metaworld.foo.bar import Bar
+    from metaworld.foo.bar.stuff import Baz
     ```
-    `Metaworld_Stereo/barp/bux.py`:
+    `metaworld/barp/bux.py`:
     ```python
     """Bux tools for barps."""
-    from Metaworld_Stereo.foo import Bar
-    from Metaworld_Stereo.foo import Baz
+    from metaworld.foo import Bar
+    from metaworld.foo import Baz
     ```
 * Imports within the same package should be absolute, to avoid creating circular dependencies due to convenience imports in `__init__.py`
 
     *Do*
 
-    `Metaworld_Stereo/foo/bar.py`
+    `metaworld/foo/bar.py`
     ```python
-    from Metaworld_Stereo.foo.baz import Baz
+    from metaworld.foo.baz import Baz
 
     b = Baz()
     ```
 
     *Don't*
 
-    `Metaworld_Stereo/foo/bar.py`
+    `metaworld/foo/bar.py`
     ```python
-    from Metaworld_Stereo.foo import Baz  # this could lead to a circular import, if Baz is imported in Metaworld_Stereo/foo/__init__.py
+    from metaworld.foo import Baz  # this could lead to a circular import, if Baz is imported in metaworld/foo/__init__.py
 
     b = Baz()
     ```
@@ -219,18 +219,18 @@ YAML files should use 2 spaces for indentation.
 * All files should end in a single newline
 
 ## Testing
-Metaworld_Stereo maintains a test suite to ensure that future changes do not break existing functionality. We use TravisCI to run a unit test suite on every pull request before merging.
+metaworld maintains a test suite to ensure that future changes do not break existing functionality. We use TravisCI to run a unit test suite on every pull request before merging.
 
 * New functionality should always include unit tests and, where appropriate, integration tests.
 * PRs fixing bugs which were not caught by an existing test should always include a test replicating the bug
 
 ### Creating Tests
-Add a test for your functionality under the `Metaworld_Stereo/tests/` directory. Make sure your test filename is prepended with test(i.e. `test_<filename>.py`) to ensure the test will be run in the CI.
+Add a test for your functionality under the `metaworld/tests/` directory. Make sure your test filename is prepended with test(i.e. `test_<filename>.py`) to ensure the test will be run in the CI.
 
 ## Git
 
 ### Workflow
-__Metaworld_Stereo uses a linear commit history and rebase-only merging.__
+__metaworld uses a linear commit history and rebase-only merging.__
 
 This means that no merge commits appear in the project history. All pull requests, regardless of number of commits, are squashed to a single atomic commit at merge time.
 
@@ -239,7 +239,7 @@ Do's and Don'ts for avoiding accidental merge commits and other headaches:
 * *Don't* use `git merge`
 * *Don't* use `git pull` (unless git tells you that your branch can be fast-forwarded)
 * *Don't* make commits in the `master` branch---always use a feature branch
-* *Do* fetch upstream (`Farama-Foundation/Metaworld_Stereo`) frequently and keep your `master` branch up-to-date with upstream
+* *Do* fetch upstream (`Farama-Foundation/Metaworld`) frequently and keep your `master` branch up-to-date with upstream
 * *Do* rebase your feature branch on `master` frequently
 * *Do* keep only one or a few commits in your feature branch, and use `git commit --amend` to update your changes. This helps prevent long chains of identical merges during a rebase.
 
@@ -261,9 +261,9 @@ If you are working directly as a contributor to `Farama-Foundation`, you can rep
 
 #### Clone your GitHub fork and setup the Farama-Foundation remote
 ```sh
-git clone git@github.com:<your_github_username>/Metaworld_Stereo.git
-cd Metaworld_Stereo
-git remote add Farama-Foundation git@github.com:Farama-Foundation/Metaworld_Stereo.git
+git clone git@github.com:<your_github_username>/metaworld.git
+cd metaworld
+git remote add Farama-Foundation git@github.com:Farama-Foundation/metaworld.git
 git fetch Farama-Foundation
 ```
 
@@ -298,4 +298,4 @@ git push -f origin myfeaturebranch # -f is frequently necessary because rebases 
 ## Release
 
 ### Modify CHANGELOG.md
-For each release in Metaworld_Stereo, modify [CHANGELOG.md](https://github.com/Farama-Foundation/Metaworld_Stereo/blob/master/CHANGELOG.md) with the most relevant changes from the latest release. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), which adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+For each release in metaworld, modify [CHANGELOG.md](https://github.com/Farama-Foundation/Metaworld/blob/master/CHANGELOG.md) with the most relevant changes from the latest release. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), which adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

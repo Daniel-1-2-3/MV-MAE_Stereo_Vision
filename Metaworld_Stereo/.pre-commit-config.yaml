@@ -21,7 +21,7 @@ repos:
     rev: v2.2.4
     hooks:
       - id: codespell
-        exclude: Metaworld_Stereo/envs/assets_updated/sawyer_xyz/dm_control_pick_place.ipynb
+        exclude: metaworld/envs/assets_updated/sawyer_xyz/dm_control_pick_place.ipynb
 #        args:
 #          - --ignore-words-list==
   - repo: https://github.com/PyCQA/flake8
