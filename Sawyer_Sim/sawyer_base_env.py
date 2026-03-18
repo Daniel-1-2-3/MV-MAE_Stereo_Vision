@@ -24,6 +24,9 @@ from Metaworld_Stereo.metaworld.sawyer_xyz_env import SawyerMocapBase
 from Metaworld_Stereo.metaworld.utils import reward_utils
 from MAE_Model.prepare_input import Prepare
 
+import time
+from collections import defaultdict
+
 RenderMode: TypeAlias = Literal['human', 'rgb_array', 'depth_array']
 
 class SawyerXYZEnv(SawyerMocapBase, EzPickle):
@@ -153,6 +156,19 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         self._rgb_left  = np.empty((self.height, self.width, 3), dtype=np.uint8)
         self._rgb_right = np.empty((self.height, self.width, 3), dtype=np.uint8)
 
+    def _perf_add(self, name: str, dt: float):
+        self._perf[name] += dt
+        self._perf_counts[name] += 1
+
+    def consume_perf_stats(self):
+        out = {}
+        for k, total in self._perf.items():
+            c = self._perf_counts[k]
+            out[k] = total / c if c else 0.0
+        self._perf.clear()
+        self._perf_counts.clear()
+        return out
+    
     def seed(self, seed: int) -> list[int]:
         """Seeds the environment.
         Args:
@@ -306,14 +322,12 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         return img_obs_np
    
     def _render_one_camera(self, cam_name: str, out_buf: np.ndarray) -> np.ndarray:
-        """
-        Render a fixed camera into preallocated uint8 buffer, matching DeepMind Renderer output.
-        out_buf: (H, W, 3) uint8; returned buffer is vertically flipped in place.
-        """
-        # Keep EGL/OSMesa context current before GL calls
+        t0 = time.perf_counter()
+
         if getattr(self, "_gl_ctx", None) is not None:
             self._gl_ctx.make_current()
-    
+        t1 = time.perf_counter()
+
         cam_id = self.model.camera(cam_name).id
         self._mjv_cam.fixedcamid = int(cam_id)
 
@@ -321,27 +335,44 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
             self.model, self.data, self._mjv_opt, None,
             self._mjv_cam, mujoco.mjtCatBit.mjCAT_ALL, self._mjv_scene
         )
+        t2 = time.perf_counter()
+
         mujoco.mjr_render(self._mjr_rect, self._mjv_scene, self._mjr_ctx)
+        t3 = time.perf_counter()
+
         mujoco.mjr_readPixels(out_buf, None, self._mjr_rect, self._mjr_ctx)
+        t4 = time.perf_counter()
+
+        self._perf_add("env_gl_make_current_ms", 1000.0 * (t1 - t0))
+        self._perf_add(f"env_scene_update_{cam_name}_ms", 1000.0 * (t2 - t1))
+        self._perf_add(f"env_render_{cam_name}_ms", 1000.0 * (t3 - t2))
+        self._perf_add(f"env_readpixels_{cam_name}_ms", 1000.0 * (t4 - t3))
 
         return out_buf
 
     def render(self) -> np.ndarray:
-        """
-        Returns:
-            np.ndarray (H, 2*W, 3), dtype float32 roughly [-4, 4], normalized,
-            identical to the previous implementation that used mujoco.Renderer.
-        """
-        # Render both views with the fast pathway
+        t0 = time.perf_counter()
         left_u8  = self._render_one_camera(self.left_cam_name,  self._rgb_left)
+        t1 = time.perf_counter()
         right_u8 = self._render_one_camera(self.right_cam_name, self._rgb_right)
-        
-        # Convert to tensors exactly like before, fuse + normalize with your helper
+        t2 = time.perf_counter()
+
         left_t  = torch.from_numpy(left_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0
         right_t = torch.from_numpy(right_u8).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+        t3 = time.perf_counter()
 
-        stereo_t = Prepare.fuse_normalize([left_t, right_t])  # (1, H, 2W, C)
+        stereo_t = Prepare.fuse_normalize([left_t, right_t])
+        t4 = time.perf_counter()
+
         stereo_np = stereo_t[0].detach().cpu().numpy().astype(np.float32, copy=False)
+        t5 = time.perf_counter()
+
+        self._perf_add("env_render_left_total_ms", 1000.0 * (t1 - t0))
+        self._perf_add("env_render_right_total_ms", 1000.0 * (t2 - t1))
+        self._perf_add("env_u8_to_torch_ms", 1000.0 * (t3 - t2))
+        self._perf_add("env_fuse_normalize_ms", 1000.0 * (t4 - t3))
+        self._perf_add("env_torch_to_numpy_ms", 1000.0 * (t5 - t4))
+        self._perf_add("env_render_total_ms", 1000.0 * (t5 - t0))
 
         if getattr(self, "render_mode", None) == "human":
             stereo_image = np.concatenate([left_u8, right_u8], axis=1)
@@ -352,34 +383,32 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         return stereo_np
 
     def step(self, action: npt.NDArray[np.float32]):
-        """
-        Args:
-            action: The action to take. Must be a 4 element array of floats.
-        Returns:
-            The (next_obs, reward, terminated, truncated, info) tuple.
-        """
-        
+        t0 = time.perf_counter()
+
         assert len(action) == 4, f"Actions should be size 4, got {len(action)}"
         self.set_xyz_action(action[:3])
         if self.curr_path_length >= self.max_path_length:
             raise ValueError("You must reset the env manually once truncate==True")
+
+        t1 = time.perf_counter()
         self.do_simulation([action[-1], -action[-1]], n_frames=self.frame_skip)
+        t2 = time.perf_counter()
+
         self.curr_path_length += 1
 
-        # Running the simulator can sometimes mess up site positions, so
-        # re-position them here to make sure they're accurate
         for site in self._target_site_config:
             self._set_pos_site(*site)
+        t3 = time.perf_counter()
 
         if self._did_see_sim_exception:
             self.step_type = StepType.LAST
             assert self._last_stable_obs is not None
             return (
-                self._last_stable_obs,  # observation just before going unstable
-                0.0,  # reward (penalize for causing instability)
+                self._last_stable_obs,
+                0.0,
                 False,
-                False,  # termination flag always False
-                {  # info
+                False,
+                {
                     "success": False,
                     "near_object": 0.0,
                     "grasp_success": False,
@@ -389,21 +418,32 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
                     "unscaled_reward": 0.0,
                 },
             )
+
         mujoco.mj_forward(self.model, self.data)
-        
+        t4 = time.perf_counter()
+
         x = self._get_obs().astype(np.float32, copy=False)
         low, high = self.observation_space.low, self.observation_space.high
         self._last_stable_obs = np.clip(x, a_min=low, a_max=high)
+        t5 = time.perf_counter()
 
         reward, info = self.evaluate_state()
-        # step will never return a terminate==True if there is a success
-        # but we can return truncate=True if the current path length == max path length
+        t6 = time.perf_counter()
+
         truncate = False
         if self.curr_path_length == self.max_path_length:
             truncate = True
-        
+
         self.step_type = StepType.LAST if truncate == True else StepType.MID
-        # The var info is a dict containing observation, step_type, action, reward, and discount
+
+        self._perf_add("env_set_action_ms", 1000.0 * (t1 - t0))
+        self._perf_add("env_do_simulation_ms", 1000.0 * (t2 - t1))
+        self._perf_add("env_reset_sites_ms", 1000.0 * (t3 - t2))
+        self._perf_add("env_mj_forward_ms", 1000.0 * (t4 - t3))
+        self._perf_add("env_get_obs_clip_ms", 1000.0 * (t5 - t4))
+        self._perf_add("env_reward_ms", 1000.0 * (t6 - t5))
+        self._perf_add("env_step_core_ms", 1000.0 * (t6 - t0))
+
         return {
             "observation": self._last_stable_obs,
             "step_type": self.step_type,

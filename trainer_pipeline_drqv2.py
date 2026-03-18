@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import time
+from collections import defaultdict
+from contextlib import contextmanager
 import argparse
 from dm_env import specs
 
@@ -27,6 +29,50 @@ from gymnasium.spaces import Box
 
 torch.backends.cudnn.benchmark = True
 
+class PerfTracker:
+    def __init__(self, device=None, print_every=200):
+        self.device = device
+        self.print_every = print_every
+        self.totals = defaultdict(float)
+        self.counts = defaultdict(int)
+
+    def _sync(self):
+        if self.device is not None and "cuda" in str(self.device) and torch.cuda.is_available():
+            torch.cuda.synchronize(self.device)
+
+    @contextmanager
+    def timeit(self, name: str):
+        self._sync()
+        t0 = time.perf_counter()
+        yield
+        self._sync()
+        dt = time.perf_counter() - t0
+        self.totals[name] += dt
+        self.counts[name] += 1
+
+    def add(self, name: str, dt: float):
+        self.totals[name] += dt
+        self.counts[name] += 1
+
+    def mean(self, name: str):
+        c = self.counts.get(name, 0)
+        return self.totals.get(name, 0.0) / c if c else 0.0
+
+    def maybe_print(self, step: int, prefix: str = "PERF"):
+        if step == 0 or step % self.print_every != 0:
+            return
+        keys = sorted(self.totals.keys())
+        if not keys:
+            return
+        parts = []
+        for k in keys:
+            mean_ms = 1000.0 * self.mean(k)
+            parts.append(f"{k}={mean_ms:.2f}ms")
+        print(f"[{prefix} step={step}] " + " | ".join(parts))
+
+    def reset(self):
+        self.totals.clear()
+        self.counts.clear()
 class Workshop:
     def __init__(
         self,
@@ -66,6 +112,7 @@ class Workshop:
         img_h_size: int = 64,
         img_w_size: int = 64,
     ):  
+        self.perf = PerfTracker(device=self.device, print_every=200)
         # Overall obs space expects frame stacked obs, sawyer env expects single image
         self.overall_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels), dtype=np.float32)
         self.sawyer_env_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels // 3), dtype=np.float32)
@@ -267,25 +314,41 @@ class Workshop:
                 self.logger.log('eval_total_time', self.timer.total_time(), self.global_frame)
                 self.eval()
 
-            t0 = time.perf_counter()
-            # Sample action
-            with torch.no_grad(), utils.eval_mode(self.agent):
-                action = self.agent.act(time_step.observation, self.global_step, eval_mode=False)
+            with self.perf.timeit("loop_total"):
+                with self.perf.timeit("act_total"):
+                    with torch.no_grad(), utils.eval_mode(self.agent):
+                        action = self.agent.act(time_step.observation, self.global_step, eval_mode=False)
 
-            # Try to update the agent, will only update past self.learning_starts
-            if not seed_until_step(self.global_step):
-                metrics = self.agent.update(self.replay_iter, self.global_step)
-                self.logger.log_metrics(metrics, self.global_frame, ty='train')
-            t1 = time.perf_counter()
-            if self.global_step % 5000 == 0:
-                print(f"Training step: {1/(t1 - t0):.2f} steps/sec, step {self.global_step}")
+                if not seed_until_step(self.global_step):
+                    with self.perf.timeit("update_total"):
+                        metrics = self.agent.update(self.replay_iter, self.global_step)
+                    self.logger.log_metrics(metrics, self.global_frame, ty='train')
+                else:
+                    metrics = None
 
-            # Take env step
-            time_step = self.train_env.step(action)
+                with self.perf.timeit("env_step_total"):
+                    time_step = self.train_env.step(action)
+
             episode_reward += float(time_step.reward[0])
             self.replay_storage.add(time_step)
             episode_step += 1
             self._global_step += 1
+
+            if self.global_step % 200 == 0:
+                raw = self.perf.mean("loop_total")
+                if raw > 0:
+                    print(f"[speed step={self.global_step}] full_loop={1.0/raw:.2f} loops/sec")
+                self.perf.maybe_print(self.global_step)
+                
+                if hasattr(self.train_env, "consume_perf_stats"):
+                    env_stats = self.train_env.consume_perf_stats()
+                    if env_stats:
+                        env_parts = [f"{k}={v:.2f}ms" for k, v in sorted(env_stats.items())]
+                        print(f"[ENV step={self.global_step}] " + " | ".join(env_parts))
+
+                if hasattr(self.agent, "last_act_timings"):
+                    act_parts = [f"{k}={v:.2f}ms" for k, v in sorted(self.agent.last_act_timings.items())]
+                    print(f"[ACT step={self.global_step}] " + " | ".join(act_parts))
     
 def save_agent(agent: DrQV2Agent, path="agent_weights.pt"):
     torch.save({

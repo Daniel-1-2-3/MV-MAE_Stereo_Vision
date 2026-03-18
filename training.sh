@@ -97,4 +97,7 @@ apptainer exec --nv \
   '
 
 # Terminal run command
+# apt-get update
+# apt-get install -y libegl1 libglvnd0 libgl1
+# apt-get install -y mesa-utils
 # python trainer_pipeline_drqv2.py --render_mode rbg_array --mvmae_patch_size 16 --mvmae_encoder_embed_dim 192 --mvmae_decoder_embed_dim 96 --mvmae_encoder_heads 8 --mvmae_decoder_heads 8 --hidden_dim 512

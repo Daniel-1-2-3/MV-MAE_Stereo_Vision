@@ -3,6 +3,7 @@ from typing import Any, NamedTuple
 import numpy as np
 from dm_env import StepType
 from Sawyer_Sim.sawyer_stereo_env import SawyerReachEnvV3
+import time
 class FrameStackWrapper():
     def __init__(self, env: SawyerReachEnvV3, num_frames):
         self._env = env
@@ -10,14 +11,19 @@ class FrameStackWrapper():
         self._frames_deque = deque([], maxlen=num_frames)
     
     def _transform_observation(self, time_step):
+        t0 = time.perf_counter()
         self._frames_deque.append(time_step["observation"])
         if len(self._frames_deque) != self._num_frames:
             last_frame: np.ndarray = self._frames_deque[-1]
             for i in range(self._num_frames - len(self._frames_deque)):
                 self._frames_deque.append(last_frame.copy())
-        
+
         assert len(self._frames_deque) == self._num_frames
         time_step["observation"] = np.concatenate(list(self._frames_deque), axis=2)
+        t1 = time.perf_counter()
+
+        if hasattr(self._env, "_perf_add"):
+            self._env._perf_add("wrapper_frame_stack_ms", 1000.0 * (t1 - t0))
         return time_step
 
     def reset(self):
@@ -36,17 +42,34 @@ class ActionRepeatWrapper:
         self._num_repeats = num_repeats
 
     def step(self, action):
+        t0 = time.perf_counter()
+
         reward = 0.0
         discount = 1.0
+        repeats_done = 0
+
         for _ in range(self._num_repeats):
+            inner_t0 = time.perf_counter()
             time_step = self._env.step(action)
+            inner_t1 = time.perf_counter()
+
+            if hasattr(self._env, "_perf_add"):
+                self._env._perf_add("wrapper_single_repeat_ms", 1000.0 * (inner_t1 - inner_t0))
+
             reward += (time_step["reward"] or 0.0) * discount
             discount *= time_step["discount"]
+            repeats_done += 1
             if time_step["step_type"] == StepType.LAST:
                 break
-            
+
         time_step["discount"] = discount
         time_step["reward"] = reward
+
+        t1 = time.perf_counter()
+        if hasattr(self._env, "_perf_add"):
+            self._env._perf_add("wrapper_action_repeat_total_ms", 1000.0 * (t1 - t0))
+            self._env._perf_add("wrapper_action_repeat_count", float(repeats_done))
+
         return time_step
 
     def __getattr__(self, name):

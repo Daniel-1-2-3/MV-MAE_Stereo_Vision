@@ -8,6 +8,12 @@ from MAE_Model.model import MAEModel
 from MAE_Model.encoder import ViTMaskedEncoder
 from gymnasium.spaces import Box
 
+import time
+
+def _cuda_sync(device):
+    if device is not None and "cuda" in str(device) and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+
 class Actor(nn.Module):
     def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
         super().__init__()
@@ -160,19 +166,46 @@ class DrQV2Agent:
 
     # Samples an action
     def act(self, obs, step, eval_mode):
+        timings = {}
+        _cuda_sync(self.device)
+        t0 = time.perf_counter()
+
         obs = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+
+        _cuda_sync(self.device)
+        t1 = time.perf_counter()
+
         with torch.no_grad():
             z, _ = self.mvmae.encoder(obs.unsqueeze(0), mask_x=False)
             obs_latent = z.flatten(start_dim=-2)
-            stddev = utils.schedule(self.stddev_schedule, step)
-            dist = self.actor(obs_latent, stddev)
-            if eval_mode:
-                action = dist.mean
-            else:
-                action = dist.sample(clip=None)
-                if step < self.num_expl_steps:
-                    action.uniform_(-1.0, 1.0)
-        return action.cpu().numpy()[0]
+
+        _cuda_sync(self.device)
+        t2 = time.perf_counter()
+
+        stddev = utils.schedule(self.stddev_schedule, step)
+        dist = self.actor(obs_latent, stddev)
+        if eval_mode:
+            action = dist.mean
+        else:
+            action = dist.sample(clip=None)
+            if step < self.num_expl_steps:
+                action.uniform_(-1.0, 1.0)
+
+        _cuda_sync(self.device)
+        t3 = time.perf_counter()
+
+        action_np = action.cpu().numpy()[0]
+
+        _cuda_sync(self.device)
+        t4 = time.perf_counter()
+
+        timings["act_tensorize_ms"] = 1000.0 * (t1 - t0)
+        timings["act_encoder_ms"] = 1000.0 * (t2 - t1)
+        timings["act_actor_ms"] = 1000.0 * (t3 - t2)
+        timings["act_to_cpu_ms"] = 1000.0 * (t4 - t3)
+        self.last_act_timings = timings
+
+        return action_np
     
     def update_critic(self, z, action, reward, discount, z_next, step, obs, update_mvmae: bool):
         metrics = dict()
@@ -226,24 +259,34 @@ class DrQV2Agent:
     def update_actor(self, obs, step):
         metrics = dict()
 
+        _cuda_sync(self.device)
+        t0 = time.perf_counter()
+
         stddev = utils.schedule(self.stddev_schedule, step)
         dist = self.actor(obs, stddev)
         action = dist.sample(clip=self.stddev_clip)
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
         Q1, Q2 = self.critic(obs, action)
         Q = torch.min(Q1, Q2)
-
         actor_loss = -Q.mean()
 
-        # Optimize actor
+        _cuda_sync(self.device)
+        t1 = time.perf_counter()
+
         self.actor_optim.zero_grad(set_to_none=True)
         actor_loss.backward()
         self.actor_optim.step()
+
+        _cuda_sync(self.device)
+        t2 = time.perf_counter()
 
         if self.use_tb:
             metrics['actor_loss'] = actor_loss.item()
             metrics['actor_logprob'] = log_prob.mean().item()
             metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
+
+        metrics['perf_actor_forward_ms'] = 1000.0 * (t1 - t0)
+        metrics['perf_actor_backward_step_ms'] = 1000.0 * (t2 - t1)
 
         return metrics
     
@@ -254,9 +297,18 @@ class DrQV2Agent:
             return metrics
         update_mvmae = True if step % self.update_mvmae_every_steps == 0 else False
 
-        # Sample a batch from the replay buffer
+        _cuda_sync(self.device)
+        t0 = time.perf_counter()
+
         batch = next(replay_iter)
+
+        _cuda_sync(self.device)
+        t1 = time.perf_counter()
+
         obs, action, reward, discount, next_obs = utils.to_torch(batch, self.device)
+
+        _cuda_sync(self.device)
+        t2 = time.perf_counter()
 
         if self.use_tb:
             metrics['batch_reward'] = reward.mean().item()
@@ -264,20 +316,37 @@ class DrQV2Agent:
         obs = obs.float()
         next_obs = next_obs.float()
 
-        # Encode obs with gradients on
         z, _ = self.mvmae.encoder(obs, mask_x=False)
         z = z.flatten(start_dim=-2)
 
-        # Encode next_obs with gradients off
+        _cuda_sync(self.device)
+        t3 = time.perf_counter()
+
         with torch.no_grad():
             z_next, _ = self.mvmae.encoder(next_obs, mask_x=False)
             z_next = z_next.flatten(start_dim=-2)
 
-        # Critic + MV-MAE recon, Actor
+        _cuda_sync(self.device)
+        t4 = time.perf_counter()
+
         metrics_c = self.update_critic(z, action, reward, discount, z_next, step, obs, update_mvmae)
+        _cuda_sync(self.device)
+        t5 = time.perf_counter()
+
         metrics_a = self.update_actor(z.detach(), step)
+        _cuda_sync(self.device)
+        t6 = time.perf_counter()
 
         metrics.update(metrics_c)
         metrics.update(metrics_a)
+
+        metrics['perf_replay_next_ms'] = 1000.0 * (t1 - t0)
+        metrics['perf_to_torch_ms'] = 1000.0 * (t2 - t1)
+        metrics['perf_encode_obs_ms'] = 1000.0 * (t3 - t2)
+        metrics['perf_encode_next_obs_ms'] = 1000.0 * (t4 - t3)
+        metrics['perf_update_critic_total_ms'] = 1000.0 * (t5 - t4)
+        metrics['perf_update_actor_total_ms'] = 1000.0 * (t6 - t5)
+        metrics['perf_update_total_ms'] = 1000.0 * (t6 - t0)
+
         return metrics
 
