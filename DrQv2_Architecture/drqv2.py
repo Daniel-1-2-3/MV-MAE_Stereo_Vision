@@ -35,11 +35,9 @@ class Actor(nn.Module):
 
     def forward(self, obs, std):
         h = self.trunk(obs)
-
         mu = self.policy(h)
         mu = torch.tanh(mu)
         std = torch.ones_like(mu) * std
-
         dist = utils.TruncatedNormal(mu, std)
         return dist
 
@@ -67,18 +65,16 @@ class Critic(nn.Module):
         h_action = torch.cat([h, action], dim=-1)
         q1 = self.Q1(h_action)
         q2 = self.Q2(h_action)
-
         return q1, q2
+
 class DrQV2Agent:
     def __init__(self,
-        # General variables
         action_shape: tuple | None = None,
         device: torch.device | None = None,
         lr: float = 1e-4,
-        # MVMAE variables
         nviews: int = 2,
-        mvmae_patch_size: int = 8, 
-        mvmae_encoder_embed_dim: int = 256, 
+        mvmae_patch_size: int = 8,
+        mvmae_encoder_embed_dim: int = 256,
         mvmae_decoder_embed_dim: int = 128,
         mvmae_encoder_heads: int = 16,
         in_channels: int = 9,
@@ -87,22 +83,19 @@ class DrQV2Agent:
         mvmae_decoder_heads: int = 16,
         masking_ratio: float = 0.75,
         coef_mvmae: float = 0.005,
-        # Actor
         feature_dim: int = 100,
         hidden_dim: int = 1024,
-        # RL variables
-        critic_target_tau: float = 0.001, # Soft-update for target critic
-        num_expl_steps: int = 2000, 
+        critic_target_tau: float = 0.001,
+        num_expl_steps: int = 2000,
         update_every_steps: int = 2,
         update_mvmae_every_steps: int = 10,
-        stddev_schedule: str = 'linear(1.0,0.1,500000)', # Type of scheduler, value taken from cfgs/task/medium.yaml, stddev for exploration noise
-        stddev_clip: int = 0.3, # How much to clip sampled action noise
+        stddev_schedule: str = 'linear(1.0,0.1,500000)',
+        stddev_clip: int = 0.3,
         use_tb: bool = True,
     ):
         self.action_shape = action_shape
         self.device = device
         self.lr = lr
-
         self.nviews = nviews
         self.mvmae_patch_size = mvmae_patch_size
         self.mvmae_encoder_embed_dim = mvmae_encoder_embed_dim
@@ -114,10 +107,8 @@ class DrQV2Agent:
         self.img_w_size = img_w_size
         self.masking_ratio = masking_ratio
         self.coef_mvmae = coef_mvmae
-        
         self.feature_dim = feature_dim
         self.hidden_dim = hidden_dim
-        
         self.critic_target_tau = critic_target_tau
         self.num_expl_steps = num_expl_steps
         self.update_every_steps = update_every_steps
@@ -125,8 +116,7 @@ class DrQV2Agent:
         self.stddev_schedule = stddev_schedule
         self.stddev_clip = stddev_clip
         self.use_tb = use_tb
-        
-        # Models
+
         self.mvmae = MAEModel(
             nviews=self.nviews,
             patch_size=self.mvmae_patch_size,
@@ -139,17 +129,15 @@ class DrQV2Agent:
             img_w_size=self.img_w_size,
             masking_ratio=self.masking_ratio
         ).to(self.device)
-        
-        # The dimension of the flattened encoder output z
-        self.total_patches = (img_h_size // mvmae_patch_size) * (2 * img_w_size // mvmae_patch_size) # When fused view
+
+        self.total_patches = (img_h_size // mvmae_patch_size) * (2 * img_w_size // mvmae_patch_size)
         self.repr_dim = self.total_patches * self.mvmae.encoder_embed_dim
-        
+
         self.actor = Actor(self.repr_dim, action_shape, self.feature_dim, self.hidden_dim).to(device)
         self.critic = Critic(self.repr_dim, action_shape, feature_dim, hidden_dim).to(device)
         self.critic_target = Critic(self.repr_dim, action_shape, feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
-        # Optimizers
         self.mvmae_optim = torch.optim.Adam(self.mvmae.parameters(), lr=lr)
         self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=lr)
@@ -157,14 +145,12 @@ class DrQV2Agent:
         self.train()
         self.critic_target.train()
 
-    # Set into training (train vs eval) mode
     def train(self, training=True):
         self.training = training
         self.mvmae.train(training)
         self.actor.train(training)
         self.critic.train(training)
 
-    # Samples an action
     def act(self, obs, step, eval_mode):
         timings = {}
         _cuda_sync(self.device)
@@ -200,20 +186,20 @@ class DrQV2Agent:
         t4 = time.perf_counter()
 
         timings["act_tensorize_ms"] = 1000.0 * (t1 - t0)
-        timings["act_encoder_ms"] = 1000.0 * (t2 - t1)
-        timings["act_actor_ms"] = 1000.0 * (t3 - t2)
-        timings["act_to_cpu_ms"] = 1000.0 * (t4 - t3)
+        timings["act_encoder_ms"]   = 1000.0 * (t2 - t1)
+        timings["act_actor_ms"]     = 1000.0 * (t3 - t2)
+        timings["act_to_cpu_ms"]    = 1000.0 * (t4 - t3)
         self.last_act_timings = timings
 
         return action_np
-    
+
     def update_critic(self, z, action, reward, discount, z_next, step, obs, update_mvmae: bool):
         metrics = dict()
 
-        import time
+        # --- Target Q ---
+        _cuda_sync(self.device)
         t0 = time.perf_counter()
 
-        # Calculates target, computes MSE critic loss
         with torch.no_grad():
             stddev = utils.schedule(self.stddev_schedule, step)
             dist = self.actor(z_next, stddev)
@@ -221,38 +207,84 @@ class DrQV2Agent:
             target_Q1, target_Q2 = self.critic_target(z_next, next_action)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
-        
-        # Critic forward
+
+        _cuda_sync(self.device)
+        t1 = time.perf_counter()
+
+        # --- Critic forward + loss ---
         Q1, Q2 = self.critic(z, action)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
 
-        # MV-MAE reconstruction inside critic update
+        _cuda_sync(self.device)
+        t2 = time.perf_counter()
+
+        # --- MAE forward + loss (conditional) ---
+        recon_loss = None
         if update_mvmae:
             out, mask, _ = self.mvmae.forward(obs, mask_x=True)
-            recon_loss = self.mvmae.compute_loss(out, obs, mask)
+            _cuda_sync(self.device)
+            t_mae_fwd = time.perf_counter()
 
+            recon_loss = self.mvmae.compute_loss(out, obs, mask)
+            _cuda_sync(self.device)
+            t_mae_loss = time.perf_counter()
+
+            metrics['perf_critic_mae_forward_ms'] = 1000.0 * (t_mae_fwd - t2)
+            metrics['perf_critic_mae_loss_ms']    = 1000.0 * (t_mae_loss - t_mae_fwd)
+        else:
+            t_mae_loss = t2
+
+        # --- Combine losses ---
         total_loss = critic_loss
         if update_mvmae:
-            total_loss += self.coef_mvmae * recon_loss
+            total_loss = total_loss + self.coef_mvmae * recon_loss
 
-        # Backpropagate critic + mvmae losses together
+        _cuda_sync(self.device)
+        t3 = time.perf_counter()
+
+        # --- Zero grads ---
         self.critic_optim.zero_grad(set_to_none=True)
         if update_mvmae:
             self.mvmae_optim.zero_grad(set_to_none=True)
-        
+
+        _cuda_sync(self.device)
+        t4 = time.perf_counter()
+
+        # --- Backward ---
         total_loss.backward()
-        
+
+        _cuda_sync(self.device)
+        t5 = time.perf_counter()
+
+        # --- Optimizer step ---
         self.critic_optim.step()
         if update_mvmae:
             self.mvmae_optim.step()
 
+        _cuda_sync(self.device)
+        t6 = time.perf_counter()
+
+        # --- Soft update target critic ---
+        utils.soft_update_params(self.critic, self.critic_target, self.critic_target_tau)
+
+        _cuda_sync(self.device)
+        t7 = time.perf_counter()
+
         if self.use_tb:
             metrics['critic_target_q'] = target_Q.mean().item()
-            metrics['critic_q1'] = Q1.mean().item()
-            metrics['critic_q2'] = Q2.mean().item()
-            metrics['critic_loss'] = critic_loss.item()
-            metrics['recon_loss'] = recon_loss.item() if update_mvmae else -1.0
-            metrics['total_loss'] = total_loss.item()
+            metrics['critic_q1']       = Q1.mean().item()
+            metrics['critic_q2']       = Q2.mean().item()
+            metrics['critic_loss']     = critic_loss.item()
+            metrics['recon_loss']      = recon_loss.item() if update_mvmae else -1.0
+            metrics['total_loss']      = total_loss.item()
+
+        metrics['perf_critic_target_q_ms']     = 1000.0 * (t1 - t0)
+        metrics['perf_critic_forward_loss_ms'] = 1000.0 * (t2 - t1)
+        metrics['perf_critic_zero_grad_ms']    = 1000.0 * (t4 - t3)
+        metrics['perf_critic_backward_ms']     = 1000.0 * (t5 - t4)
+        metrics['perf_critic_optim_step_ms']   = 1000.0 * (t6 - t5)
+        metrics['perf_critic_soft_update_ms']  = 1000.0 * (t7 - t6)
+        metrics['perf_update_critic_total_ms'] = 1000.0 * (t7 - t0)
 
         return metrics
 
@@ -281,21 +313,22 @@ class DrQV2Agent:
         t2 = time.perf_counter()
 
         if self.use_tb:
-            metrics['actor_loss'] = actor_loss.item()
+            metrics['actor_loss']    = actor_loss.item()
             metrics['actor_logprob'] = log_prob.mean().item()
-            metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
+            metrics['actor_ent']     = dist.entropy().sum(dim=-1).mean().item()
 
-        metrics['perf_actor_forward_ms'] = 1000.0 * (t1 - t0)
+        metrics['perf_actor_forward_ms']       = 1000.0 * (t1 - t0)
         metrics['perf_actor_backward_step_ms'] = 1000.0 * (t2 - t1)
+        metrics['perf_update_actor_total_ms']  = 1000.0 * (t2 - t0)
 
         return metrics
-    
+
     def update(self, replay_iter, step):
         metrics = dict()
 
         if step % self.update_every_steps != 0:
             return metrics
-        update_mvmae = True if step % self.update_mvmae_every_steps == 0 else False
+        update_mvmae = step % self.update_mvmae_every_steps == 0
 
         _cuda_sync(self.device)
         t0 = time.perf_counter()
@@ -330,22 +363,24 @@ class DrQV2Agent:
         t4 = time.perf_counter()
 
         metrics_c = self.update_critic(z, action, reward, discount, z_next, step, obs, update_mvmae)
+
         _cuda_sync(self.device)
         t5 = time.perf_counter()
 
         metrics_a = self.update_actor(z.detach(), step)
+
         _cuda_sync(self.device)
         t6 = time.perf_counter()
 
         metrics.update(metrics_c)
         metrics.update(metrics_a)
 
-        metrics['perf_replay_next_ms'] = 1000.0 * (t1 - t0)
-        metrics['perf_to_torch_ms'] = 1000.0 * (t2 - t1)
-        metrics['perf_encode_obs_ms'] = 1000.0 * (t3 - t2)
-        metrics['perf_encode_next_obs_ms'] = 1000.0 * (t4 - t3)
+        metrics['perf_replay_next_ms']         = 1000.0 * (t1 - t0)
+        metrics['perf_to_torch_ms']            = 1000.0 * (t2 - t1)
+        metrics['perf_encode_obs_ms']          = 1000.0 * (t3 - t2)
+        metrics['perf_encode_next_obs_ms']     = 1000.0 * (t4 - t3)
         metrics['perf_update_critic_total_ms'] = 1000.0 * (t5 - t4)
-        metrics['perf_update_actor_total_ms'] = 1000.0 * (t6 - t5)
-        metrics['perf_update_total_ms'] = 1000.0 * (t6 - t0)
+        metrics['perf_update_actor_total_ms']  = 1000.0 * (t6 - t5)
+        metrics['perf_update_total_ms']        = 1000.0 * (t6 - t0)
 
         return metrics
