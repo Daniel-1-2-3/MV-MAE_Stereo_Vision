@@ -22,7 +22,7 @@ from DrQv2_Architecture.replay_buffer import ReplayBufferStorage, make_replay_lo
 from DrQv2_Architecture.video import VideoRecorder
 from DrQv2_Architecture.drqv2 import DrQV2Agent
 from DrQv2_Architecture.env_wrappers import ExtendedTimeStepWrapper, ActionRepeatWrapper, FrameStackWrapper
-from SawyerSim.sawyer_stereo_env import SawyerReachEnvV3
+from Sawyer_Sim.sawyer_stereo_env import SawyerReachEnvV3
 from gymnasium.spaces import Box
 
 torch.backends.cudnn.benchmark = True
