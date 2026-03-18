@@ -1,136 +1,107 @@
-import warnings
-warnings.filterwarnings('ignore', category=DeprecationWarning)
-
-import os
-os.environ.setdefault("MUJOCO_GL", "egl")
-os.environ.setdefault("MUJOCO_PLATFORM", "egl")
-os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
-os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
-
-from pathlib import Path
 import numpy as np
 import torch
-import time
-from collections import defaultdict
-from contextlib import contextmanager
-import argparse
-from dm_env import specs
+import torch.nn as nn
+import torch.nn.functional as F
 
 import DrQv2_Architecture.utils as utils
-from DrQv2_Architecture.logger import Logger
-from DrQv2_Architecture.replay_buffer import ReplayBufferStorage, make_replay_loader
-from DrQv2_Architecture.video import VideoRecorder
-from DrQv2_Architecture.drqv2 import DrQV2Agent
-from DrQv2_Architecture.env_wrappers import ExtendedTimeStepWrapper, ActionRepeatWrapper, FrameStackWrapper
-from Sawyer_Sim.sawyer_stereo_env import SawyerReachEnvV3
+from MAE_Model.model import MAEModel
+from MAE_Model.encoder import ViTMaskedEncoder
 from gymnasium.spaces import Box
 
-torch.backends.cudnn.benchmark = True
+import time
 
-class PerfTracker:
-    def __init__(self, device=None, print_every=200):
-        self.device = device
-        self.print_every = print_every
-        self.totals = defaultdict(float)
-        self.counts = defaultdict(int)
+def _cuda_sync(device):
+    if device is not None and "cuda" in str(device) and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
 
-    def _sync(self):
-        if self.device is not None and "cuda" in str(self.device) and torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
+class Actor(nn.Module):
+    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
+        super().__init__()
 
-    @contextmanager
-    def timeit(self, name: str):
-        self._sync()
-        t0 = time.perf_counter()
-        yield
-        self._sync()
-        dt = time.perf_counter() - t0
-        self.totals[name] += dt
-        self.counts[name] += 1
+        self.trunk = nn.Sequential(
+            nn.Linear(repr_dim, feature_dim),
+            nn.LayerNorm(feature_dim), nn.Tanh()
+        )
 
-    def add(self, name: str, dt: float):
-        self.totals[name] += dt
-        self.counts[name] += 1
+        self.policy = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, action_shape[0])
+        )
 
-    def mean(self, name: str):
-        c = self.counts.get(name, 0)
-        return self.totals.get(name, 0.0) / c if c else 0.0
+        self.apply(utils.weight_init)
 
-    def maybe_print(self, step: int, prefix: str = "PERF"):
-        if step == 0 or step % self.print_every != 0:
-            return
-        keys = sorted(self.totals.keys())
-        if not keys:
-            return
-        parts = []
-        for k in keys:
-            mean_ms = 1000.0 * self.mean(k)
-            parts.append(f"{k}={mean_ms:.2f}ms")
-        print(f"[{prefix} step={step}] " + " | ".join(parts))
+    def forward(self, obs, std):
+        h = self.trunk(obs)
 
-    def reset(self):
-        self.totals.clear()
-        self.counts.clear()
+        mu = self.policy(h)
+        mu = torch.tanh(mu)
+        std = torch.ones_like(mu) * std
 
+        dist = utils.TruncatedNormal(mu, std)
+        return dist
 
-class Workshop:
-    def __init__(
-        self,
+class Critic(nn.Module):
+    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
+        super().__init__()
+
+        self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim),
+                                   nn.LayerNorm(feature_dim), nn.Tanh())
+
+        self.Q1 = nn.Sequential(
+            nn.Linear(feature_dim + action_shape[0], hidden_dim),
+            nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
+
+        self.Q2 = nn.Sequential(
+            nn.Linear(feature_dim + action_shape[0], hidden_dim),
+            nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
+
+        self.apply(utils.weight_init)
+
+    def forward(self, obs, action):
+        h = self.trunk(obs)
+        h_action = torch.cat([h, action], dim=-1)
+        q1 = self.Q1(h_action)
+        q2 = self.Q2(h_action)
+
+        return q1, q2
+class DrQV2Agent:
+    def __init__(self,
         # General variables
+        action_shape: tuple | None = None,
         device: torch.device | None = None,
-        # RL training
-        buffer_size: int = 100_000,
-        total_timesteps: int = 500_000,
-        learning_starts: int = 10_000,
-        num_expl_steps: int = 5000,
-        episode_horizon: int = 300,
-        batch_size: int = 64,
-        critic_target_tau: float = 0.001,
-        update_every_steps: int = 2,
-        update_mvmae_every_steps: int = 10,
-        stddev_schedule: str = 'linear(1.0,0.1,500000)',
-        stddev_clip: int = 0.3,
-        use_tb: bool = True,
         lr: float = 1e-4,
-        discount: float = 0.99,
-        action_repeat: int = 2,
         # MVMAE variables
         nviews: int = 2,
-        mvmae_patch_size: int = 8,
-        mvmae_encoder_embed_dim: int = 256,
+        mvmae_patch_size: int = 8, 
+        mvmae_encoder_embed_dim: int = 256, 
         mvmae_decoder_embed_dim: int = 128,
         mvmae_encoder_heads: int = 16,
+        in_channels: int = 9,
+        img_h_size: int = 64,
+        img_w_size: int = 64,
         mvmae_decoder_heads: int = 16,
         masking_ratio: float = 0.75,
         coef_mvmae: float = 0.005,
-        # Actor + critic
+        # Actor
         feature_dim: int = 100,
         hidden_dim: int = 1024,
-        # Image specs
-        render_mode: str = "human",
-        in_channels: int = 3 * 3,
-        img_h_size: int = 64,
-        img_w_size: int = 64,
+        # RL variables
+        critic_target_tau: float = 0.001, # Soft-update for target critic
+        num_expl_steps: int = 2000, 
+        update_every_steps: int = 2,
+        update_mvmae_every_steps: int = 10,
+        stddev_schedule: str = 'linear(1.0,0.1,500000)', # Type of scheduler, value taken from cfgs/task/medium.yaml, stddev for exploration noise
+        stddev_clip: int = 0.3, # How much to clip sampled action noise
+        use_tb: bool = True,
     ):
-        self.overall_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels), dtype=np.float32)
-        self.sawyer_env_obs_space = Box(low=np.float32(-4.0), high=np.float32(4.0), shape=(img_h_size, nviews * img_w_size, in_channels // 3), dtype=np.float32)
-        self.action_space = Box(np.array([-1, -1, -1, -1]), np.array([+1, +1, +1, +1]), dtype=np.float32)
-        self.device = device if (device is not None) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.buffer_size = buffer_size
-        self.total_timesteps = total_timesteps
-        self.learning_starts = learning_starts
-        self.num_expl_steps = num_expl_steps
-        self.episode_horizon = episode_horizon
-        self.batch_size = batch_size
-        self.critic_target_tau = critic_target_tau
-        self.update_every_steps = update_every_steps
-        self.update_mvmae_every_steps = update_mvmae_every_steps
-        self.stddev_schedule = stddev_schedule
-        self.stddev_clip = stddev_clip
-        self.use_tb = use_tb
+        self.action_shape = action_shape
+        self.device = device
         self.lr = lr
-        self.discount = discount
-        self.action_repeat = action_repeat
 
         self.nviews = nviews
         self.mvmae_patch_size = mvmae_patch_size
@@ -138,289 +109,243 @@ class Workshop:
         self.mvmae_decoder_embed_dim = mvmae_decoder_embed_dim
         self.mvmae_encoder_heads = mvmae_encoder_heads
         self.mvmae_decoder_heads = mvmae_decoder_heads
-        self.masking_ratio = masking_ratio
-        self.coef_mvmae = coef_mvmae
-
-        self.feature_dim = feature_dim
-        self.hidden_dim = hidden_dim
-
-        self.render_mode = render_mode
         self.in_channels = in_channels
         self.img_h_size = img_h_size
         self.img_w_size = img_w_size
-
-        self.work_dir = Path.cwd()
-        print(f'Workspace: {self.work_dir}')
-        self._global_step = 0
-        self._global_episode = 0
-
-        self.seed = 1
-        utils.set_seed_everywhere(self.seed)
-
-        self.agent = self.make_agent()
-        self.setup()
-        self.timer = utils.Timer()
-
-        self.eval_every_frames = 10000
-        self.num_eval_episodes = 10
-
-        self.perf = PerfTracker(device=self.device, print_every=200)
-
-        # Rolling accumulator for update metrics (averaged over print_every steps)
-        self._update_metrics_accum = defaultdict(float)
-        self._update_metrics_count = 0
-
-    def make_agent(self):
-        return DrQV2Agent(
-            action_shape=(self.action_space.shape[0],),
-            device=self.device,
-            lr=self.lr,
+        self.masking_ratio = masking_ratio
+        self.coef_mvmae = coef_mvmae
+        
+        self.feature_dim = feature_dim
+        self.hidden_dim = hidden_dim
+        
+        self.critic_target_tau = critic_target_tau
+        self.num_expl_steps = num_expl_steps
+        self.update_every_steps = update_every_steps
+        self.update_mvmae_every_steps = update_mvmae_every_steps
+        self.stddev_schedule = stddev_schedule
+        self.stddev_clip = stddev_clip
+        self.use_tb = use_tb
+        
+        # Models
+        self.mvmae = MAEModel(
             nviews=self.nviews,
-            mvmae_patch_size=self.mvmae_patch_size,
-            mvmae_encoder_embed_dim=self.mvmae_encoder_embed_dim,
-            mvmae_decoder_embed_dim=self.mvmae_decoder_embed_dim,
-            mvmae_encoder_heads=self.mvmae_encoder_heads,
-            mvmae_decoder_heads=self.mvmae_decoder_heads,
+            patch_size=self.mvmae_patch_size,
+            encoder_embed_dim=self.mvmae_encoder_embed_dim,
+            decoder_embed_dim=self.mvmae_decoder_embed_dim,
+            encoder_heads=self.mvmae_encoder_heads,
+            decoder_heads=mvmae_decoder_heads,
             in_channels=self.in_channels,
             img_h_size=self.img_h_size,
             img_w_size=self.img_w_size,
-            masking_ratio=self.masking_ratio,
-            coef_mvmae=self.coef_mvmae,
-            feature_dim=self.feature_dim,
-            hidden_dim=self.hidden_dim,
-            critic_target_tau=self.critic_target_tau,
-            num_expl_steps=self.num_expl_steps,
-            update_every_steps=self.update_every_steps,
-            update_mvmae_every_steps=self.update_mvmae_every_steps,
-            stddev_schedule=self.stddev_schedule,
-            stddev_clip=self.stddev_clip,
-            use_tb=self.use_tb
-        )
+            masking_ratio=self.masking_ratio
+        ).to(self.device)
+        
+        # The dimension of the flattened encoder output z
+        self.total_patches = (img_h_size // mvmae_patch_size) * (2 * img_w_size // mvmae_patch_size) # When fused view
+        self.repr_dim = self.total_patches * self.mvmae.encoder_embed_dim
+        
+        self.actor = Actor(self.repr_dim, action_shape, self.feature_dim, self.hidden_dim).to(device)
+        self.critic = Critic(self.repr_dim, action_shape, feature_dim, hidden_dim).to(device)
+        self.critic_target = Critic(self.repr_dim, action_shape, feature_dim, hidden_dim).to(device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
 
-    def make_env(self, render_mode):
-        env = SawyerReachEnvV3(
-            render_mode=render_mode,
-            img_height=self.img_h_size,
-            img_width=self.img_w_size,
-            max_path_length=self.episode_horizon,
-            obs_space=self.sawyer_env_obs_space,
-            action_space=self.action_space,
-            discount=self.discount
-        )
-        env = FrameStackWrapper(env, num_frames=self.in_channels // 3)
-        env = ActionRepeatWrapper(env, num_repeats=self.action_repeat)
-        env = ExtendedTimeStepWrapper(env)
-        return env
+        # Optimizers
+        self.mvmae_optim = torch.optim.Adam(self.mvmae.parameters(), lr=lr)
+        self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=lr)
+        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=lr)
 
-    def setup(self):
-        self.logger = Logger(self.work_dir / "Training_Results", use_tb=True)
-        self.train_env = self.make_env("rgb_array")
-        self.eval_env = self.make_env("rgb_array")
+        self.train()
+        self.critic_target.train()
 
-        data_specs = (
-            specs.Array(self.overall_obs_space.shape, self.overall_obs_space.dtype, name="observation"),
-            specs.Array(self.action_space.shape, self.action_space.dtype, name="action"),
-            specs.Array((1,), np.float32, name="reward"),
-            specs.Array((1,), np.float32, name="discount")
-        )
-        self.replay_storage = ReplayBufferStorage(data_specs, self.work_dir / 'buffer')
-        self.replay_loader = make_replay_loader(
-            self.work_dir / 'buffer', self.buffer_size,
-            self.batch_size, 4, False, 3, self.discount)
-        self._replay_iter = None
+    # Set into training (train vs eval) mode
+    def train(self, training=True):
+        self.training = training
+        self.mvmae.train(training)
+        self.actor.train(training)
+        self.critic.train(training)
 
-        self.video_recorder = VideoRecorder(self.work_dir / "Training_Results")
+    # Samples an action
+    def act(self, obs, step, eval_mode):
+        timings = {}
+        _cuda_sync(self.device)
+        t0 = time.perf_counter()
 
-    @property
-    def global_step(self):
-        return self._global_step
+        obs = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
 
-    @property
-    def global_episode(self):
-        return self._global_episode
+        _cuda_sync(self.device)
+        t1 = time.perf_counter()
 
-    @property
-    def global_frame(self):
-        return self.global_step * self.action_repeat
+        with torch.no_grad():
+            z, _ = self.mvmae.encoder(obs.unsqueeze(0), mask_x=False)
+            obs_latent = z.flatten(start_dim=-2)
 
-    @property
-    def replay_iter(self):
-        if self._replay_iter is None:
-            self._replay_iter = iter(self.replay_loader)
-        return self._replay_iter
+        _cuda_sync(self.device)
+        t2 = time.perf_counter()
 
-    def eval(self):
-        step, episode, total_reward = 0, 0, 0
-        eval_until_episode = utils.Until(self.num_eval_episodes)
+        stddev = utils.schedule(self.stddev_schedule, step)
+        dist = self.actor(obs_latent, stddev)
+        if eval_mode:
+            action = dist.mean
+        else:
+            action = dist.sample(clip=None)
+            if step < self.num_expl_steps:
+                action.uniform_(-1.0, 1.0)
 
-        while eval_until_episode(episode):
-            time_step = self.eval_env.reset()
-            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
-            while not time_step.last():
-                with torch.no_grad(), utils.eval_mode(self.agent):
-                    action = self.agent.act(time_step.observation, self.global_step, eval_mode=True)
-                time_step = self.eval_env.step(action)
-                self.video_recorder.record(self.eval_env)
-                total_reward += float(time_step.reward[0])
-                step += 1
+        _cuda_sync(self.device)
+        t3 = time.perf_counter()
 
-            episode += 1
-            self.video_recorder.save(f'{self.global_frame}.mp4')
+        action_np = action.cpu().numpy()[0]
 
-        with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
-            log('episode_reward', total_reward / episode)
-            log('episode_length', step * self.action_repeat / episode)
-            log('episode', self.global_episode)
-            log('step', self.global_step)
+        _cuda_sync(self.device)
+        t4 = time.perf_counter()
 
-    def _accumulate_update_metrics(self, metrics: dict):
-        """Accumulate perf_* metrics from update() for averaging over print window."""
-        for k, v in metrics.items():
-            if k.startswith('perf_'):
-                self._update_metrics_accum[k] += v
-        self._update_metrics_count += 1
+        timings["act_tensorize_ms"] = 1000.0 * (t1 - t0)
+        timings["act_encoder_ms"] = 1000.0 * (t2 - t1)
+        timings["act_actor_ms"] = 1000.0 * (t3 - t2)
+        timings["act_to_cpu_ms"] = 1000.0 * (t4 - t3)
+        self.last_act_timings = timings
 
-    def _print_update_metrics(self, step: int):
-        """Print averaged perf_* update metrics and reset accumulator."""
-        if not self._update_metrics_accum or self._update_metrics_count == 0:
-            return
-        parts = []
-        for k in sorted(self._update_metrics_accum.keys()):
-            mean_ms = self._update_metrics_accum[k] / self._update_metrics_count
-            parts.append(f"{k}={mean_ms:.2f}ms")
-        print(f"[UPDATE step={step}] " + " | ".join(parts))
-        self._update_metrics_accum.clear()
-        self._update_metrics_count = 0
+        return action_np
+    
+    def update_critic(self, z, action, reward, discount, z_next, step, obs, update_mvmae: bool):
+        metrics = dict()
 
-    def train(self):
-        train_until_step = utils.Until(self.total_timesteps, self.action_repeat)
-        seed_until_step = utils.Until(self.learning_starts, self.action_repeat)
-        eval_every_step = utils.Every(self.eval_every_frames, self.action_repeat)
+        import time
+        t0 = time.perf_counter()
 
-        episode_step, episode_reward = 0, 0
-        time_step = self.train_env.reset()
-        self.replay_storage.add(time_step)
+        # Calculates target, computes MSE critic loss
+        with torch.no_grad():
+            stddev = utils.schedule(self.stddev_schedule, step)
+            dist = self.actor(z_next, stddev)
+            next_action = dist.sample(clip=self.stddev_clip)
+            target_Q1, target_Q2 = self.critic_target(z_next, next_action)
+            target_V = torch.min(target_Q1, target_Q2)
+            target_Q = reward + (discount * target_V)
+        
+        # Critic forward
+        Q1, Q2 = self.critic(z, action)
+        critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
 
-        metrics = None
-        while train_until_step(self.global_step):
-            if time_step.last():
-                self._global_episode += 1
-                if metrics is not None:
-                    elapsed_time, total_time = self.timer.reset()
-                    episode_frame = episode_step * self.action_repeat
-                    with self.logger.log_and_dump_ctx(self.global_frame, ty='train') as log:
-                        log('fps', episode_frame / elapsed_time)
-                        log('total_time', total_time)
-                        log('episode_reward', episode_reward)
-                        log('episode_length', episode_frame)
-                        log('episode', self.global_episode)
-                        log('buffer_size', len(self.replay_storage))
-                        log('step', self.global_step)
+        # MV-MAE reconstruction inside critic update
+        if update_mvmae:
+            out, mask, _ = self.mvmae.forward(obs, mask_x=True)
+            recon_loss = self.mvmae.compute_loss(out, obs, mask)
 
-                time_step = self.train_env.reset()
-                self.replay_storage.add(time_step)
-                episode_step = 0
-                episode_reward = 0
+        total_loss = critic_loss
+        if update_mvmae:
+            total_loss += self.coef_mvmae * recon_loss
 
-            if eval_every_step(self.global_step):
-                self.logger.log('eval_total_time', self.timer.total_time(), self.global_frame)
-                self.eval()
+        # Backpropagate critic + mvmae losses together
+        self.critic_optim.zero_grad(set_to_none=True)
+        if update_mvmae:
+            self.mvmae_optim.zero_grad(set_to_none=True)
+        
+        total_loss.backward()
+        
+        self.critic_optim.step()
+        if update_mvmae:
+            self.mvmae_optim.step()
 
-            with self.perf.timeit("loop_total"):
-                with self.perf.timeit("act_total"):
-                    with torch.no_grad(), utils.eval_mode(self.agent):
-                        action = self.agent.act(time_step.observation, self.global_step, eval_mode=False)
+        if self.use_tb:
+            metrics['critic_target_q'] = target_Q.mean().item()
+            metrics['critic_q1'] = Q1.mean().item()
+            metrics['critic_q2'] = Q2.mean().item()
+            metrics['critic_loss'] = critic_loss.item()
+            metrics['recon_loss'] = recon_loss.item() if update_mvmae else -1.0
+            metrics['total_loss'] = total_loss.item()
 
-                if not seed_until_step(self.global_step):
-                    with self.perf.timeit("update_total"):
-                        metrics = self.agent.update(self.replay_iter, self.global_step)
-                    if metrics:
-                        self.logger.log_metrics(metrics, self.global_frame, ty='train')
-                        self._accumulate_update_metrics(metrics)
-                else:
-                    metrics = None
+        return metrics
 
-                with self.perf.timeit("env_step_total"):
-                    time_step = self.train_env.step(action)
+    def update_actor(self, obs, step):
+        metrics = dict()
 
-            episode_reward += float(time_step.reward[0])
-            self.replay_storage.add(time_step)
-            episode_step += 1
-            self._global_step += 1
+        _cuda_sync(self.device)
+        t0 = time.perf_counter()
 
-            if self.global_step % 200 == 0:
-                raw = self.perf.mean("loop_total")
-                if raw > 0:
-                    print(f"[speed step={self.global_step}] full_loop={1.0/raw:.2f} loops/sec")
+        stddev = utils.schedule(self.stddev_schedule, step)
+        dist = self.actor(obs, stddev)
+        action = dist.sample(clip=self.stddev_clip)
+        log_prob = dist.log_prob(action).sum(-1, keepdim=True)
+        Q1, Q2 = self.critic(obs, action)
+        Q = torch.min(Q1, Q2)
+        actor_loss = -Q.mean()
 
-                self.perf.maybe_print(self.global_step)
-                self._print_update_metrics(self.global_step)
+        _cuda_sync(self.device)
+        t1 = time.perf_counter()
 
-                if hasattr(self.train_env, "consume_perf_stats"):
-                    env_stats = self.train_env.consume_perf_stats()
-                    if env_stats:
-                        env_parts = [f"{k}={v:.2f}ms" for k, v in sorted(env_stats.items())]
-                        print(f"[ENV step={self.global_step}] " + " | ".join(env_parts))
+        self.actor_optim.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        self.actor_optim.step()
 
-                if hasattr(self.agent, "last_act_timings"):
-                    act_parts = [f"{k}={v:.2f}ms" for k, v in sorted(self.agent.last_act_timings.items())]
-                    print(f"[ACT step={self.global_step}] " + " | ".join(act_parts))
+        _cuda_sync(self.device)
+        t2 = time.perf_counter()
 
+        if self.use_tb:
+            metrics['actor_loss'] = actor_loss.item()
+            metrics['actor_logprob'] = log_prob.mean().item()
+            metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
 
-def save_agent(agent: DrQV2Agent, path="agent_weights.pt"):
-    torch.save({
-        "mvmae": agent.mvmae.state_dict(),
-        "actor": agent.actor.state_dict(),
-        "critic": agent.critic.state_dict(),
-        "critic_target": agent.critic_target.state_dict(),
-    }, path)
+        metrics['perf_actor_forward_ms'] = 1000.0 * (t1 - t0)
+        metrics['perf_actor_backward_step_ms'] = 1000.0 * (t2 - t1)
 
+        return metrics
+    
+    def update(self, replay_iter, step):
+        metrics = dict()
 
-def load_agent(agent: DrQV2Agent, path="agent_weights.pt"):
-    checkpoint = torch.load(path, map_location=agent.device)
-    agent.mvmae.load_state_dict(checkpoint["mvmae"])
-    agent.actor.load_state_dict(checkpoint["actor"])
-    agent.critic.load_state_dict(checkpoint["critic"])
-    agent.critic_target.load_state_dict(checkpoint["critic_target"])
+        if step % self.update_every_steps != 0:
+            return metrics
+        update_mvmae = True if step % self.update_mvmae_every_steps == 0 else False
 
+        _cuda_sync(self.device)
+        t0 = time.perf_counter()
 
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--buffer_size", type=int, default=100_000)
-    parser.add_argument("--total_timesteps", type=int, default=500_000)
-    parser.add_argument("--learning_starts", type=int, default=10_000)
-    parser.add_argument("--num_expl_steps", type=int, default=5000)
-    parser.add_argument("--episode_horizon", type=int, default=300)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--critic_target_tau", type=float, default=0.001)
-    parser.add_argument("--update_every_steps", type=int, default=2)
-    parser.add_argument("--update_mvmae_every_steps", type=int, default=10)
-    parser.add_argument("--stddev_schedule", type=str, default="linear(1.0,0.1,500000)")
-    parser.add_argument("--stddev_clip", type=float, default=0.3)
-    parser.add_argument("--use_tb", action="store_true")
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--discount", type=float, default=0.99)
-    parser.add_argument("--action_repeat", type=int, default=2)
-    parser.add_argument("--nviews", type=int, default=2)
-    parser.add_argument("--mvmae_patch_size", type=int, default=8)
-    parser.add_argument("--mvmae_encoder_embed_dim", type=int, default=256)
-    parser.add_argument("--mvmae_decoder_embed_dim", type=int, default=128)
-    parser.add_argument("--mvmae_encoder_heads", type=int, default=16)
-    parser.add_argument("--mvmae_decoder_heads", type=int, default=16)
-    parser.add_argument("--masking_ratio", type=float, default=0.75)
-    parser.add_argument("--coef_mvmae", type=float, default=0.005)
-    parser.add_argument("--feature_dim", type=int, default=100)
-    parser.add_argument("--hidden_dim", type=int, default=1024)
-    parser.add_argument("--render_mode", type=str, default="rgb_array")
-    parser.add_argument("--in_channels", type=int, default=3 * 3)
-    parser.add_argument("--img_h_size", type=int, default=64)
-    parser.add_argument("--img_w_size", type=int, default=64)
-    return parser.parse_args()
+        batch = next(replay_iter)
 
+        _cuda_sync(self.device)
+        t1 = time.perf_counter()
 
-if __name__ == '__main__':
-    args = get_args()
-    workspace = Workshop(**vars(args))
-    workspace.train()
-    save_agent(workspace.agent)
+        obs, action, reward, discount, next_obs = utils.to_torch(batch, self.device)
+
+        _cuda_sync(self.device)
+        t2 = time.perf_counter()
+
+        if self.use_tb:
+            metrics['batch_reward'] = reward.mean().item()
+
+        obs = obs.float()
+        next_obs = next_obs.float()
+
+        z, _ = self.mvmae.encoder(obs, mask_x=False)
+        z = z.flatten(start_dim=-2)
+
+        _cuda_sync(self.device)
+        t3 = time.perf_counter()
+
+        with torch.no_grad():
+            z_next, _ = self.mvmae.encoder(next_obs, mask_x=False)
+            z_next = z_next.flatten(start_dim=-2)
+
+        _cuda_sync(self.device)
+        t4 = time.perf_counter()
+
+        metrics_c = self.update_critic(z, action, reward, discount, z_next, step, obs, update_mvmae)
+        _cuda_sync(self.device)
+        t5 = time.perf_counter()
+
+        metrics_a = self.update_actor(z.detach(), step)
+        _cuda_sync(self.device)
+        t6 = time.perf_counter()
+
+        metrics.update(metrics_c)
+        metrics.update(metrics_a)
+
+        metrics['perf_replay_next_ms'] = 1000.0 * (t1 - t0)
+        metrics['perf_to_torch_ms'] = 1000.0 * (t2 - t1)
+        metrics['perf_encode_obs_ms'] = 1000.0 * (t3 - t2)
+        metrics['perf_encode_next_obs_ms'] = 1000.0 * (t4 - t3)
+        metrics['perf_update_critic_total_ms'] = 1000.0 * (t5 - t4)
+        metrics['perf_update_actor_total_ms'] = 1000.0 * (t6 - t5)
+        metrics['perf_update_total_ms'] = 1000.0 * (t6 - t0)
+
+        return metrics
