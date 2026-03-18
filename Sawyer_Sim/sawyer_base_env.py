@@ -155,6 +155,9 @@ class SawyerXYZEnv(SawyerMocapBase, EzPickle):
         # Preallocate CPU buffers used by mjr_readPixels (uint8, HxWx3)
         self._rgb_left  = np.empty((self.height, self.width, 3), dtype=np.uint8)
         self._rgb_right = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        
+        self._perf = defaultdict(float)
+        self._perf_counts = defaultdict(int)
 
     def _perf_add(self, name: str, dt: float):
         self._perf[name] += dt
