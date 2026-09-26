@@ -38,14 +38,17 @@ python -m pip install "isaacsim[all,extscache]==5.0.0" \
     "i4h_asset_helper @ git+https://github.com/isaac-for-healthcare/i4h-asset-catalog.git@v0.3.0" \
     --extra-index-url https://pypi.nvidia.com
 # 2) PyTorch built for CUDA 12.8 (needed for Blackwell GPUs; isaaclab.sh also checks this)
-python -m pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 
 ISAACLAB_DIR="third_party/IsaacLab"
 if [ ! -d "$ISAACLAB_DIR" ]; then
     git clone --depth 1 --branch v2.3.0 https://github.com/isaac-sim/IsaacLab.git "$ISAACLAB_DIR"
 fi
-# 3) Isaac Lab from source
-(cd "$ISAACLAB_DIR" && ./isaaclab.sh --install none)
+# 3) Isaac Lab core package (this project needs nothing else from Isaac Lab).
+# Installed with pip directly rather than `isaaclab.sh --install`, which hides pip
+# failures. flatdict (an Isaac Lab dependency) must be built without build isolation.
+python -m pip install --no-build-isolation flatdict==4.0.1
+python -m pip install --editable "$ISAACLAB_DIR/source/isaaclab"
 
 # Same patch as Isaac for Healthcare's installer: import omni.log lazily in
 # isaaclab/utils/math.py so the module also imports cleanly with Isaac Sim 5.0.
@@ -54,8 +57,10 @@ sed -i '/^[[:space:]]*import omni\.log[[:space:]]*$/d' "$MATH_PY"
 sed -i -E 's/^([[:space:]]*)omni\.log\.warn\(/\1import omni.log\
 \1omni.log.warn(/g' "$MATH_PY"
 
-# 4) Project dependencies last (see requirements.txt for why they are a separate step)
-python -m pip install -r requirements.txt
+# 4) Project dependencies last, constrained to the exact versions Isaac Sim pins
+python tools/isaacsim_constraints.py > .isaacsim_constraints.txt
+echo "versions pinned by Isaac Sim: $(wc -l < .isaacsim_constraints.txt)"
+python -m pip install -r requirements.txt -c .isaacsim_constraints.txt
 
 python - <<'EOF'
 import importlib.metadata as md

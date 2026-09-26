@@ -9,3 +9,4 @@ __pycache__/
 *.zip
 *.sif
 .pytest_cache/
+.isaacsim_constraints.txt
