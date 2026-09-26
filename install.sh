@@ -27,7 +27,7 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
 if command -v apt-get > /dev/null && [ "$(id -u)" = "0" ]; then
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        git libglu1-mesa libgl1 libxt6 libxrender1 libxi6 libxext6 libsm6 libice6 libxrandr2 vulkan-tools
+        git wget libglvnd0 libglx0 libegl1 libvulkan1 libglu1-mesa libgl1 libxt6 libxrender1 libxi6 libxext6 libsm6 libice6 libxrandr2 vulkan-tools
 fi
 
 python -m pip install --upgrade pip
