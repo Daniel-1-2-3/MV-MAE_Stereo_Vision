@@ -39,8 +39,11 @@ python -m pip install setuptools==75.8.0 toml==0.10.2
 python -m pip install "isaacsim[all,extscache]==5.1.0" \
     "i4h_asset_helper @ git+https://github.com/isaac-for-healthcare/i4h-asset-catalog.git@v0.3.0" \
     --extra-index-url https://pypi.nvidia.com
-# 2) PyTorch built for CUDA 12.8 (needed for Blackwell GPUs; isaaclab.sh also checks this)
-python -m pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+# 2) PyTorch built for CUDA 12.8 (needed for Blackwell / sm_120 GPUs). Isaac Sim pulls in the
+#    plain PyPI torch 2.7.0 (CUDA 12.6, no Blackwell kernels); the explicit "+cu128" local version
+#    forces pip to replace it instead of treating "2.7.0" as already satisfied.
+python -m pip install "torch==2.7.0+cu128" "torchvision==0.22.0+cu128" "torchaudio==2.7.0+cu128" \
+    --index-url https://download.pytorch.org/whl/cu128
 
 ISAACLAB_DIR="third_party/IsaacLab"
 if [ ! -d "$ISAACLAB_DIR" ]; then
@@ -73,6 +76,11 @@ import isaaclab
 for pkg in ("isaacsim", "isaaclab", "torch", "i4h_asset_helper", "wandb"):
     print(f"{pkg:18s} {md.version(pkg)}")
 print("CUDA available:", torch.cuda.is_available(), "| GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "-")
+assert torch.version.cuda and torch.version.cuda.startswith("12.8"), f"expected a CUDA 12.8 torch build, got {torch.__version__}"
+if torch.cuda.is_available():
+    cap = torch.cuda.get_device_capability(0)
+    assert f"sm_{cap[0]}{cap[1]}" in torch.cuda.get_arch_list(), f"torch has no kernels for this GPU (sm_{cap[0]}{cap[1]})"
+    print("torch GPU check:", (torch.ones(4, device="cuda") * 2).sum().item() == 8.0)
 EOF
 if command -v vulkaninfo > /dev/null; then
     vulkaninfo --summary 2>/dev/null | grep -E "deviceName|driverVersion" || echo "WARNING: vulkaninfo found no GPU; Isaac Sim cameras will not render"
