@@ -1,0 +1,84 @@
+# Copyright (c) 2024-2025, The ORBIT-Surgical Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# From Isaac for Healthcare v0.4.0 (robotic.surgery.assets/robotic/surgery/assets/psm.py), unchanged
+# apart from the asset import path.
+
+"""Configuration for the da Vinci Research Kit (dVRK) Patient Side Manipulator (PSM).
+
+* :obj:`PSM_CFG`: dVRK PSM robot arm
+* :obj:`PSM_HIGH_PD_CFG`: dVRK PSM robot arm with gravity disabled, for task-space control with differential IK
+
+Reference: https://github.com/med-air/SurRoL
+           https://github.com/WPI-AIM/dvrk_env
+"""
+
+import isaaclab.sim as sim_utils
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets.articulation import ArticulationCfg
+
+from .assets import robotic_surgery_assets
+
+PSM_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=robotic_surgery_assets.dVRK_PSM,
+        activate_contact_sensors=False,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            max_depenetration_velocity=5.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        joint_pos={
+            "psm_yaw_joint": 0.01,
+            "psm_pitch_end_joint": 0.01,
+            "psm_main_insertion_joint": 0.07,
+            "psm_tool_roll_joint": 0.01,
+            "psm_tool_pitch_joint": 0.01,
+            "psm_tool_yaw_joint": 0.01,
+            "psm_tool_gripper1_joint": -0.09,
+            "psm_tool_gripper2_joint": 0.09,
+        },
+        pos=(0.0, 0.0, 0.15),
+    ),
+    actuators={
+        "psm": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "psm_yaw_joint",
+                "psm_pitch_end_joint",
+                "psm_main_insertion_joint",
+                "psm_tool_roll_joint",
+                "psm_tool_pitch_joint",
+                "psm_tool_yaw_joint",
+            ],
+            effort_limit=12.0,
+            velocity_limit=1.0,
+            stiffness=800.0,
+            damping=40.0,
+        ),
+        "psm_tool": ImplicitActuatorCfg(
+            joint_names_expr=["psm_tool_gripper.*"],
+            effort_limit=0.1,
+            velocity_limit=0.2,
+            stiffness=500,
+            damping=0.1,
+        ),
+    },
+    soft_joint_pos_limit_factor=1.0,
+)
+"""Configuration of dVRK PSM robot arm."""
+
+
+PSM_HIGH_PD_CFG = PSM_CFG.copy()
+PSM_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = True
+PSM_HIGH_PD_CFG.actuators["psm"].stiffness = 800.0
+PSM_HIGH_PD_CFG.actuators["psm"].damping = 40.0
+"""Configuration of dVRK PSM robot arm with stiffer PD control, for task-space control using differential IK."""
+
+PSM_BASE_POS = PSM_CFG.init_state.pos
+"""Robot root position relative to the environment origin (the base frame has no rotation)."""

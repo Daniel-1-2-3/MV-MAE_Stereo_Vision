@@ -1,6 +1,11 @@
-/Dataset
-/Training_Results
+__pycache__/
+*.pyc
+/runs/
+/outputs/
+/wandb/
+/demos/*.pt
+/third_party/
+*.mp4
 *.zip
-*.exe
-*.csv
 *.sif
+.pytest_cache/

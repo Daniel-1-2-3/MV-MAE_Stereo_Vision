@@ -1,23 +1,25 @@
-gymnasium
-lpips
-matplotlib
-mujoco
-numpy
-opencv-python-headless
-pillow
-scipy
-sympy
-timm
-tokenizers
-torch
-torchvision
-metaworld
-tqdm
-einops
-omegaconf
-dm_env==1.6
-imageio
-imageio-ffmpeg
-tensorboardX
+# Python 3.11 is required (Isaac Sim 5.x is built for it). Linux x86_64 with an RTX GPU.
+#
+# Versions are the combination Isaac for Healthcare v0.4.0 tested for its robotic
+# surgery workflow: Isaac Sim 5.0.0 + Isaac Lab 2.3.0 + PyTorch 2.7.0 (CUDA 12.8)
+# + i4h asset catalog v0.3.0.
+#
+# Isaac Lab itself is installed from source by install.sh (it is not on PyPI in
+# this version); run `bash install.sh` rather than installing this file alone.
 
---extra-index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://pypi.nvidia.com
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+isaacsim[all,extscache]==5.0.0
+torch==2.7.0
+torchvision==0.22.0
+i4h_asset_helper @ git+https://github.com/isaac-for-healthcare/i4h-asset-catalog.git@v0.3.0
+
+# training / logging
+wandb[media]>=0.19
+imageio[ffmpeg]>=2.31
+pyyaml>=6.0
+
+# CPU unit tests (pytest), not needed for training
+pytest>=8.0
+scipy>=1.11
