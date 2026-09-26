@@ -5,7 +5,7 @@
 #
 # Reward / observation functions from Isaac for Healthcare v0.4.0
 # (robotic.surgery.tasks/.../surgical/lift/mdp), unchanged. `pin_tissue_bottom`,
-# `needle_success` and `physics_blowup` are additions for the soft-tissue version of the task.
+# `needle_success` and the `blowup_*` terms are additions for the soft-tissue version of the task.
 
 """MDP terms for needle lifting on soft tissue."""
 
@@ -104,23 +104,31 @@ def needle_success(env: ManagerBasedRLEnv, minimal_height: float, threshold: flo
     return lifted & (needle_goal_distance(env) < threshold)
 
 
-def physics_blowup(
+def blowup_nonfinite(
     env: ManagerBasedRLEnv,
-    max_joint_vel: float,
-    max_object_speed: float,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Termination: the simulation glitched (non-finite state or impossible speeds), (num_envs,) bool."""
+    """Termination: NaN/inf in the robot or needle state, (num_envs,) bool."""
     robot = env.scene[robot_cfg.name]
     object: RigidObject = env.scene[object_cfg.name]
-    joint_vel = robot.data.joint_vel
-    obj_vel = object.data.root_lin_vel_w
-    not_finite = ~torch.isfinite(joint_vel).all(dim=1) | ~torch.isfinite(obj_vel).all(dim=1)
-    not_finite |= ~torch.isfinite(object.data.root_pos_w).all(dim=1)
-    too_fast = joint_vel.abs().amax(dim=1) > max_joint_vel
-    too_fast |= torch.linalg.vector_norm(obj_vel, dim=1) > max_object_speed
-    return not_finite | too_fast
+    ok = torch.isfinite(robot.data.joint_pos).all(dim=1) & torch.isfinite(robot.data.joint_vel).all(dim=1)
+    ok &= torch.isfinite(object.data.root_state_w).all(dim=1)
+    return ~ok
+
+
+def blowup_joint_speed(env: ManagerBasedRLEnv, max_joint_vel: float, robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Termination: a robot joint moves faster than any real motion could (rad/s or m/s), (num_envs,) bool."""
+    robot = env.scene[robot_cfg.name]
+    return robot.data.joint_vel.abs().amax(dim=1) > max_joint_vel
+
+
+def blowup_needle_speed(
+    env: ManagerBasedRLEnv, max_object_speed: float, object_cfg: SceneEntityCfg = SceneEntityCfg("object")
+) -> torch.Tensor:
+    """Termination: the needle moves faster than `max_object_speed` m/s (e.g. squeezed out of a contact), (num_envs,) bool."""
+    object: RigidObject = env.scene[object_cfg.name]
+    return torch.linalg.vector_norm(object.data.root_lin_vel_w, dim=1) > max_object_speed
 
 
 def pin_tissue_bottom(

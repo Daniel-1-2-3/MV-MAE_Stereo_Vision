@@ -1,14 +1,15 @@
-# MV-MAE + DrQ-v2: picking a suture needle off soft tissue with a stereo endoscope
+# MV-MAE + DrQ-v2: picking a suture needle off a tissue pad with a stereo endoscope
 
-A da Vinci surgical arm (dVRK PSM) learns to pick up a suture needle lying on soft
-tissue and lift it to a target point, **using only the two images of a stereo
+A da Vinci surgical arm (dVRK PSM) learns to pick up a suture needle lying on a
+tissue pad and lift it to a target point, **using only the two images of a stereo
 camera**, the way a real da Vinci sees through its stereo endoscope.
 
 * **Simulator:** NVIDIA Isaac Sim 5.1 + Isaac Lab 2.3.0. The needle-lift task and the
   robot come from [Isaac for Healthcare](https://github.com/isaac-for-healthcare/i4h-workflows)
   v0.4.0 (originally [ORBIT-Surgical](https://github.com/orbit-surgical/orbit-surgical)).
-  This project replaces the table with a soft tissue pad (a finite-element soft body)
-  and adds the stereo camera.
+  This project replaces the table with a tissue pad and adds the stereo camera. The pad
+  is rigid by default; `env.tissue_deformable=true` makes it a finite-element soft body,
+  but tool-needle-tissue contact on the soft pad made the simulation glitch often.
 * **Vision:** MV-MAE (multi-view masked autoencoder, [Seo et al. 2023](https://arxiv.org/abs/2302.02408)).
   It learns to understand both camera views by redrawing one eye's picture from the
   other eye and from the previous frames.
@@ -139,8 +140,8 @@ Checkpoints, evaluation videos and MV-MAE reconstruction images go to `runs/<run
 * **train/**: episode return and length, success (final state), success at any point in
   the episode, final needle-to-goal distance, and fraction of episodes that ended by
   dropping the needle. `train/isaac/*` has Isaac Lab's per-reward-term episode sums and
-  termination counts; `train/isaac/Episode_Termination/physics_blowup` counts episodes
-  cut short because the simulation glitched (should stay at or near 0). Also the exploration noise, encoder learning rate, replay size,
+  termination counts; `train/isaac/Episode_Termination/blowup_*` counts episodes cut short
+  because the simulation glitched, by cause (should stay at or near 0). Also the exploration noise, encoder learning rate, replay size,
   and env steps / updates.
 * **eval/** (every 50k steps): the same episode metrics from a deterministic policy,
   plus `eval/video` with the stereo view (left | right) of one episode.
@@ -170,7 +171,7 @@ This writes one stereo video per round and a `metrics.json` to `outputs/eval/`.
 | Observation | Last 3 frames from both cameras, 96×96 RGB each: `(3 frames, 2 views, 3, 96, 96)` |
 | Action | 7 numbers in [-1, 1]: move the tool tip up to 5 mm and rotate it up to 0.05 rad per step (relative to where it is), plus open (≥ 0) or close (< 0) the gripper |
 | Control rate | 25 Hz; episodes last 5 s (125 steps) |
-| Scene | 10 × 10 × 1 cm soft tissue pad (Young's modulus 50 kPa, bottom pinned) on a rigid platform. The needle is dropped onto it at a random spot within ±3 cm |
+| Scene | 10 × 10 × 1 cm tissue pad on a platform: rigid by default, or soft with `env.tissue_deformable=true` (Young's modulus 50 kPa, bottom pinned). The needle is dropped onto it at a random spot within ±3 cm |
 | Goal | Lift the needle to a fixed point 4 cm above the centre of the pad |
 | Rewards | Unchanged from Isaac for Healthcare: reach the needle (×1), needle lifted 2 cm (×15), needle near the goal (×16 coarse, ×5 fine), and small penalties for jerky actions and fast joints that are ramped up after 10k steps |
 | Success | Needle lifted and within 2 cm of the goal |
@@ -178,8 +179,14 @@ This writes one stereo video per round and a `metrics.json` to `outputs/eval/`.
 
 **Changes from the original Isaac for Healthcare task, and why:**
 
-* The needle lies on **soft tissue** instead of a table, with "lifted" measured from the
-  tissue surface.
+* The needle lies on a **tissue pad** instead of a table, with "lifted" measured from the
+  pad surface. (Rigid by default; see `env.tissue_deformable`.)
+* **Joint speed caps that are actually applied.** The original robot config sets
+  `velocity_limit`, which Isaac Lab 2.x ignores; here `velocity_limit_sim` is set.
+* **Glitch cut-offs.** An episode is ended as a time-out (not learned as a failure) if
+  the needle moves faster than 2 m/s, a joint faster than 10 rad/s, or the state has
+  NaNs. Logged as `Episode_Termination/blowup_*`; `python diagnose_blowups.py` records
+  what the scene looked like at each glitch.
 * **Fixed goal.** The original goal moves every second, but the policy only sees
   images, and a moving goal would be invisible to it.
 * **25 Hz control with small per-step motions** (5 mm / 0.05 rad) instead of 50 Hz with
@@ -213,7 +220,8 @@ This writes one stereo video per round and a `metrics.json` to `outputs/eval/`.
 | Symptom | Try |
 |---|---|
 | `tissue/needle_on_surface` or `needle_settled` fails (the needle sinks or jitters) | `env.needle_asset=mesh` (plain-mesh needle), or a finer tissue mesh: `env.tissue_hex_resolution=16` |
-| `tissue/dents_when_pressed` fails | Softer tissue: `env.tissue_youngs_modulus=2e4`. Check the reported tool-tip distance from its target |
+| `tissue/solid_when_pressed` or `no_glitch_when_pressed` fails (rigid pad) | Run `python diagnose_blowups.py --noise 0.3 env.num_envs=8` and look at the saved clips |
+| `tissue/dents_when_pressed` fails (soft pad) | Softer tissue: `env.tissue_youngs_modulus=2e4`. Check the reported tool-tip distance from its target |
 | `projection/*_not_occluded` or `*_in_view` fails | Move the cameras: `camera.azimuth_deg`, `camera.elevation_deg`, `camera.distance` |
 | `tissue/bottom_pinned` fails | Run with `env.pin_tissue_bottom=false` and see whether `tissue/no_sliding` still passes |
 | CUDA out of memory | Lower `train.replay_capacity` (each transition is ~55 KB), `env.num_envs`, or `agent.batch_size` |

@@ -30,8 +30,12 @@ class EnvConfig:
     decimation: int = 8
     episode_length_s: float = 5.0
 
-    # Soft tissue pad (FEM deformable body). It lies on a rigid platform whose
-    # top is at z = 0; its bottom layer of nodes is pinned to the platform.
+    # Tissue pad on a rigid platform whose top is at z = 0. Rigid by default: with the
+    # soft (FEM) pad, tool-needle-tissue contacts made the simulation glitch often
+    # (needle shot out of the contact). tissue_deformable=True brings the soft pad back;
+    # its bottom layer of nodes is then pinned to the platform. The youngs_modulus /
+    # poissons_ratio / hex_resolution / pin settings only apply to the soft pad.
+    tissue_deformable: bool = False
     tissue_size: tuple[float, float, float] = (0.10, 0.10, 0.01)
     tissue_youngs_modulus: float = 5.0e4  # Pa
     tissue_poissons_ratio: float = 0.45

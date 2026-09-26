@@ -1,4 +1,4 @@
-"""Check that the stereo camera rig and the soft-tissue scene are set up correctly.
+"""Check that the stereo camera rig and the needle-on-tissue scene are set up correctly.
 
 Run on a machine with an RTX GPU and Isaac Sim installed (see README):
 
@@ -16,9 +16,10 @@ What it checks (each prints PASS / FAIL):
   Stereo      - image-only check: warping the right image by the disparity that
                 the depth map predicts reproduces the left image better than no
                 shift, the opposite shift, or a vertical shift
-  Tissue      - the needle rests on the tissue (not sunk through, not bouncing),
-                the pinned bottom of the pad stays put, and the tissue dents when
-                the tool presses into it
+  Tissue      - the needle rests on the tissue (not sunk through, not bouncing).
+                Rigid pad (default): the tool pressed into it stays on its surface
+                without a physics glitch. Soft pad (env.tissue_deformable=true): the
+                pinned bottom stays put, the pad dents under the tool, and does not slide
 
 Outputs (default outputs/stereo_check/):
   stereo_check.png  - per env: left | right | red-cyan anaglyph | left depth,
@@ -86,7 +87,10 @@ def main() -> int:
     n, dev = env.num_envs, env.device
     h, w = cfg.camera.height, cfg.camera.width
     origins = scene.env_origins
-    tissue, needle, ee_frame = scene["tissue"], scene["object"], scene["ee_frame"]
+    needle, ee_frame = scene["object"], scene["ee_frame"]
+    soft = cfg.env.tissue_deformable
+    tissue = scene["tissue"] if soft else None
+    tissue_top_local = cfg.env.tissue_size[2]
     rig = env.rig
     fps = 1.0 / env.step_dt
     video: list[np.ndarray] = []
@@ -205,9 +209,12 @@ def main() -> int:
     snapshot, snapshot_depth = obs.clone(), depth.clone()  # for the output image
 
     # ------------------------------------------------------------------ needle on tissue
-    nodes = tissue.data.nodal_pos_w  # (n, V, 3)
-    rest = tissue.data.default_nodal_state_w[..., :3]
-    top_now = nodes[..., 2].max(dim=1).values
+    if soft:
+        nodes = tissue.data.nodal_pos_w  # (n, V, 3)
+        rest = tissue.data.default_nodal_state_w[..., :3]
+        top_now = nodes[..., 2].max(dim=1).values
+    else:
+        top_now = origins[:, 2] + tissue_top_local
     nz = needle_w[:, 2]
     check("tissue/no_episode_end", not bool(terminated_any.any()),
           "no environment terminated or timed out during settling (a fall-through would end the episode)")
@@ -223,9 +230,10 @@ def main() -> int:
     check("tissue/needle_settled", bool((drift < 1e-3).all()),
           f"needle movement over the last 10 steps {f(drift * 1000)} mm (want < 1), height change {f(z_drift * 1000)} mm, "
           f"instantaneous speed {f(speed)} m/s", drift_m=f(drift))
-    rest_z = rest[..., 2]
-    bottom = rest_z <= rest_z.min(dim=1, keepdim=True).values + 1e-4
-    if cfg.env.pin_tissue_bottom:
+    if soft:
+        rest_z = rest[..., 2]
+        bottom = rest_z <= rest_z.min(dim=1, keepdim=True).values + 1e-4
+    if soft and cfg.env.pin_tissue_bottom:
         pin_err = torch.linalg.norm(nodes - rest, dim=-1).masked_fill(~bottom, 0.0).max(dim=1).values
         check("tissue/bottom_pinned", bool((pin_err < 5e-4).all()), f"max drift of pinned bottom nodes {f(pin_err * 1000)} mm")
 
@@ -233,7 +241,8 @@ def main() -> int:
     local_needle = needle_w - origins
     sign = torch.where(local_needle[:, :2] >= 0, 1.0, -1.0)
     press_xy = -0.02 * sign  # 2 cm on the far side of the centre from the needle
-    rest_top = rest_z.max(dim=1).values - origins[:, 2]
+    rest_top = (rest_z.max(dim=1).values - origins[:, 2]) if soft else torch.full((n,), tissue_top_local, device=dev)
+    ended_before_press = terminated_any.clone()
     base_pos = torch.tensor(PSM_BASE_POS, device=dev)
     ee_pos, ee_quat, *_ = env.poses_in_base()
     hold_quat = ee_quat.clone()
@@ -248,17 +257,26 @@ def main() -> int:
                                   cfg.env.ik_pos_scale, cfg.env.ik_rot_scale)
             obs = step(act)
     ee_pos, *_ = env.poses_in_base()
-    press_nodes = tissue.data.nodal_pos_w
     reach_err = torch.linalg.norm(ee_pos - (torch.cat([press_xy, (rest_top - 0.004)[:, None]], -1) - base_pos), dim=-1)
-    rest_local = rest - origins[:, None, :]
-    near = (torch.linalg.norm(rest_local[..., :2] - press_xy[:, None, :], dim=-1) < 0.012) & \
-           (rest_z >= rest_z.max(dim=1, keepdim=True).values - 1e-4)
-    dent = ((rest_z - press_nodes[..., 2]) * near).max(dim=1).values
-    check("tissue/dents_when_pressed", bool((dent > 1e-3).all()),
-          f"max dent under the tool {f(dent * 1000)} mm (want > 1), tool tip {f(reach_err * 1000)} mm from its target",
-          dent_m=f(dent), reach_error_m=f(reach_err))
-    slide = torch.linalg.norm((press_nodes - rest)[..., :2], dim=-1).mean(dim=1)
-    check("tissue/no_sliding", bool((slide < 2e-3).all()), f"mean sideways node displacement {f(slide * 1000)} mm (want < 2)")
+    if not soft:
+        # The tool is driven 4 mm "into" the rigid pad: it must stop on the surface, and nothing may glitch.
+        tip_h = ee_pos[:, 2] + base_pos[2] - rest_top
+        check("tissue/solid_when_pressed", bool((tip_h > -2e-3).all()),
+              f"tool tip height above the pad while pressing {f(tip_h * 1000)} mm (want > -2: it must not sink in)")
+        glitch = terminated_any & ~ended_before_press
+        check("tissue/no_glitch_when_pressed", not bool(glitch.any()),
+              "no episode ended while the tool pressed on the pad (a physics glitch would end it)")
+    press_nodes = tissue.data.nodal_pos_w if soft else None
+    rest_local = rest - origins[:, None, :] if soft else None
+    if soft:
+        near = (torch.linalg.norm(rest_local[..., :2] - press_xy[:, None, :], dim=-1) < 0.012) & \
+               (rest_z >= rest_z.max(dim=1, keepdim=True).values - 1e-4)
+        dent = ((rest_z - press_nodes[..., 2]) * near).max(dim=1).values
+        check("tissue/dents_when_pressed", bool((dent > 1e-3).all()),
+              f"max dent under the tool {f(dent * 1000)} mm (want > 1), tool tip {f(reach_err * 1000)} mm from its target",
+              dent_m=f(dent), reach_error_m=f(reach_err))
+        slide = torch.linalg.norm((press_nodes - rest)[..., :2], dim=-1).mean(dim=1)
+        check("tissue/no_sliding", bool((slide < 2e-3).all()), f"mean sideways node displacement {f(slide * 1000)} mm (want < 2)")
 
     # ------------------------------------------------------------------ outputs
     rows = []

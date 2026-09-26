@@ -6,16 +6,16 @@
 # Based on the needle-lift task of Isaac for Healthcare v0.4.0
 # (robotic.surgery.tasks/.../surgical/lift/lift_env_cfg.py and
 # lift/config/needle/ik_rel_env_cfg.py). Changes, all marked "CHANGED":
-#   * the needle lies on a soft (FEM) tissue pad on a rigid platform instead of a table;
+#   * the needle lies on a tissue pad (rigid by default, soft FEM optional) on a platform instead of a table;
 #   * two tiled cameras form a stereo endoscope looking at the workspace;
 #   * the goal is a fixed point above the tissue (images cannot show a moving goal);
 #   * heights of the reward/success thresholds are measured from the tissue top;
 #   * 25 Hz control, 5 s episodes, IK action scale sized for millimetre-level motion;
 #   * joint speed caps that are actually applied (see EnvConfig.arm_joint_vel_limit) and
-#     a `physics_blowup` time-out that ends an episode if the simulation glitches.
+#     `blowup_*` time-outs that end an episode if the simulation glitches.
 # Reward terms, weights, the other terminations and the curriculum are the original ones.
 
-"""Isaac Lab configuration for needle lifting from soft tissue with a stereo camera rig."""
+"""Isaac Lab configuration for needle lifting from a tissue pad with a stereo camera rig."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class NeedleTissueSceneCfg(InteractiveSceneCfg):
         target_frames=[FrameTransformerCfg.FrameCfg(prim_path="{ENV_REGEX_NS}/Robot/" + EE_BODY, name="end_effector")],
     )
     object: RigidObjectCfg = MISSING  # the suture needle
-    tissue: DeformableObjectCfg = MISSING
+    tissue: DeformableObjectCfg | AssetBaseCfg = MISSING  # soft pad, or a static rigid one
     # CHANGED: rigid platform (top at z = 0) under the tissue, replaces the table.
     platform = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Platform",
@@ -169,8 +169,12 @@ class TerminationsCfg:
     object_dropping = DoneTerm(
         func=mdp.root_height_below_minimum, params={"minimum_height": -0.05, "asset_cfg": SceneEntityCfg("object")}
     )
-    # CHANGED: added. A time-out (not a failure): the episode is cut and not bootstrapped through.
-    physics_blowup = DoneTerm(func=mdp.physics_blowup, params=MISSING, time_out=True)
+    # CHANGED: added. Simulation glitches, split by what went wrong. Time-outs (not failures):
+    # the episode is cut and never bootstrapped through. Isaac Lab logs each one as
+    # Episode_Termination/<name>.
+    blowup_nonfinite = DoneTerm(func=mdp.blowup_nonfinite, time_out=True)
+    blowup_joint_speed = DoneTerm(func=mdp.blowup_joint_speed, params=MISSING, time_out=True)
+    blowup_needle_speed = DoneTerm(func=mdp.blowup_needle_speed, params=MISSING, time_out=True)
 
 
 @configclass
@@ -197,6 +201,30 @@ class NeedleTissueEnvCfg(ManagerBasedRLEnvCfg):
     lift_height_w: float = MISSING
     success_threshold: float = MISSING
     tissue_top_w: float = MISSING
+    tissue_deformable: bool = MISSING
+
+
+def _soft_tissue_cfg(env, visual) -> DeformableObjectCfg:
+    """FEM soft-tissue pad (env.tissue_deformable=True), lying on the platform."""
+    return DeformableObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Tissue",
+        spawn=sim_utils.MeshCuboidCfg(
+            size=tuple(env.tissue_size),
+            deformable_props=sim_utils.DeformableBodyPropertiesCfg(
+                rest_offset=0.0,
+                contact_offset=0.001,
+                simulation_hexahedral_resolution=env.tissue_hex_resolution,
+            ),
+            visual_material=visual,
+            physics_material=sim_utils.DeformableBodyMaterialCfg(
+                youngs_modulus=env.tissue_youngs_modulus,
+                poissons_ratio=env.tissue_poissons_ratio,
+                dynamic_friction=env.tissue_friction,
+            ),
+        ),
+        init_state=DeformableObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.5 * env.tissue_size[2])),
+        debug_vis=False,
+    )
 
 
 def _camera_cfg(prim_name: str, pos, rig: StereoRig, cam, with_depth: bool, track_pose: bool) -> TiledCameraCfg:
@@ -225,27 +253,27 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     # ---- scene
     cfg.scene.num_envs = env.num_envs
     cfg.scene.env_spacing = env.env_spacing
-    # Deformable bodies do not work with replicated physics (same as Isaac Lab's own deformable lift task).
+    # Deformable bodies do not work with replicated physics (same as Isaac Lab's own deformable lift task);
+    # kept off for the rigid pad too, so both variants build the same scene.
     cfg.scene.replicate_physics = False
-    cfg.scene.tissue = DeformableObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Tissue",
-        spawn=sim_utils.MeshCuboidCfg(
-            size=(sx, sy, sz),
-            deformable_props=sim_utils.DeformableBodyPropertiesCfg(
-                rest_offset=0.0,
-                contact_offset=0.001,
-                simulation_hexahedral_resolution=env.tissue_hex_resolution,
+    tissue_visual = sim_utils.PreviewSurfaceCfg(diffuse_color=env.tissue_color, roughness=0.6)
+    if env.tissue_deformable:
+        cfg.scene.tissue = _soft_tissue_cfg(env, tissue_visual)
+    else:
+        # Static collider (no rigid-body properties): same size, colour and place as the soft pad.
+        cfg.scene.tissue = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Tissue",
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.5 * sz)),
+            spawn=sim_utils.CuboidCfg(
+                size=(sx, sy, sz),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                visual_material=tissue_visual,
+                physics_material=sim_utils.RigidBodyMaterialCfg(
+                    static_friction=env.tissue_friction, dynamic_friction=env.tissue_friction
+                ),
             ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=env.tissue_color, roughness=0.6),
-            physics_material=sim_utils.DeformableBodyMaterialCfg(
-                youngs_modulus=env.tissue_youngs_modulus,
-                poissons_ratio=env.tissue_poissons_ratio,
-                dynamic_friction=env.tissue_friction,
-            ),
-        ),
-        init_state=DeformableObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.5 * sz)),
-        debug_vis=False,
-    )
+        )
+    cfg.tissue_deformable = env.tissue_deformable
     needle_usd = robotic_surgery_assets.Needle_SDF if env.needle_asset == "sdf" else robotic_surgery_assets.Needle
     cfg.scene.object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
@@ -276,10 +304,8 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
             "psm_tool": act["psm_tool"].replace(velocity_limit=None, velocity_limit_sim=env.gripper_joint_vel_limit),
         }
     )
-    cfg.terminations.physics_blowup.params = {
-        "max_joint_vel": env.blowup_joint_vel,
-        "max_object_speed": env.blowup_needle_speed,
-    }
+    cfg.terminations.blowup_joint_speed.params = {"max_joint_vel": env.blowup_joint_vel}
+    cfg.terminations.blowup_needle_speed.params = {"max_object_speed": env.blowup_needle_speed}
 
     # ---- actions: relative end-effector pose (IK) + binary gripper, 7 numbers in [-1, 1]
     p, r = env.ik_pos_scale, env.ik_rot_scale
@@ -307,7 +333,7 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     # ---- needle placement and height thresholds relative to the tissue top
     xy = env.needle_xy_range
     cfg.events.reset_object_position.params["pose_range"] = {"x": (-xy, xy), "y": (-xy, xy), "z": (0.0, 0.0)}
-    if not env.pin_tissue_bottom:
+    if not (env.tissue_deformable and env.pin_tissue_bottom):
         cfg.events.pin_tissue = None
     lift_h = tissue_top + env.lift_height
     cfg.rewards.lifting_object.params["minimal_height"] = lift_h

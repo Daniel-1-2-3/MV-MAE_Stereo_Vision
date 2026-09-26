@@ -25,15 +25,68 @@ class NeedleTissueRLEnv(ManagerBasedRLEnv):
     """
 
     cfg: NeedleTissueEnvCfg
+    BLOWUP_TERMS = ("blowup_nonfinite", "blowup_joint_speed", "blowup_needle_speed")
+
+    # Set to True (e.g. by diagnose_blowups.py) to keep a description of the state at every glitch.
+    record_blowups: bool = False
 
     def _reset_idx(self, env_ids: Sequence[int]):
         if not hasattr(self, "final_success"):
             self.final_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             self.final_goal_distance = torch.zeros(self.num_envs, device=self.device)
+            self.blowup_records: list[dict] = []
         if hasattr(self, "command_manager"):
             self.final_success[env_ids] = self.success()[env_ids]
             self.final_goal_distance[env_ids] = mdp.needle_goal_distance(self)[env_ids]
+            if self.record_blowups:
+                self._record_blowups(env_ids)
         super()._reset_idx(env_ids)
+
+    @torch.no_grad()
+    def _record_blowups(self, env_ids) -> None:
+        """Describe the state of every env that is being reset because of a glitch (before it is reset)."""
+        ids = torch.as_tensor(env_ids, device=self.device).long().reshape(-1)
+        causes = {name: self.termination_manager.get_term(name)[ids] for name in self.BLOWUP_TERMS}
+        hit = torch.zeros_like(ids, dtype=torch.bool)
+        for c in causes.values():
+            hit |= c
+        if not bool(hit.any()):
+            return
+        robot, needle = self.scene["robot"], self.scene["object"]
+        top = self.cfg.tissue_top_w
+        jv = robot.data.joint_vel[ids].abs()
+        tip = self.scene["ee_frame"].data.target_pos_w[ids, 0, :]
+        npos = needle.data.root_pos_w[ids]
+        if self.cfg.tissue_deformable:
+            tissue = self.scene["tissue"]
+            dent = (tissue.data.default_nodal_state_w[ids, :, 2] - tissue.data.nodal_pos_w[ids, :, 2]).amax(dim=1)
+        else:
+            dent = torch.zeros(ids.numel(), device=self.device)  # rigid pad cannot dent
+        g = robot.find_joints(["psm_tool_gripper1_joint", "psm_tool_gripper2_joint"])[0]
+        opening = robot.data.joint_pos[ids][:, g[1]] - robot.data.joint_pos[ids][:, g[0]]
+        action = self.action_manager.action[ids]
+        rows = {
+            "episode_step": self.episode_length_buf[ids].float(),
+            "max_joint_speed": jv.amax(dim=1),
+            "fastest_joint": jv.argmax(dim=1).float(),
+            "needle_speed": torch.linalg.vector_norm(needle.data.root_lin_vel_w[ids], dim=1),
+            "needle_ang_speed": torch.linalg.vector_norm(needle.data.root_ang_vel_w[ids], dim=1),
+            "needle_height_mm": (npos[:, 2] - top) * 1000.0,
+            "tip_height_mm": (tip[:, 2] - top) * 1000.0,
+            "tip_to_needle_mm": torch.linalg.vector_norm(tip - npos, dim=1) * 1000.0,
+            "gripper_opening_rad": opening,
+            "gripper_command": action[:, -1],
+            "arm_action_norm": torch.linalg.vector_norm(action[:, :-1], dim=1),
+            "tissue_dent_mm": dent * 1000.0,
+        }
+        rows = {k: v[hit].cpu().tolist() for k, v in rows.items()}
+        names = [next(n for n, c in causes.items() if bool(c[i])) for i in hit.nonzero().flatten().tolist()]
+        for i, cause in enumerate(names):
+            rec = {k: v[i] for k, v in rows.items()}
+            rec["cause"] = cause
+            rec["env_id"] = int(ids[hit][i])
+            rec["fastest_joint"] = robot.joint_names[int(rec["fastest_joint"])]
+            self.blowup_records.append(rec)
 
     def success(self) -> torch.Tensor:
         return mdp.needle_success(self, self.cfg.lift_height_w, self.cfg.success_threshold)

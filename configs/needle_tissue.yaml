@@ -7,6 +7,7 @@ env:
   sim_dt: 0.005          # 200 Hz physics
   decimation: 8          # -> 25 Hz control
   episode_length_s: 5.0  # 125 control steps
+  tissue_deformable: false  # rigid pad (soft FEM pad glitched too often); true = soft tissue
   tissue_size: [0.10, 0.10, 0.01]
   tissue_youngs_modulus: 5.0e+4
   tissue_poissons_ratio: 0.45
