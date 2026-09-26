@@ -304,6 +304,7 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     cfg.decimation = env.decimation
     cfg.sim.dt = env.sim_dt
     cfg.sim.render_interval = env.decimation
+    cfg.sim.render.antialiasing_mode = cam.antialiasing
     cfg.episode_length_s = env.episode_length_s
     # Re-render after resets so the first image of a new episode shows the reset scene.
     cfg.rerender_on_reset = True

@@ -41,7 +41,7 @@ parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.R
 parser.add_argument("--config", default="configs/needle_tissue.yaml")
 parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--out", default="outputs/stereo_check")
-parser.add_argument("--settle_steps", type=int, default=25, help="control steps to let the needle and tissue settle")
+parser.add_argument("--settle_steps", type=int, default=50, help="control steps (25 per second) to let the needle and tissue settle")
 simulation_app, args, overrides = launch(parser)
 
 # ---- everything below needs the running simulator
@@ -105,10 +105,10 @@ def main() -> int:
     # ------------------------------------------------------------------ settle
     hold = torch.zeros(n, env.action_dim, device=dev)
     hold[:, 6] = GRIPPER_OPEN
-    needle_z_hist = []
+    needle_pos_hist = []
     for _ in range(args.settle_steps):
         obs = step(hold)
-        needle_z_hist.append(needle.data.root_pos_w[:, 2].clone())
+        needle_pos_hist.append(needle.data.root_pos_w.clone())
 
     # ------------------------------------------------------------------ images
     ok_shape = obs.shape == (n, 2, 3, h, w) and obs.dtype == torch.uint8
@@ -214,12 +214,15 @@ def main() -> int:
     on_top = (nz > top_now - 0.004) & (nz < top_now + 0.01)
     check("tissue/needle_on_surface", bool(on_top.all()),
           f"needle z {f(nz * 1000)} mm, tissue top {f(top_now * 1000)} mm (want within -4..+10 mm)")
-    z_hist = torch.stack(needle_z_hist[-5:], dim=0)
-    drift = (z_hist.max(0).values - z_hist.min(0).values)
+    # Settled = the needle's position barely changes over the last 0.4 s. (Instantaneous
+    # velocity is not used: contact with a soft body leaves sub-millimetre jitter.)
+    hist = torch.stack(needle_pos_hist[-10:], dim=0)  # (10, n, 3)
+    drift = torch.linalg.norm(hist - hist[-1:], dim=-1).max(dim=0).values
+    z_drift = hist[..., 2].max(0).values - hist[..., 2].min(0).values
     speed = torch.linalg.norm(needle.data.root_lin_vel_w, dim=-1)
-    still = (drift < 5e-4) & (speed < 0.01)
-    check("tissue/needle_settled", bool(still.all()),
-          f"needle height change over last 5 steps {f(drift * 1000)} mm, speed {f(speed)} m/s")
+    check("tissue/needle_settled", bool((drift < 1e-3).all()),
+          f"needle movement over the last 10 steps {f(drift * 1000)} mm (want < 1), height change {f(z_drift * 1000)} mm, "
+          f"instantaneous speed {f(speed)} m/s", drift_m=f(drift))
     rest_z = rest[..., 2]
     bottom = rest_z <= rest_z.min(dim=1, keepdim=True).values + 1e-4
     if cfg.env.pin_tissue_bottom:

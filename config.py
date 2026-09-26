@@ -76,6 +76,10 @@ class CameraConfig:
     horizontal_aperture: float = 20.955  # mm -> ~47 deg horizontal field of view
     near_clip: float = 0.005
     far_clip: float = 5.0
+    # Isaac Sim's default (DLSS) upscales from a lower internal resolution and needs >= 300 px;
+    # at 96 px it blurs thin objects like the needle and mixes in previous frames. FXAA works at
+    # the native resolution. Options: Off | FXAA | TAA | DLSS | DLAA.
+    antialiasing: str = "FXAA"
 
 
 @dataclass
@@ -234,5 +238,7 @@ def validate(cfg: Config) -> None:
         raise ValueError("agent.nstep and mvmae.frame_stack must be >= 1")
     if cfg.log.wandb_mode not in ("online", "offline", "disabled"):
         raise ValueError("log.wandb_mode must be online, offline or disabled")
+    if cfg.camera.antialiasing not in ("Off", "FXAA", "TAA", "DLSS", "DLAA"):
+        raise ValueError("camera.antialiasing must be Off, FXAA, TAA, DLSS or DLAA")
     if cfg.env.needle_asset not in ("sdf", "mesh"):
         raise ValueError("env.needle_asset must be 'sdf' or 'mesh'")
