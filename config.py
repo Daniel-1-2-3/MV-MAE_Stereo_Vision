@@ -58,6 +58,19 @@ class EnvConfig:
     ik_pos_scale: float = 0.005
     ik_rot_scale: float = 0.05
 
+    # Joint speed caps for the robot, applied by PhysX. The vendored dVRK config sets
+    # `velocity_limit`, which Isaac Lab >= 2.0 ignores for implicit actuators, so without
+    # these the joints have no speed limit and contact glitches can spin them at 100s of rad/s.
+    # Units: rad/s (m/s for the insertion joint). Normal motion stays well below them
+    # (IK moves the tip <= 0.125 m/s and turns it <= 1.25 rad/s).
+    arm_joint_vel_limit: float = 3.0
+    gripper_joint_vel_limit: float = 3.0
+    # Safety net: end an episode (as a time-out, so it is not learned as a failure) if the
+    # physics blows up: non-finite state, a robot joint faster than this (rad/s or m/s),
+    # or the needle moving faster than `blowup_needle_speed` (m/s).
+    blowup_joint_vel: float = 10.0
+    blowup_needle_speed: float = 2.0
+
 
 @dataclass
 class CameraConfig:

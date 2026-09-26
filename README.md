@@ -139,7 +139,8 @@ Checkpoints, evaluation videos and MV-MAE reconstruction images go to `runs/<run
 * **train/**: episode return and length, success (final state), success at any point in
   the episode, final needle-to-goal distance, and fraction of episodes that ended by
   dropping the needle. `train/isaac/*` has Isaac Lab's per-reward-term episode sums and
-  termination counts. Also the exploration noise, encoder learning rate, replay size,
+  termination counts; `train/isaac/Episode_Termination/physics_blowup` counts episodes
+  cut short because the simulation glitched (should stay at or near 0). Also the exploration noise, encoder learning rate, replay size,
   and env steps / updates.
 * **eval/** (every 50k steps): the same episode metrics from a deterministic policy,
   plus `eval/video` with the stereo view (left | right) of one episode.

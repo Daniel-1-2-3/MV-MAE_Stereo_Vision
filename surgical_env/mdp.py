@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 # Reward / observation functions from Isaac for Healthcare v0.4.0
-# (robotic.surgery.tasks/.../surgical/lift/mdp), unchanged. `pin_tissue_bottom`
-# and `needle_success` are additions for the soft-tissue version of the task.
+# (robotic.surgery.tasks/.../surgical/lift/mdp), unchanged. `pin_tissue_bottom`,
+# `needle_success` and `physics_blowup` are additions for the soft-tissue version of the task.
 
 """MDP terms for needle lifting on soft tissue."""
 
@@ -102,6 +102,25 @@ def needle_success(env: ManagerBasedRLEnv, minimal_height: float, threshold: flo
     object: RigidObject = env.scene["object"]
     lifted = object.data.root_pos_w[:, 2] > minimal_height
     return lifted & (needle_goal_distance(env) < threshold)
+
+
+def physics_blowup(
+    env: ManagerBasedRLEnv,
+    max_joint_vel: float,
+    max_object_speed: float,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Termination: the simulation glitched (non-finite state or impossible speeds), (num_envs,) bool."""
+    robot = env.scene[robot_cfg.name]
+    object: RigidObject = env.scene[object_cfg.name]
+    joint_vel = robot.data.joint_vel
+    obj_vel = object.data.root_lin_vel_w
+    not_finite = ~torch.isfinite(joint_vel).all(dim=1) | ~torch.isfinite(obj_vel).all(dim=1)
+    not_finite |= ~torch.isfinite(object.data.root_pos_w).all(dim=1)
+    too_fast = joint_vel.abs().amax(dim=1) > max_joint_vel
+    too_fast |= torch.linalg.vector_norm(obj_vel, dim=1) > max_object_speed
+    return not_finite | too_fast
 
 
 def pin_tissue_bottom(

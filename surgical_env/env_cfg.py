@@ -10,8 +10,10 @@
 #   * two tiled cameras form a stereo endoscope looking at the workspace;
 #   * the goal is a fixed point above the tissue (images cannot show a moving goal);
 #   * heights of the reward/success thresholds are measured from the tissue top;
-#   * 25 Hz control, 5 s episodes, IK action scale sized for millimetre-level motion.
-# Reward terms, weights, terminations and curriculum are the original ones.
+#   * 25 Hz control, 5 s episodes, IK action scale sized for millimetre-level motion;
+#   * joint speed caps that are actually applied (see EnvConfig.arm_joint_vel_limit) and
+#     a `physics_blowup` time-out that ends an episode if the simulation glitches.
+# Reward terms, weights, the other terminations and the curriculum are the original ones.
 
 """Isaac Lab configuration for needle lifting from soft tissue with a stereo camera rig."""
 
@@ -167,6 +169,8 @@ class TerminationsCfg:
     object_dropping = DoneTerm(
         func=mdp.root_height_below_minimum, params={"minimum_height": -0.05, "asset_cfg": SceneEntityCfg("object")}
     )
+    # CHANGED: added. A time-out (not a failure): the episode is cut and not bootstrapped through.
+    physics_blowup = DoneTerm(func=mdp.physics_blowup, params=MISSING, time_out=True)
 
 
 @configclass
@@ -263,6 +267,19 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     rig = make_stereo_rig(cam, look_at)
     cfg.scene.stereo_left = _camera_cfg("StereoLeft", rig.left_pos, rig, cam, with_depth, track_camera_pose)
     cfg.scene.stereo_right = _camera_cfg("StereoRight", rig.right_pos, rig, cam, with_depth, track_camera_pose)
+
+    # ---- robot joint speed caps (CHANGED): `velocity_limit_sim` is what Isaac Lab >= 2.0 applies
+    act = cfg.scene.robot.actuators
+    cfg.scene.robot = cfg.scene.robot.replace(
+        actuators={
+            "psm": act["psm"].replace(velocity_limit=None, velocity_limit_sim=env.arm_joint_vel_limit),
+            "psm_tool": act["psm_tool"].replace(velocity_limit=None, velocity_limit_sim=env.gripper_joint_vel_limit),
+        }
+    )
+    cfg.terminations.physics_blowup.params = {
+        "max_joint_vel": env.blowup_joint_vel,
+        "max_object_speed": env.blowup_needle_speed,
+    }
 
     # ---- actions: relative end-effector pose (IK) + binary gripper, 7 numbers in [-1, 1]
     p, r = env.ik_pos_scale, env.ik_rot_scale
