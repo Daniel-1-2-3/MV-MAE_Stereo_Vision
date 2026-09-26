@@ -1,9 +1,9 @@
 """Image / video helpers shared by the scripts (no simulator imports).
 
 Videos follow the pattern that works on display-less pods: frames are kept as
-uint8 (H, W, 3) numpy arrays, written with imageio + ffmpeg (libx264), and handed
-to wandb as a uint8 (T, C, H, W) array with format="mp4". Frame sizes are kept
-multiples of 16 so the encoder never has to resize.
+uint8 (H, W, 3) numpy arrays and written with imageio + ffmpeg (libx264); wandb
+gets the finished mp4 file, so it needs no video encoder of its own. Frame sizes
+are kept multiples of 16 so the encoder never has to resize.
 """
 
 from __future__ import annotations
@@ -85,10 +85,8 @@ def save_mp4(frames: list[np.ndarray], path: str | Path, fps: float) -> None:
             writer.append_data(f)
 
 
-def wandb_video(frames: list[np.ndarray], fps: float):
-    """wandb.Video from uint8 (H, W, 3) frames; returns None if there is nothing to log."""
-    if not frames:
-        return None
+def wandb_video(mp4_path: str | Path):
+    """wandb.Video from an mp4 already written by save_mp4 (no moviepy needed)."""
     import wandb
 
-    return wandb.Video(np.stack(frames).transpose(0, 3, 1, 2), fps=int(round(fps)), format="mp4")
+    return wandb.Video(str(mp4_path), format="mp4")

@@ -303,13 +303,13 @@ class Trainer:
                 print(f"[{env_steps:>9d}] EVAL return {metrics['eval/episode_return']:.2f} | "
                       f"success {metrics['eval/success']:.2f}", flush=True)
                 if frames:
-                    vis.save_mp4(frames, self.run_dir / "videos" / f"eval_{env_steps}.mp4", fps=1.0 / env.step_dt)
-                    try:
-                        video = vis.wandb_video(frames, fps=1.0 / env.step_dt)
-                        if video is not None and self.wandb is not None:
-                            metrics["eval/video"] = video
-                    except Exception as e:  # a failed video must never stop training
-                        print(f"video logging failed: {e}")
+                    video_path = self.run_dir / "videos" / f"eval_{env_steps}.mp4"
+                    vis.save_mp4(frames, video_path, fps=1.0 / env.step_dt)
+                    if self.wandb is not None:
+                        try:
+                            metrics["eval/video"] = vis.wandb_video(video_path)
+                        except Exception as e:  # a failed video must never stop training
+                            print(f"video logging failed: {e}")
                 self.log(metrics, env_steps)
                 obs, stack, first = fresh_start()
                 ep_return.zero_()

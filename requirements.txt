@@ -6,12 +6,12 @@
 #   Isaac Lab v2.3.0                                             from source (third_party/IsaacLab)
 # This is the combination Isaac for Healthcare v0.4.0 tested for its robotic surgery workflow.
 #
-# These are kept in a separate, later pip call on purpose: Isaac Sim pins exact versions
-# of some shared packages (e.g. sentry-sdk, click) that current wandb releases want newer
-# versions of. Resolving everything in one pip call fails; installing wandb afterwards
-# only upgrades those small helper packages.
+# install.sh installs these last, constrained to the exact versions Isaac Sim pins
+# (click, sentry-sdk, plotly, psutil, ...), so they can never replace them.
 
-wandb[media]>=0.17
+# wandb 0.17.0 - 0.18.2 is the newest range compatible with Isaac Sim 5.0's pinned
+# click / sentry-sdk. The [media] extra is not needed (videos are logged as mp4 files).
+wandb>=0.17,<0.18.3
 imageio[ffmpeg]>=2.31
 pyyaml>=6.0
 
