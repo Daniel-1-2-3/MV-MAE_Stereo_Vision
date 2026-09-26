@@ -17,6 +17,7 @@ env:
   success_threshold: 0.02
   ik_pos_scale: 0.005    # metres per step at action = 1
   ik_rot_scale: 0.05     # radians per step at action = 1
+  penalty_curriculum: true      # original: action_rate / joint_vel penalties grow to -0.1 after 10k sim steps
   arm_joint_vel_limit: 3.0      # joint speed caps actually applied by PhysX
   gripper_joint_vel_limit: 3.0
   blowup_joint_vel: 10.0        # cut an episode (as a time-out) if the physics glitches
@@ -45,7 +46,7 @@ agent:
   encoder_lr: 1.0e-4
   nstep: 3
   gamma: 0.99
-  stddev_schedule: linear(1.0,0.1,1000000)
+  stddev_schedule: linear(0.5,0.1,500000)   # exploration noise: start, end, env steps
   mae_coef: 1.0
   bc_coef: 0.4
 

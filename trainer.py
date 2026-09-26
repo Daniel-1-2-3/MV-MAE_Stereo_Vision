@@ -59,7 +59,10 @@ class MetricAverager:
 def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bool, video_scale: int) -> tuple[dict, list]:
     """One deterministic episode in every parallel env. Resets the environment first.
 
-    Returns (metrics, frames): frames are env 0's stereo views, left | right.
+    Returns (metrics, frames): frames are one env's stereo views, left | right. The env
+    shown is the first that succeeded, else the first that ever reached success, else
+    the one that kept the needle lifted longest, else env 0 (metrics["eval/video_env"]
+    and ["eval/video_env_success"] say which).
     """
     agent.train(False)
     n, dev = env.num_envs, env.device
@@ -72,7 +75,9 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
     success = torch.zeros(n, dtype=torch.bool, device=dev)
     success_any = torch.zeros(n, dtype=torch.bool, device=dev)
     goal_dist = torch.zeros(n, device=dev)
-    frames = [vis.stereo_frame(obs[0], video_scale)] if record_video else []
+    history = [obs.clone()] if record_video else []  # (n, V, 3, H, W) uint8 per step, on the sim device
+    valid = torch.ones(n, dtype=torch.long, device=dev)  # frames of history that belong to each env's episode
+    lifted_steps = torch.zeros(n, device=dev)
     isaac_logs: list[dict] = []
     for _ in range(env.max_episode_steps + 1):
         action = agent.act(stack, env_step, eval_mode=True)
@@ -88,12 +93,24 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
         goal_dist = torch.where(newly, info["final_goal_distance"], goal_dist)
         if info["log"] and bool(newly.any()):
             isaac_logs.append(info["log"])
-        if record_video and not bool(finished[0]) and not bool(done[0]):
-            frames.append(vis.stereo_frame(obs[0], video_scale))
+        if record_video:
+            history.append(obs.clone())
+            valid += (alive & ~done).long()  # after `done` the returned frame already shows the reset scene
+        if "needle_lifted" in info:
+            lifted_steps += (info["needle_lifted"] & alive).float()
         finished |= done
         stack = stacker.step(obs, done)
         if bool(finished.all()):
             break
+    frames: list = []
+    if record_video:
+        if bool(success.any()):
+            pick, pick_ok = int(success.nonzero()[0]), 1.0
+        elif bool(success_any.any()):
+            pick, pick_ok = int(success_any.nonzero()[0]), 0.5
+        else:
+            pick, pick_ok = int(lifted_steps.argmax()) if bool((lifted_steps > 0).any()) else 0, 0.0
+        frames = [vis.stereo_frame(history[i][pick], video_scale) for i in range(int(valid[pick]))]
     metrics = {
         "eval/episode_return": ret.mean().item(),
         "eval/episode_length": length.mean().item(),
@@ -101,6 +118,9 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
         "eval/success_any": success_any.float().mean().item(),
         "eval/final_goal_distance": goal_dist.mean().item(),
     }
+    if record_video:
+        metrics["eval/video_env"] = float(pick)
+        metrics["eval/video_env_success"] = pick_ok  # 1 = succeeded, 0.5 = reached success at some point, 0 = neither
     per_key = defaultdict(list)
     for d in isaac_logs:
         for k, v in scalar_logs(d, "eval/isaac/").items():
@@ -115,6 +135,7 @@ class Trainer:
         self.cfg = cfg
         self.env = env
         self.device = torch.device(device)
+        self.best_score = None  # (success, success_any, return) of the best evaluation so far
         set_seed_everywhere(cfg.train.seed)
         t, a, m = cfg.train, cfg.agent, cfg.mvmae
         n = env.num_envs
@@ -162,11 +183,12 @@ class Trainer:
             return concat_batches(self.replay.sample(b - nd), self.demo.sample(nd, is_demo=True), self.device)
         return batch_to(self.replay.sample(b), self.device)
 
-    def save(self, env_steps: int, tag: str | None = None) -> Path:
+    def save(self, env_steps: int, tag: str | None = None, update_latest: bool = True) -> Path:
         path = self.run_dir / f"ckpt_{tag or env_steps}.pt"
-        torch.save({"agent": self.agent.state_dict(), "config": self.cfg.to_dict(), "env_steps": env_steps}, path)
-        torch.save({"agent": self.agent.state_dict(), "config": self.cfg.to_dict(), "env_steps": env_steps},
-                   self.run_dir / "ckpt_latest.pt")
+        state = {"agent": self.agent.state_dict(), "config": self.cfg.to_dict(), "env_steps": env_steps}
+        torch.save(state, path)
+        if update_latest:
+            torch.save(state, self.run_dir / "ckpt_latest.pt")
         return path
 
     def _sync(self) -> None:
@@ -311,6 +333,11 @@ class Trainer:
                         except Exception as e:  # a failed video must never stop training
                             print(f"video logging failed: {e}")
                 self.log(metrics, env_steps)
+                score = (metrics["eval/success"], metrics["eval/success_any"], metrics["eval/episode_return"])
+                if self.best_score is None or score > self.best_score:
+                    self.best_score = score
+                    print(f"new best eval (success {score[0]:.3f}, success_any {score[1]:.3f}): "
+                          f"saved {self.save(env_steps, tag='best', update_latest=False)}", flush=True)
                 obs, stack, first = fresh_start()
                 ep_return.zero_()
                 ep_length.zero_()

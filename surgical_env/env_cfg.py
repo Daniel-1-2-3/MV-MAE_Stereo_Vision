@@ -333,6 +333,9 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     # ---- needle placement and height thresholds relative to the tissue top
     xy = env.needle_xy_range
     cfg.events.reset_object_position.params["pose_range"] = {"x": (-xy, xy), "y": (-xy, xy), "z": (0.0, 0.0)}
+    if not env.penalty_curriculum:
+        cfg.curriculum.action_rate = None
+        cfg.curriculum.joint_vel = None
     if not (env.tissue_deformable and env.pin_tissue_bottom):
         cfg.events.pin_tissue = None
     lift_h = tissue_top + env.lift_height

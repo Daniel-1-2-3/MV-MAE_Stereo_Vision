@@ -134,6 +134,9 @@ Without demonstrations, run just `python train.py`. Settings can be overridden a
 `log.wandb_mode=offline` (no internet; upload later with `wandb sync`).
 
 Checkpoints, evaluation videos and MV-MAE reconstruction images go to `runs/<run_name>/`.
+`ckpt_best.pt` is the checkpoint with the best evaluation so far (success, then success at
+any point, then return). The evaluation video shows a robot that succeeded when there is one
+(`eval/video_env_success`: 1 = succeeded, 0.5 = reached success at some point, 0 = neither).
 
 ### What gets logged to wandb
 

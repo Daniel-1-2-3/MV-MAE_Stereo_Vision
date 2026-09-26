@@ -61,6 +61,9 @@ class EnvConfig:
     # ik_pos_scale metres / rotates it by ik_rot_scale radians in one control step.
     ik_pos_scale: float = 0.005
     ik_rot_scale: float = 0.05
+    # The original task's curriculum: after 10k simulation steps the action_rate and joint_vel
+    # penalties grow to -0.1. False keeps them at their small starting weights.
+    penalty_curriculum: bool = True
 
     # Joint speed caps for the robot, applied by PhysX. The vendored dVRK config sets
     # `velocity_limit`, which Isaac Lab >= 2.0 ignores for implicit actuators, so without
@@ -126,7 +129,11 @@ class AgentConfig:
     gamma: float = 0.99
     nstep: int = 3
     batch_size: int = 256
-    stddev_schedule: str = "linear(1.0,0.1,1000000)"  # in environment transitions
+    # Exploration noise added to the actor's actions (actions are in [-1, 1]), in environment
+    # transitions. DrQ-v2 starts at 1.0, which is close to random and makes a millimetre-scale
+    # grasp almost impossible to execute while exploring; with demonstrations guiding the actor
+    # a smaller, faster-shrinking noise works better for this task.
+    stddev_schedule: str = "linear(0.5,0.1,500000)"
     stddev_clip: float = 0.3
     aug_pad: int = 4  # random-shift augmentation, pixels
     mae_coef: float = 1.0  # weight of the MV-MAE loss in the encoder update

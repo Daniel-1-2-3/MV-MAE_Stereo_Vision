@@ -83,7 +83,8 @@ def test_training_loop_runs_end_to_end(tmp_path):
     trainer = Trainer(cfg, env, device="cpu", demo_data=demo)
     trainer.train()
     run = tmp_path / "test"
-    assert (run / "ckpt_final.pt").exists() and (run / "ckpt_latest.pt").exists()
+    assert (run / "ckpt_final.pt").exists() and (run / "ckpt_latest.pt").exists() and (run / "ckpt_best.pt").exists()
+    assert trainer.best_score is not None
     assert list((run / "videos").glob("eval_*.mp4")), "no evaluation video written"
     assert list((run / "reconstructions").glob("recon_*.png")), "no reconstruction image written"
     assert trainer.agent.num_updates > 0

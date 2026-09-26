@@ -141,6 +141,7 @@ class StereoNeedleEnv:
             "final_goal_distance": self.env.final_goal_distance.clone(),
             # valid only where not done: state of the running episode
             "success_now": self.env.success(),
+            "needle_lifted": self.env.scene["object"].data.root_pos_w[:, 2] > self.env.cfg.lift_height_w,
             # Isaac Lab episode statistics (per reward term etc.), present when something reset
             "log": dict(extras.get("log", {})) if bool(done.any()) else {},
         }
