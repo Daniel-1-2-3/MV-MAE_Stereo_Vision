@@ -20,7 +20,9 @@ env:
   penalty_curriculum: true      # original: action_rate / joint_vel penalties grow to -0.1 after 10k sim steps
   arm_joint_vel_limit: 3.0      # joint speed caps actually applied by PhysX
   gripper_joint_vel_limit: 3.0
-  blowup_joint_vel: 10.0        # cut an episode (as a time-out) if the physics glitches
+  robot_solver_position_iterations: 16   # original 4 / 0; more stops the jaws chattering on the needle
+  robot_solver_velocity_iterations: 4
+  blowup_joint_vel: 10.0        # arm joints; cut an episode (as a time-out) if the physics glitches
   blowup_needle_speed: 2.0
 
 camera:

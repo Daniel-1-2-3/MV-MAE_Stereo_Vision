@@ -98,6 +98,10 @@ def main() -> None:
     if ckpt is None:
         controller.reset_idx()
     history = [deque(maxlen=CLIP_FRAMES) for _ in range(n)]
+    robot = env.env.scene["robot"]
+    jaw_ids = robot.find_joints(["psm_tool_gripper1_joint", "psm_tool_gripper2_joint"])[0]
+    arm_ids = [i for i in range(robot.num_joints) if i not in jaw_ids]
+    jaw_speed_closed, arm_speed = [], []  # per env and step: fastest jaw while the gripper is commanded closed, fastest arm joint
     episodes, clips, seen = 0, 0, 0
     with torch.no_grad():
         while episodes < args.episodes * n:
@@ -110,6 +114,10 @@ def main() -> None:
                 action = (action + args.noise * torch.randn_like(action)).clamp(-1.0, 1.0)
             obs, reward, term, trunc, info = env.step(action)
             done = term | trunc
+            jv = robot.data.joint_vel.abs()
+            closed = action[:, -1] < 0
+            jaw_speed_closed.append(jv[:, jaw_ids].amax(dim=1)[closed & ~done].cpu())
+            arm_speed.append(jv[:, arm_ids].amax(dim=1)[~done].cpu())
             records = env.env.blowup_records
             for rec in records[seen:]:
                 print(f"glitch #{len(records[:seen]) + 1}: " + ", ".join(
@@ -131,6 +139,11 @@ def main() -> None:
 
     records = env.env.blowup_records
     text = summarize(records, episodes)
+    jaw, arm = torch.cat(jaw_speed_closed).numpy(), torch.cat(arm_speed).numpy()
+    if jaw.size:
+        text += (f"\njaw speed while closed (rad/s): median {np.median(jaw):.2f}, p99 {np.percentile(jaw, 99):.2f}, "
+                 f"max {jaw.max():.2f}, share of steps > 5 rad/s {100.0 * np.mean(jaw > 5.0):.1f}%")
+    text += f"\narm joint speed (rad/s or m/s): median {np.median(arm):.3f}, p99 {np.percentile(arm, 99):.3f}, max {arm.max():.3f}"
     print("\n" + "=" * 72 + "\n" + text + "\n" + "=" * 72)
     (out / "blowups.json").write_text(json.dumps({"episodes": episodes, "records": records}, indent=1))
     (out / "summary.txt").write_text(text + "\n")

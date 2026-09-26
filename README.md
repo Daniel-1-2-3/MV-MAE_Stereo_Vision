@@ -186,8 +186,12 @@ This writes one stereo video per round and a `metrics.json` to `outputs/eval/`.
   pad surface. (Rigid by default; see `env.tissue_deformable`.)
 * **Joint speed caps that are actually applied.** The original robot config sets
   `velocity_limit`, which Isaac Lab 2.x ignores; here `velocity_limit_sim` is set.
+* **Gripper jaws.** `diagnose_blowups.py` showed the jaws chattering at 10-50 rad/s while
+  squeezing the needle (the needle itself barely moved). The robot now uses 16 / 4 PhysX
+  solver iterations (original 4 / 0), and the `joint_vel` penalty and the joint-speed
+  cut-off look at the six arm joints only, so jaw chatter can no longer punish or cut a grasp.
 * **Glitch cut-offs.** An episode is ended as a time-out (not learned as a failure) if
-  the needle moves faster than 2 m/s, a joint faster than 10 rad/s, or the state has
+  the needle moves faster than 2 m/s, an arm joint faster than 10 rad/s, or the state has
   NaNs. Logged as `Episode_Termination/blowup_*`; `python diagnose_blowups.py` records
   what the scene looked like at each glitch.
 * **Fixed goal.** The original goal moves every second, but the policy only sees

@@ -118,9 +118,10 @@ def blowup_nonfinite(
 
 
 def blowup_joint_speed(env: ManagerBasedRLEnv, max_joint_vel: float, robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    """Termination: a robot joint moves faster than any real motion could (rad/s or m/s), (num_envs,) bool."""
+    """Termination: a robot joint (those in `robot_cfg.joint_names`) moves faster than any real
+    motion could (rad/s or m/s), (num_envs,) bool."""
     robot = env.scene[robot_cfg.name]
-    return robot.data.joint_vel.abs().amax(dim=1) > max_joint_vel
+    return robot.data.joint_vel[:, robot_cfg.joint_ids].abs().amax(dim=1) > max_joint_vel
 
 
 def blowup_needle_speed(

@@ -160,7 +160,11 @@ class RewardsCfg:
         weight=5.0,
     )
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
-    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-1e-4, params={"asset_cfg": SceneEntityCfg("robot")})
+    # CHANGED: arm joints only. The original also counts the two gripper jaws, whose simulated contact
+    # chatter while squeezing the needle (tens of rad/s) made this penalty punish every grasp.
+    joint_vel = RewTerm(
+        func=mdp.joint_vel_l2, weight=-1e-4, params={"asset_cfg": SceneEntityCfg("robot", joint_names=PSM_ARM_JOINTS)}
+    )
 
 
 @configclass
@@ -173,7 +177,7 @@ class TerminationsCfg:
     # the episode is cut and never bootstrapped through. Isaac Lab logs each one as
     # Episode_Termination/<name>.
     blowup_nonfinite = DoneTerm(func=mdp.blowup_nonfinite, time_out=True)
-    blowup_joint_speed = DoneTerm(func=mdp.blowup_joint_speed, params=MISSING, time_out=True)
+    blowup_joint_speed = DoneTerm(func=mdp.blowup_joint_speed, params=MISSING, time_out=True)  # arm joints only
     blowup_needle_speed = DoneTerm(func=mdp.blowup_needle_speed, params=MISSING, time_out=True)
 
 
@@ -296,6 +300,17 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     cfg.scene.stereo_left = _camera_cfg("StereoLeft", rig.left_pos, rig, cam, with_depth, track_camera_pose)
     cfg.scene.stereo_right = _camera_cfg("StereoRight", rig.right_pos, rig, cam, with_depth, track_camera_pose)
 
+    # ---- robot solver iterations (CHANGED from 4 / 0): more iterations keep the gripper jaws from
+    # chattering when they squeeze the needle against the pad
+    spawn = cfg.scene.robot.spawn
+    cfg.scene.robot = cfg.scene.robot.replace(
+        spawn=spawn.replace(
+            articulation_props=spawn.articulation_props.replace(
+                solver_position_iteration_count=env.robot_solver_position_iterations,
+                solver_velocity_iteration_count=env.robot_solver_velocity_iterations,
+            )
+        )
+    )
     # ---- robot joint speed caps (CHANGED): `velocity_limit_sim` is what Isaac Lab >= 2.0 applies
     act = cfg.scene.robot.actuators
     cfg.scene.robot = cfg.scene.robot.replace(
@@ -304,7 +319,10 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
             "psm_tool": act["psm_tool"].replace(velocity_limit=None, velocity_limit_sim=env.gripper_joint_vel_limit),
         }
     )
-    cfg.terminations.blowup_joint_speed.params = {"max_joint_vel": env.blowup_joint_vel}
+    cfg.terminations.blowup_joint_speed.params = {
+        "max_joint_vel": env.blowup_joint_vel,
+        "robot_cfg": SceneEntityCfg("robot", joint_names=PSM_ARM_JOINTS),  # jaw chatter is not a blowup
+    }
     cfg.terminations.blowup_needle_speed.params = {"max_object_speed": env.blowup_needle_speed}
 
     # ---- actions: relative end-effector pose (IK) + binary gripper, 7 numbers in [-1, 1]

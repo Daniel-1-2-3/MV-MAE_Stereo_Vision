@@ -71,11 +71,15 @@ class EnvConfig:
     # Units: rad/s (m/s for the insertion joint). Normal motion stays well below them
     # (IK moves the tip <= 0.125 m/s and turns it <= 1.25 rad/s).
     arm_joint_vel_limit: float = 3.0
+    # PhysX solver iterations for the robot (the original PSM config uses 4 / 0). With 0 velocity
+    # iterations the jaws chatter at tens of rad/s while squeezing the needle.
+    robot_solver_position_iterations: int = 16
+    robot_solver_velocity_iterations: int = 4
     gripper_joint_vel_limit: float = 3.0
     # Safety net: end an episode (as a time-out, so it is not learned as a failure) if the
     # physics blows up: non-finite state, a robot joint faster than this (rad/s or m/s),
     # or the needle moving faster than `blowup_needle_speed` (m/s).
-    blowup_joint_vel: float = 10.0
+    blowup_joint_vel: float = 10.0  # arm joints only: the gripper jaws chatter in contact without anything blowing up
     blowup_needle_speed: float = 2.0
 
 
