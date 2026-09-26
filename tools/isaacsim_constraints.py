@@ -2,7 +2,7 @@
 
 Installing the project's own dependencies with these constraints stops pip from
 replacing packages Isaac Sim depends on (click, psutil, plotly, ...). Pillow and
-torch* are skipped: Isaac Lab 2.3.0 itself needs a newer Pillow than Isaac Sim 5.0
+torch* are skipped: Isaac Lab 2.3.0 itself needs a different Pillow than Isaac Sim
 pins, and torch is installed separately from the CUDA 12.8 index.
 """
 

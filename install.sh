@@ -33,8 +33,10 @@ fi
 python -m pip install --upgrade pip
 python -m pip install setuptools==75.8.0 toml==0.10.2
 
-# 1) Isaac Sim + Isaac for Healthcare asset helper (same command as Isaac for Healthcare's installer)
-python -m pip install "isaacsim[all,extscache]==5.0.0" \
+# 1) Isaac Sim 5.1 + Isaac for Healthcare asset helper (same command as Isaac for Healthcare's
+#    install_isaacsim5.1_isaaclab2.3.sh). 5.1, not 5.0: the Warp version bundled with Isaac Sim 5.0
+#    cannot initialise CUDA on 580-series (CUDA 13) drivers ("cuDeviceGetUuid ... not found").
+python -m pip install "isaacsim[all,extscache]==5.1.0" \
     "i4h_asset_helper @ git+https://github.com/isaac-for-healthcare/i4h-asset-catalog.git@v0.3.0" \
     --extra-index-url https://pypi.nvidia.com
 # 2) PyTorch built for CUDA 12.8 (needed for Blackwell GPUs; isaaclab.sh also checks this)
@@ -48,10 +50,12 @@ fi
 # Installed with pip directly rather than `isaaclab.sh --install`, which hides pip
 # failures. flatdict (an Isaac Lab dependency) must be built without build isolation.
 python -m pip install --no-build-isolation flatdict==4.0.1
-python -m pip install --editable "$ISAACLAB_DIR/source/isaaclab"
+python -m pip install --editable "$ISAACLAB_DIR/source/isaaclab" h5py
+# Isaac Sim also auto-loads Isaac Lab's asset/task extensions from the source tree; make them importable.
+python -m pip install --no-deps --editable "$ISAACLAB_DIR/source/isaaclab_assets" --editable "$ISAACLAB_DIR/source/isaaclab_tasks"
 
 # Same patch as Isaac for Healthcare's installer: import omni.log lazily in
-# isaaclab/utils/math.py so the module also imports cleanly with Isaac Sim 5.0.
+# isaaclab/utils/math.py so the module imports cleanly before the simulator starts.
 MATH_PY="$ISAACLAB_DIR/source/isaaclab/isaaclab/utils/math.py"
 sed -i '/^[[:space:]]*import omni\.log[[:space:]]*$/d' "$MATH_PY"
 sed -i -E 's/^([[:space:]]*)omni\.log\.warn\(/\1import omni.log\

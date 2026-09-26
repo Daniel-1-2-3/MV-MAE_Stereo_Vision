@@ -4,7 +4,7 @@ A da Vinci surgical arm (dVRK PSM) learns to pick up a suture needle lying on so
 tissue and lift it to a target point, **using only the two images of a stereo
 camera**, the way a real da Vinci sees through its stereo endoscope.
 
-* **Simulator:** NVIDIA Isaac Sim 5.0 + Isaac Lab 2.3.0. The needle-lift task and the
+* **Simulator:** NVIDIA Isaac Sim 5.1 + Isaac Lab 2.3.0. The needle-lift task and the
   robot come from [Isaac for Healthcare](https://github.com/isaac-for-healthcare/i4h-workflows)
   v0.4.0 (originally [ORBIT-Surgical](https://github.com/orbit-surgical/orbit-surgical)).
   This project replaces the table with a soft tissue pad (a finite-element soft body)
@@ -42,7 +42,7 @@ camera**, the way a real da Vinci sees through its stereo endoscope.
 * NVIDIA driver 535 or newer (Isaac Lab recommends 580+). Blackwell cards such as the
   RTX PRO 4500 need 570 or newer.
 * About 40 GB of disk space, and at least 16 CPU cores for a comfortable run.
-* Python 3.11. Isaac Sim 5.0 requires exactly this version.
+* Python 3.11. Isaac Sim 5.x requires exactly this version.
 
 Before installing, check that the GPU can render. Isaac Sim needs Vulkan, not just CUDA:
 
@@ -68,7 +68,7 @@ conda activate mvmae
 # read https://docs.omniverse.nvidia.com/eula, then
 export OMNI_KIT_ACCEPT_EULA=YES
 
-bash install.sh        # 20-40 min: Isaac Sim 5.0.0, Isaac Lab v2.3.0, PyTorch 2.7.0+cu128, ...
+bash install.sh        # 20-40 min: Isaac Sim 5.1.0, Isaac Lab v2.3.0, PyTorch 2.7.0+cu128, ...
 ```
 
 `install.sh` installs into the active environment, clones Isaac Lab into

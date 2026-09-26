@@ -1,15 +1,15 @@
 # Project dependencies, installed by install.sh AFTER Isaac Sim / Isaac Lab.
 #
 # The simulator stack is installed separately by install.sh, in this order:
-#   isaacsim[all,extscache]==5.0.0 + i4h_asset_helper (v0.3.0)   from https://pypi.nvidia.com
+#   isaacsim[all,extscache]==5.1.0 + i4h_asset_helper (v0.3.0)   from https://pypi.nvidia.com
 #   torch==2.7.0 torchvision==0.22.0                             from https://download.pytorch.org/whl/cu128
 #   Isaac Lab v2.3.0                                             from source (third_party/IsaacLab)
-# This is the combination Isaac for Healthcare v0.4.0 tested for its robotic surgery workflow.
+# Isaac for Healthcare ships an installer for exactly this combination (Isaac Sim 5.1 + Isaac Lab 2.3).
 #
 # install.sh installs these last, constrained to the exact versions Isaac Sim pins
 # (click, sentry-sdk, plotly, psutil, ...), so they can never replace them.
 
-# wandb 0.17.0 - 0.18.2 is the newest range compatible with Isaac Sim 5.0's pinned
+# wandb 0.17.0 - 0.18.2 is the newest range compatible with Isaac Sim's pinned
 # click / sentry-sdk. The [media] extra is not needed (videos are logged as mp4 files).
 wandb>=0.17,<0.18.3
 imageio[ffmpeg]>=2.31
