@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install everything into the *active* Python 3.11 environment:
-#   Isaac Sim 5.0.0, Isaac Lab v2.3.0 (from source, into third_party/IsaacLab),
+#   Isaac Sim 5.1.0, Isaac Lab v2.3.0 (from source, into third_party/IsaacLab),
 #   PyTorch 2.7.0 + CUDA 12.8, the Isaac for Healthcare asset helper, and this
 #   project's Python dependencies.
 #
