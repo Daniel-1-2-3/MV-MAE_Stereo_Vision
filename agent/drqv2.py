@@ -161,6 +161,9 @@ class MVMAEDrQV2Agent:
         next_obs = self._augment(batch.next_obs)
         if c.critic_grad_to_encoder:
             z = self._encode(obs)
+            s = c.critic_encoder_grad_scale
+            if s != 1.0:
+                z = z * s + z.detach() * (1.0 - s)  # same value, critic gradient into the encoder scaled by s
         else:
             with torch.no_grad():
                 z = self._encode(obs)

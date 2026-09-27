@@ -50,6 +50,8 @@ agent:
   gamma: 0.99
   stddev_schedule: linear(0.5,0.1,500000)   # exploration noise: start, end, env steps
   mae_coef: 1.0
+  mae_every: 2                     # MV-MAE loss every 2nd update
+  critic_encoder_grad_scale: 0.1   # critic gradient into the encoder x0.1 so it cannot overpower MV-MAE
   bc_coef: 0.4
 
 train:

@@ -222,6 +222,15 @@ This writes one stereo video per round and a `metrics.json` to `outputs/eval/`.
    actor gets an extra behaviour-cloning term on those samples, balanced against the
    critic as in TD3+BC.
 
+### Critic vs. MV-MAE on the encoder
+
+The encoder is trained by the MV-MAE loss and (DrQ-v2 style) by the critic. Once the task
+starts being solved, Q values reach ~100 and the critic loss (~75) is over 1000x the MV-MAE
+loss (~0.05); a run with the critic gradient at full strength peaked at 37% eval success
+around 400k steps, then declined while the reconstruction loss crept up. The critic's
+gradient into the encoder is therefore scaled by `agent.critic_encoder_grad_scale` (0.1),
+and the MV-MAE loss runs every 2nd update (`agent.mae_every`).
+
 ## Troubleshooting
 
 | Symptom | Try |
