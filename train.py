@@ -11,6 +11,9 @@ Any config value can be overridden as section.key=value (see config.py).
 from __future__ import annotations
 
 import argparse
+import os
+import sys
+import traceback
 
 from sim_app import launch
 
@@ -29,8 +32,9 @@ def main() -> None:
     cfg = load_config(args.config, overrides)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    env = make_env(cfg, device=args.device)
+    # Load the demos before building the simulator, so a wrong path fails in seconds.
     demo = torch.load(cfg.train.demo_path, map_location="cpu") if cfg.train.demo_path else None
+    env = make_env(cfg, device=args.device)
     if demo is not None:
         print(f"loaded {demo['meta']['num_episodes']} demo episodes from {cfg.train.demo_path}")
         for section in ("env", "camera"):
@@ -46,5 +50,11 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    finally:
-        simulation_app.close()
+    except BaseException:
+        # Print the error and exit at once: Isaac Sim's shutdown can hang after an error,
+        # which would leave the process running with the error never printed.
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+    simulation_app.close()
