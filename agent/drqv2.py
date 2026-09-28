@@ -118,6 +118,7 @@ class MVMAEDrQV2Agent:
         self.aug = utils.RandomShiftsAug(c.aug_pad)
         self.use_amp = bool(c.amp) and self.device.type == "cuda"
         self.num_updates = 0
+        self.encoder_frozen = False  # see freeze_encoder()
 
     # ----------------------------------------------------------------- utils
     def _autocast(self):
@@ -150,17 +151,29 @@ class MVMAEDrQV2Agent:
         dist = self.actor(z, self.stddev(env_step))
         return dist.mean if eval_mode else dist.sample(clip=None)
 
+    def freeze_encoder(self) -> None:
+        """Stop all further encoder training (MV-MAE and critic gradients alike).
+
+        The actor and critic keep learning on the now-fixed features, like policies
+        trained on a frozen pretrained encoder.
+        """
+        self.encoder_frozen = True
+        self.mvmae.requires_grad_(False)
+
     # ---------------------------------------------------------------- update
     def update(self, batch: Batch, env_step: int) -> dict[str, torch.Tensor]:
         c = self.cfg
         metrics: dict[str, torch.Tensor] = {}
         std = self.stddev(env_step)
-        do_mae = c.mae_coef > 0 and self.num_updates % max(1, c.mae_every) == 0
+        do_mae = c.mae_coef > 0 and not self.encoder_frozen and self.num_updates % max(1, c.mae_every) == 0
 
         obs = self._augment(batch.obs)
         next_obs = self._augment(batch.next_obs)
         s = utils.schedule(str(c.critic_encoder_grad_scale), env_step) if c.critic_grad_to_encoder else 0.0
+        if self.encoder_frozen:
+            s = 0.0
         metrics["train/critic_encoder_grad_scale"] = torch.tensor(s, device=self.device)
+        metrics["train/encoder_frozen"] = torch.tensor(float(self.encoder_frozen), device=self.device)
         if s > 0.0:
             z = self._encode(obs)
             if s != 1.0:
@@ -187,10 +200,12 @@ class MVMAEDrQV2Agent:
         self.encoder_opt.zero_grad(set_to_none=True)
         self.critic_opt.zero_grad(set_to_none=True)
         total.backward()
-        metrics["grad/encoder"] = nn.utils.clip_grad_norm_(self.mvmae.parameters(), c.max_grad_norm)
+        if not self.encoder_frozen:
+            metrics["grad/encoder"] = nn.utils.clip_grad_norm_(self.mvmae.parameters(), c.max_grad_norm)
         metrics["grad/critic"] = nn.utils.clip_grad_norm_(self.critic.parameters(), c.max_grad_norm)
-        self.encoder_opt.step()
-        self.encoder_sched.step()
+        if not self.encoder_frozen:
+            self.encoder_opt.step()
+            self.encoder_sched.step()
         self.critic_opt.step()
 
         # ---- actor (encoder frozen for this step, as in DrQ-v2)
@@ -281,6 +296,7 @@ class MVMAEDrQV2Agent:
             "critic_opt": self.critic_opt.state_dict(),
             "actor_opt": self.actor_opt.state_dict(),
             "num_updates": self.num_updates,
+            "encoder_frozen": self.encoder_frozen,
         }
 
     def load_state_dict(self, state: dict, load_optimizers: bool = True) -> None:
@@ -294,3 +310,5 @@ class MVMAEDrQV2Agent:
             self.critic_opt.load_state_dict(state["critic_opt"])
             self.actor_opt.load_state_dict(state["actor_opt"])
         self.num_updates = state.get("num_updates", 0)
+        if state.get("encoder_frozen", False):
+            self.freeze_encoder()

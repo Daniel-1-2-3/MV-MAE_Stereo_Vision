@@ -234,6 +234,16 @@ the robot learned to reach the needle but not to grasp it by 500k steps, so the 
 `linear(1.0,0.0,400000)`: full strength early, fading to none by 400k steps. The MV-MAE loss
 runs every 2nd update (`agent.mae_every`).
 
+### Freezing the encoder once the task is learned
+
+The encoder gets full critic shaping (`agent.critic_encoder_grad_scale=1.0`) plus the MV-MAE
+loss (every `agent.mae_every` updates) until the robot has shown it can do the task: eval
+`success_any` >= `train.freeze_encoder_success` (0.1) in `train.freeze_encoder_evals` (2)
+evaluations in a row, or `train.freeze_encoder_at` (450k) env steps at the latest. Then the
+encoder is frozen (neither MV-MAE nor the critic changes it) and the actor and critic keep
+learning on the fixed features. The moment is printed as `ENCODER FROZEN`, saved as
+`ckpt_frozen.pt`, and logged as `train/encoder_frozen` / `train/encoder_frozen_at`.
+
 ## Troubleshooting
 
 | Symptom | Try |

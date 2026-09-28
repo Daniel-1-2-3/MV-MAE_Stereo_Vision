@@ -68,7 +68,7 @@ def test_training_loop_runs_end_to_end(tmp_path):
         "agent.hidden_dim=32", "agent.feature_dim=8", "agent.amp=false", "train.total_env_steps=600",
         "train.seed_env_steps=100", "train.mae_pretrain_updates=5", "train.updates_per_env_step=0.25",
         "train.replay_capacity=400", "train.replay_device=cpu", "train.eval_every_env_steps=400",
-        "train.checkpoint_every_env_steps=500", f"train.run_dir={tmp_path}", "log.log_every_updates=10",
+        "train.checkpoint_every_env_steps=500", "train.freeze_encoder_at=520", f"train.run_dir={tmp_path}", "log.log_every_updates=10",
         "log.recon_every_updates=20", "log.wandb_mode=offline", "log.run_name=test",
     ])
     env = FakeStereoEnv(num_envs=4, size=32)
@@ -85,6 +85,7 @@ def test_training_loop_runs_end_to_end(tmp_path):
     run = tmp_path / "test"
     assert (run / "ckpt_final.pt").exists() and (run / "ckpt_latest.pt").exists() and (run / "ckpt_best.pt").exists()
     assert trainer.best_score is not None
+    assert trainer.agent.encoder_frozen and (run / "ckpt_frozen.pt").exists()
     assert list((run / "videos").glob("eval_*.mp4")), "no evaluation video written"
     assert list((run / "reconstructions").glob("recon_*.png")), "no reconstruction image written"
     assert trainer.agent.num_updates > 0

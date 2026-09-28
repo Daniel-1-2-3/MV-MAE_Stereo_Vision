@@ -148,7 +148,8 @@ class AgentConfig:
     # or a schedule over environment steps ("linear(1.0,0.0,400000)"). Full strength (1.0) early
     # helps the encoder pick out the needle quickly; runs that kept it at 1.0 peaked and slid once
     # Q values grew, and runs without it (critic_grad_to_encoder=false) reached but never grasped.
-    critic_encoder_grad_scale: str = "0.1"
+    # Default 1.0 together with train.freeze_encoder_*: full critic shaping until the encoder is frozen.
+    critic_encoder_grad_scale: str = "1.0"
     bc_coef: float = 0.4  # behaviour cloning on demo samples (TD3+BC, alpha=2.5); 0 disables
     max_grad_norm: float = 10.0
     amp: bool = True  # bfloat16 autocast for the transformer on CUDA
@@ -167,6 +168,13 @@ class TrainConfig:
     demo_ratio: float = 0.25  # fraction of every batch drawn from the demos
     eval_every_env_steps: int = 50_000
     checkpoint_every_env_steps: int = 200_000
+    # Freeze the encoder (no more MV-MAE or critic updates to it) once the robot has shown it can
+    # do the task: eval success_any >= freeze_encoder_success in freeze_encoder_evals evaluations
+    # in a row, or at freeze_encoder_at env steps at the latest. The actor and critic keep learning
+    # on the fixed features. freeze_encoder_success=0 and freeze_encoder_at=0 disable it.
+    freeze_encoder_success: float = 0.1
+    freeze_encoder_evals: int = 2
+    freeze_encoder_at: int = 450_000
     run_dir: str = "runs"
 
 

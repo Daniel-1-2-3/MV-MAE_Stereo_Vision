@@ -133,3 +133,22 @@ def test_critic_encoder_grad_schedule():
     assert abs(utils.schedule("linear(1.0,0.0,400000)", 200000) - 0.5) < 1e-9
     assert utils.schedule("linear(1.0,0.0,400000)", 900000) == 0.0
     assert utils.schedule("0.1", 123) == 0.1
+
+
+def test_frozen_encoder_stays_fixed_while_actor_and_critic_learn():
+    torch.manual_seed(0)
+    agent = small_agent()
+    agent.update(fake_batch(), env_step=0)  # Adam has momentum for the encoder before freezing
+    agent.freeze_encoder()
+    enc = [p.detach().clone() for p in agent.mvmae.parameters()]
+    actor = [p.detach().clone() for p in agent.actor.parameters()]
+    critic = [p.detach().clone() for p in agent.critic.parameters()]
+    for _ in range(3):
+        m = agent.update(fake_batch(), env_step=0)
+    assert float(m["train/encoder_frozen"]) == 1.0 and "mvmae/recon_loss" not in m
+    assert all(torch.equal(a, b) for a, b in zip(enc, agent.mvmae.parameters()))
+    assert any(not torch.equal(a, b) for a, b in zip(actor, agent.actor.parameters()))
+    assert any(not torch.equal(a, b) for a, b in zip(critic, agent.critic.parameters()))
+    other = small_agent()
+    other.load_state_dict(agent.state_dict())
+    assert other.encoder_frozen

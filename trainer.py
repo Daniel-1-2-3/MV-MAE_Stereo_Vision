@@ -136,6 +136,7 @@ class Trainer:
         self.env = env
         self.device = torch.device(device)
         self.best_score = None  # (success, success_any, return) of the best evaluation so far
+        self.freeze_streak = 0  # consecutive evaluations at or above train.freeze_encoder_success
         set_seed_everywhere(cfg.train.seed)
         t, a, m = cfg.train, cfg.agent, cfg.mvmae
         n = env.num_envs
@@ -333,6 +334,7 @@ class Trainer:
                         except Exception as e:  # a failed video must never stop training
                             print(f"video logging failed: {e}")
                 self.log(metrics, env_steps)
+                self._maybe_freeze_encoder(metrics["eval/success_any"], env_steps)
                 score = (metrics["eval/success"], metrics["eval/success_any"], metrics["eval/episode_return"])
                 if self.best_score is None or score > self.best_score:
                     self.best_score = score
@@ -343,6 +345,9 @@ class Trainer:
                 ep_length.zero_()
                 ep_success_any.zero_()
 
+            if t.freeze_encoder_at > 0 and env_steps >= t.freeze_encoder_at and not agent.encoder_frozen:
+                self._freeze_encoder(env_steps, f"reached train.freeze_encoder_at={t.freeze_encoder_at}")
+
             if env_steps >= next_ckpt:
                 next_ckpt += t.checkpoint_every_env_steps
                 print(f"saved {self.save(env_steps)}", flush=True)
@@ -350,6 +355,21 @@ class Trainer:
         print(f"saved {self.save(env_steps, tag='final')}", flush=True)
         if self.wandb is not None:
             self.wandb.finish()
+
+    def _maybe_freeze_encoder(self, success_any: float, env_steps: int) -> None:
+        t = self.cfg.train
+        if self.agent.encoder_frozen or t.freeze_encoder_success <= 0:
+            return
+        self.freeze_streak = self.freeze_streak + 1 if success_any >= t.freeze_encoder_success else 0
+        if self.freeze_streak >= max(1, t.freeze_encoder_evals):
+            self._freeze_encoder(env_steps, f"eval success_any >= {t.freeze_encoder_success} in "
+                                            f"{self.freeze_streak} evaluations in a row")
+
+    def _freeze_encoder(self, env_steps: int, reason: str) -> None:
+        self.agent.freeze_encoder()
+        print(f"[{env_steps:>9d}] ENCODER FROZEN ({reason}); saved {self.save(env_steps, tag='frozen', update_latest=False)}",
+              flush=True)
+        self.log({"train/encoder_frozen_at": float(env_steps)}, env_steps)
 
     def _log_reconstruction(self, obs: torch.Tensor | None, env_steps: int) -> None:
         if obs is None:
