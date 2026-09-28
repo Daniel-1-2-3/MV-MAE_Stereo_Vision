@@ -42,8 +42,10 @@ def main() -> None:
     agent.load_state_dict(ckpt["agent"], load_optimizers=False)
     all_metrics = []
     for r in range(args.rounds):
-        metrics, frames = evaluate_policy(env, agent, ckpt["env_steps"], record_video=True, video_scale=cfg.log.video_scale)
+        metrics, frames, fail_frames = evaluate_policy(env, agent, ckpt["env_steps"], record_video=True,
+                                                       video_scale=cfg.log.video_scale)
         vis.save_mp4(frames, out / f"episode_{r}.mp4", fps=1.0 / env.step_dt)
+        vis.save_mp4(fail_frames, out / f"failure_{r}.mp4", fps=1.0 / env.step_dt)
         all_metrics.append(metrics)
         print(f"round {r}: " + ", ".join(f"{k}={v:.3f}" for k, v in metrics.items()), flush=True)
     summary = {k: float(np.mean([m[k] for m in all_metrics])) for k in all_metrics[0]}

@@ -160,6 +160,11 @@ class StereoNeedleEnv:
         goal = self.env.command_manager.get_command("object_pose")
         return ee_pos, ee_quat, obj_pos, obj_quat, goal[:, :3], goal[:, 3:7]
 
+    def needle_xy_local(self) -> torch.Tensor:
+        """(N, 2) needle position on the pad, metres from the pad centre."""
+        pos = self.env.scene["object"].data.root_pos_w - self.env.scene.env_origins
+        return pos[:, :2]
+
     def close(self) -> None:
         self.env.close()
 

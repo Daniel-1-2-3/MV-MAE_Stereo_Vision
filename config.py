@@ -188,6 +188,9 @@ class LogConfig:
     recon_every_updates: int = 5_000
     video: bool = True
     video_scale: int = 2  # nearest-neighbour upscaling of the 96 px stereo frames
+    # Copy ckpt_latest / best / frozen / final to wandb Artifacts (at every checkpoint, at the
+    # freeze and at the end) so they survive losing the machine.
+    upload_checkpoints: bool = True
 
 
 @dataclass

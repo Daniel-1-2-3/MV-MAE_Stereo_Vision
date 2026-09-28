@@ -55,14 +55,25 @@ class MetricAverager:
         return out
 
 
+EVAL_BUCKETS = ("never_lifted", "lifted_dropped", "missed_goal", "glitch_cut")
+CENTER_RADIUS_M = 0.015  # needle landing spots closer than this to the pad centre count as "center"
+
+
 @torch.no_grad()
-def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bool, video_scale: int) -> tuple[dict, list]:
+def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bool, video_scale: int):
     """One deterministic episode in every parallel env. Resets the environment first.
 
-    Returns (metrics, frames): frames are one env's stereo views, left | right. The env
-    shown is the first that succeeded, else the first that ever reached success, else
-    the one that kept the needle lifted longest, else env 0 (metrics["eval/video_env"]
-    and ["eval/video_env_success"] say which).
+    Returns (metrics, frames, fail_frames), frames = one env's stereo views (left | right).
+    `frames` shows the first env that succeeded, else the first that ever reached success,
+    else the one that kept the needle lifted longest, else env 0 (metrics["eval/video_env"]
+    and ["eval/video_env_success"] say which). `fail_frames` shows a failed episode from the
+    most common failure bucket (empty if every env succeeded).
+
+    Every failed episode is also put in a bucket, logged as eval/fail/<bucket> (fraction of
+    all episodes): never_lifted (needle never above the lift height), lifted_dropped (lifted
+    at some point but not at the end), missed_goal (still lifted at the end, not at the goal),
+    glitch_cut (cut early by a blowup_* time-out). eval/success_center / eval/success_edge
+    split the success rate by where the needle landed on the pad.
     """
     agent.train(False)
     n, dev = env.num_envs, env.device
@@ -78,31 +89,53 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
     history = [obs.clone()] if record_video else []  # (n, V, 3, H, W) uint8 per step, on the sim device
     valid = torch.ones(n, dtype=torch.long, device=dev)  # frames of history that belong to each env's episode
     lifted_steps = torch.zeros(n, device=dev)
+    ever_lifted = torch.zeros(n, dtype=torch.bool, device=dev)
+    lifted_prev = torch.zeros(n, dtype=torch.bool, device=dev)
+    final_lifted = torch.zeros(n, dtype=torch.bool, device=dev)
+    cut_early = torch.zeros(n, dtype=torch.bool, device=dev)
+    radius = None
     isaac_logs: list[dict] = []
-    for _ in range(env.max_episode_steps + 1):
+    for t in range(env.max_episode_steps + 1):
+        if t == 5 and hasattr(env, "needle_xy_local"):  # the needle has landed on the pad
+            radius = torch.linalg.vector_norm(env.needle_xy_local(), dim=-1)
         action = agent.act(stack, env_step, eval_mode=True)
         obs, reward, term, trunc, info = env.step(action)
         done = term | trunc
         alive = ~finished
+        live = alive & ~done  # still inside the same episode after this step
         ret += reward * alive
         length += alive.float()
-        success_any |= info["success_now"] & alive & ~done
+        success_any |= info["success_now"] & live
         newly = done & alive
         success = torch.where(newly, info["final_success"], success)
         success_any |= newly & info["final_success"]
         goal_dist = torch.where(newly, info["final_goal_distance"], goal_dist)
+        cut_early |= newly & trunc & (length < env.max_episode_steps)
         if info["log"] and bool(newly.any()):
             isaac_logs.append(info["log"])
         if record_video:
             history.append(obs.clone())
-            valid += (alive & ~done).long()  # after `done` the returned frame already shows the reset scene
+            valid += live.long()  # after `done` the returned frame already shows the reset scene
         if "needle_lifted" in info:
-            lifted_steps += (info["needle_lifted"] & alive).float()
+            lifted = info["needle_lifted"]
+            lifted_steps += (lifted & live).float()
+            ever_lifted |= lifted & live
+            final_lifted |= newly & lifted_prev  # lifted on the last step inside the episode
+            lifted_prev = torch.where(live, lifted, lifted_prev)
         finished |= done
         stack = stacker.step(obs, done)
         if bool(finished.all()):
             break
+
+    failed = ~success
+    buckets = {
+        "glitch_cut": failed & cut_early,
+        "never_lifted": failed & ~cut_early & ~ever_lifted,
+        "missed_goal": failed & ~cut_early & ever_lifted & final_lifted,
+        "lifted_dropped": failed & ~cut_early & ever_lifted & ~final_lifted,
+    }
     frames: list = []
+    fail_frames: list = []
     if record_video:
         if bool(success.any()):
             pick, pick_ok = int(success.nonzero()[0]), 1.0
@@ -111,6 +144,10 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
         else:
             pick, pick_ok = int(lifted_steps.argmax()) if bool((lifted_steps > 0).any()) else 0, 0.0
         frames = [vis.stereo_frame(history[i][pick], video_scale) for i in range(int(valid[pick]))]
+        worst = max(EVAL_BUCKETS, key=lambda b: int(buckets[b].sum()))
+        if bool(buckets[worst].any()):
+            fail_pick = int(buckets[worst].nonzero()[0])
+            fail_frames = [vis.stereo_frame(history[i][fail_pick], video_scale) for i in range(int(valid[fail_pick]))]
     metrics = {
         "eval/episode_return": ret.mean().item(),
         "eval/episode_length": length.mean().item(),
@@ -118,16 +155,26 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
         "eval/success_any": success_any.float().mean().item(),
         "eval/final_goal_distance": goal_dist.mean().item(),
     }
+    if "needle_lifted" in info:
+        metrics.update({f"eval/fail/{b}": buckets[b].float().mean().item() for b in EVAL_BUCKETS})
+    if radius is not None:
+        center = radius < CENTER_RADIUS_M
+        if bool(center.any()):
+            metrics["eval/success_center"] = success[center].float().mean().item()
+        if bool((~center).any()):
+            metrics["eval/success_edge"] = success[~center].float().mean().item()
     if record_video:
         metrics["eval/video_env"] = float(pick)
         metrics["eval/video_env_success"] = pick_ok  # 1 = succeeded, 0.5 = reached success at some point, 0 = neither
+        if fail_frames:
+            metrics["eval/failure_video_bucket"] = float(EVAL_BUCKETS.index(worst))
     per_key = defaultdict(list)
     for d in isaac_logs:
         for k, v in scalar_logs(d, "eval/isaac/").items():
             per_key[k].append(v)
     metrics.update({k: float(np.mean(v)) for k, v in per_key.items()})
     agent.train(True)
-    return metrics, frames
+    return metrics, frames, fail_frames
 
 
 class Trainer:
@@ -322,15 +369,20 @@ class Trainer:
             if env_steps >= next_eval:
                 next_eval += t.eval_every_env_steps
                 self.replay.mark_last_truncated()
-                metrics, frames = evaluate_policy(env, agent, env_steps, lg.video, lg.video_scale)
+                metrics, frames, fail_frames = evaluate_policy(env, agent, env_steps, lg.video, lg.video_scale)
                 print(f"[{env_steps:>9d}] EVAL return {metrics['eval/episode_return']:.2f} | "
                       f"success {metrics['eval/success']:.2f}", flush=True)
-                if frames:
-                    video_path = self.run_dir / "videos" / f"eval_{env_steps}.mp4"
-                    vis.save_mp4(frames, video_path, fps=1.0 / env.step_dt)
+                fails = ", ".join(f"{k.split('/')[-1]} {v:.2f}" for k, v in metrics.items() if k.startswith("eval/fail/"))
+                if fails:
+                    print(f"[{env_steps:>9d}] EVAL failures (fraction of episodes): {fails}", flush=True)
+                for key, clip, name in (("eval/video", frames, "eval"), ("eval/failure_video", fail_frames, "eval_failure")):
+                    if not clip:
+                        continue
+                    video_path = self.run_dir / "videos" / f"{name}_{env_steps}.mp4"
+                    vis.save_mp4(clip, video_path, fps=1.0 / env.step_dt)
                     if self.wandb is not None:
                         try:
-                            metrics["eval/video"] = vis.wandb_video(video_path)
+                            metrics[key] = vis.wandb_video(video_path)
                         except Exception as e:  # a failed video must never stop training
                             print(f"video logging failed: {e}")
                 self.log(metrics, env_steps)
@@ -351,8 +403,10 @@ class Trainer:
             if env_steps >= next_ckpt:
                 next_ckpt += t.checkpoint_every_env_steps
                 print(f"saved {self.save(env_steps)}", flush=True)
+                self._upload_checkpoints("latest", "best", "frozen")
 
         print(f"saved {self.save(env_steps, tag='final')}", flush=True)
+        self._upload_checkpoints("final", "best", "frozen")
         if self.wandb is not None:
             self.wandb.finish()
 
@@ -370,6 +424,28 @@ class Trainer:
         print(f"[{env_steps:>9d}] ENCODER FROZEN ({reason}); saved {self.save(env_steps, tag='frozen', update_latest=False)}",
               flush=True)
         self.log({"train/encoder_frozen_at": float(env_steps)}, env_steps)
+        self._upload_checkpoints("frozen")
+
+    def _upload_checkpoints(self, *tags: str) -> None:
+        """Copy checkpoints to wandb (Artifacts tab) so they survive the machine: ckpt_<tag>.pt per tag.
+
+        Get one back with: wandb artifact get <entity>/<project>/<run name>-ckpt-<tag>:latest --root <dir>
+        """
+        if self.wandb is None or not self.cfg.log.upload_checkpoints:
+            return
+        import wandb
+
+        name = (self.cfg.log.run_name or self.wandb.id).replace("/", "-")
+        for tag in tags:
+            path = self.run_dir / f"ckpt_{tag}.pt"
+            if not path.exists():
+                continue
+            try:
+                art = wandb.Artifact(f"{name}-ckpt-{tag}", type="model")
+                art.add_file(str(path), name=path.name)
+                self.wandb.log_artifact(art)
+            except Exception as e:  # an upload problem must never stop training
+                print(f"checkpoint upload failed ({tag}): {e}")
 
     def _log_reconstruction(self, obs: torch.Tensor | None, env_steps: int) -> None:
         if obs is None:

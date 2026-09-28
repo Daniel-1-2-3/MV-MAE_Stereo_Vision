@@ -148,6 +148,17 @@ any point, then return). The evaluation video shows a robot that succeeded when 
   and env steps / updates.
 * **eval/** (every 50k steps): the same episode metrics from a deterministic policy,
   plus `eval/video` with the stereo view (left | right) of one episode.
+  **Failure analysis in every eval:** `eval/fail/never_lifted`, `lifted_dropped`,
+  `missed_goal` and `glitch_cut` (fractions of all episodes; with `eval/success` they add up
+  to 1), `eval/failure_video` (an episode from the most common failure bucket, whose index in
+  that order is `eval/failure_video_bucket`), and `eval/success_center` / `eval/success_edge`
+  (success rate for needles landing within / beyond 15 mm of the pad centre). For a larger
+  sample after training, `python eval_failures.py --checkpoint ...` does the same per episode.
+* **Checkpoints in wandb:** `ckpt_latest`, `ckpt_best`, `ckpt_frozen` and `ckpt_final` are
+  uploaded as Artifacts (`<run name>-ckpt-<tag>`) at every checkpoint, at the encoder freeze
+  and at the end, so they survive losing the machine. Get one back with
+  `wandb artifact get <entity>/mvmae-drqv2-surgery/<run name>-ckpt-best:latest --root runs/<run name>`.
+  Turn off with `log.upload_checkpoints=false`.
 * **critic/**, **actor/**: Q-values, target Q, critic loss, actor loss, and
   behaviour-cloning loss when demos are used.
 * **mvmae/**: reconstruction loss, reward-prediction loss, and a

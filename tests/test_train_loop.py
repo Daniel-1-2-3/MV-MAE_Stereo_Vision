@@ -10,7 +10,7 @@ import os
 import torch
 
 from config import load_config
-from trainer import Trainer
+from trainer import Trainer, evaluate_policy
 
 
 class FakeStereoEnv:
@@ -41,6 +41,9 @@ class FakeStereoEnv:
         self._reset(torch.arange(self.num_envs))
         return self.images()
 
+    def needle_xy_local(self):
+        return (self.pos - self.size / 2) / 1000.0
+
     def step(self, action):
         self.pos = (self.pos + action[:, :2] * 2).clamp(0, self.size - 8)
         self.t += 1
@@ -56,7 +59,7 @@ class FakeStereoEnv:
         if done.any():
             self._reset(done.nonzero().squeeze(-1))
         info = {"final_success": final_success, "final_goal_distance": final_goal, "success_now": success_now,
-                "log": log if bool(done.any()) else {}}
+                "needle_lifted": dist < 8, "log": log if bool(done.any()) else {}}
         return self.images(), reward, term, trunc, info
 
 
@@ -87,6 +90,11 @@ def test_training_loop_runs_end_to_end(tmp_path):
     assert trainer.best_score is not None
     assert trainer.agent.encoder_frozen and (run / "ckpt_frozen.pt").exists()
     assert list((run / "videos").glob("eval_*.mp4")), "no evaluation video written"
+    m, frames, fail_frames = evaluate_policy(env, trainer.agent, 0, record_video=True, video_scale=1)
+    fail = [m[f"eval/fail/{b}"] for b in ("never_lifted", "lifted_dropped", "missed_goal", "glitch_cut")]
+    assert abs(sum(fail) + m["eval/success"] - 1.0) < 1e-6, "buckets must cover every failed episode exactly once"
+    assert frames and ("eval/success_center" in m or "eval/success_edge" in m)
+    assert bool(fail_frames) == (m["eval/success"] < 1.0)
     assert list((run / "reconstructions").glob("recon_*.png")), "no reconstruction image written"
     assert trainer.agent.num_updates > 0
     ckpt = torch.load(run / "ckpt_final.pt", map_location="cpu")
