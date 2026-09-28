@@ -124,3 +124,12 @@ def test_encoder_only_learns_from_mae_when_critic_grad_disabled():
     before = [p.detach().clone() for p in agent.mvmae.parameters()]
     agent.update(fake_batch(demo=False), env_step=0)
     assert all(torch.equal(a, b) for a, b in zip(before, agent.mvmae.parameters()))
+
+
+def test_critic_encoder_grad_schedule():
+    from agent import utils
+
+    assert utils.schedule("linear(1.0,0.0,400000)", 0) == 1.0
+    assert abs(utils.schedule("linear(1.0,0.0,400000)", 200000) - 0.5) < 1e-9
+    assert utils.schedule("linear(1.0,0.0,400000)", 900000) == 0.0
+    assert utils.schedule("0.1", 123) == 0.1

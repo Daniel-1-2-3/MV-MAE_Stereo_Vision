@@ -228,8 +228,11 @@ The encoder is trained by the MV-MAE loss and (DrQ-v2 style) by the critic. Once
 starts being solved, Q values reach ~100 and the critic loss (~75) is over 1000x the MV-MAE
 loss (~0.05); a run with the critic gradient at full strength peaked at 37% eval success
 around 400k steps, then declined while the reconstruction loss crept up. The critic's
-gradient into the encoder is therefore scaled by `agent.critic_encoder_grad_scale` (0.1),
-and the MV-MAE loss runs every 2nd update (`agent.mae_every`).
+gradient into the encoder is therefore scaled by `agent.critic_encoder_grad_scale`, which
+can be a constant or a schedule. Without any critic gradient (`agent.critic_grad_to_encoder=false`)
+the robot learned to reach the needle but not to grasp it by 500k steps, so the default is
+`linear(1.0,0.0,400000)`: full strength early, fading to none by 400k steps. The MV-MAE loss
+runs every 2nd update (`agent.mae_every`).
 
 ## Troubleshooting
 

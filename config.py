@@ -144,11 +144,11 @@ class AgentConfig:
     reward_pred_coef: float = 1.0
     mae_every: int = 1  # run the MV-MAE loss every N updates
     critic_grad_to_encoder: bool = True  # DrQ-v2 style; False = encoder learns from MV-MAE only
-    # Scales the critic's gradient into the encoder (forward pass unchanged). Once the task is
-    # being solved, Q values reach ~100 and the critic loss (~75) dwarfs the MV-MAE loss (~0.05):
-    # at 1.0 the critic then reshapes the encoder on its own, the reconstruction loss creeps up
-    # and fine details such as the needle degrade. 0.1 keeps some task shaping without that.
-    critic_encoder_grad_scale: float = 0.1
+    # Scales the critic's gradient into the encoder (forward pass unchanged): a constant ("0.1")
+    # or a schedule over environment steps ("linear(1.0,0.0,400000)"). Full strength (1.0) early
+    # helps the encoder pick out the needle quickly; runs that kept it at 1.0 peaked and slid once
+    # Q values grew, and runs without it (critic_grad_to_encoder=false) reached but never grasped.
+    critic_encoder_grad_scale: str = "0.1"
     bc_coef: float = 0.4  # behaviour cloning on demo samples (TD3+BC, alpha=2.5); 0 disables
     max_grad_norm: float = 10.0
     amp: bool = True  # bfloat16 autocast for the transformer on CUDA
