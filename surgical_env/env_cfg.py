@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import MISSING
 
 import isaaclab.sim as sim_utils
@@ -84,6 +85,8 @@ class NeedleTissueSceneCfg(InteractiveSceneCfg):
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
     )
+    # Optional directional light that casts shadows (env.shadow_light), set in make_env_cfg.
+    shadow_light: AssetBaseCfg | None = None
     stereo_left: TiledCameraCfg = MISSING
     stereo_right: TiledCameraCfg = MISSING
 
@@ -231,6 +234,20 @@ def _soft_tissue_cfg(env, visual) -> DeformableObjectCfg:
     )
 
 
+def _down_light_quat(tilt_deg: float, azimuth_deg: float) -> tuple[float, float, float, float]:
+    """(w, x, y, z) rotation for a distant light (which shines along its local -z) coming from
+    `tilt_deg` away from straight overhead, from the horizontal direction `azimuth_deg` (from +x to +y)."""
+    t, a = math.radians(tilt_deg), math.radians(azimuth_deg)
+    d = (-math.sin(t) * math.cos(a), -math.sin(t) * math.sin(a), -math.cos(t))  # direction the light travels
+    # rotate (0, 0, -1) onto d: axis = (0,0,-1) x d, angle = t
+    axis = (d[1], -d[0], 0.0)
+    n = math.hypot(axis[0], axis[1])
+    if n < 1e-9:
+        return (1.0, 0.0, 0.0, 0.0)
+    s = math.sin(t / 2) / n
+    return (math.cos(t / 2), axis[0] * s, axis[1] * s, 0.0)
+
+
 def _camera_cfg(prim_name: str, pos, rig: StereoRig, cam, with_depth: bool, track_pose: bool) -> TiledCameraCfg:
     return TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/" + prim_name,
@@ -295,6 +312,16 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
             ),
         ),
     )
+    # ---- lighting (CHANGED, optional): the dome light alone casts no visible shadows, so from the
+    # images the tool's height above the pad is only visible through a few pixels of stereo disparity.
+    # A tilted distant light adds the tool's shadow on the pad, a direct cue for how far above it is.
+    cfg.scene.light = cfg.scene.light.replace(spawn=cfg.scene.light.spawn.replace(intensity=env.dome_light_intensity))
+    if env.shadow_light:
+        cfg.scene.shadow_light = AssetBaseCfg(
+            prim_path="/World/shadow_light",
+            init_state=AssetBaseCfg.InitialStateCfg(rot=_down_light_quat(env.shadow_light_tilt_deg, env.shadow_light_azimuth_deg)),
+            spawn=sim_utils.DistantLightCfg(intensity=env.shadow_light_intensity, angle=0.5),
+        )
     look_at = (env.goal_xy[0], env.goal_xy[1], tissue_top + cam.look_at_height)
     rig = make_stereo_rig(cam, look_at)
     cfg.scene.stereo_left = _camera_cfg("StereoLeft", rig.left_pos, rig, cam, with_depth, track_camera_pose)

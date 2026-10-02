@@ -57,6 +57,15 @@ class EnvConfig:
     lift_height: float = 0.02  # "lifted" = needle this far above the tissue top (original: 2 cm above table)
     success_threshold: float = 0.02  # needle-to-goal distance for success
 
+    # Lighting. The default dome light casts no visible shadows. shadow_light=True adds a distant light
+    # tilted shadow_light_tilt_deg from overhead, coming from shadow_light_azimuth_deg (camera rig is
+    # at 45 deg, so -45 deg lights from the side and the tool's shadow falls where the cameras see it).
+    dome_light_intensity: float = 3000.0
+    shadow_light: bool = False
+    shadow_light_intensity: float = 2000.0
+    shadow_light_tilt_deg: float = 35.0
+    shadow_light_azimuth_deg: float = -45.0
+
     # Relative IK action scaling: an action of 1.0 moves the tool tip by
     # ik_pos_scale metres / rotates it by ik_rot_scale radians in one control step.
     ik_pos_scale: float = 0.005
