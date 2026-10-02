@@ -36,11 +36,11 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import vis  # noqa: E402
-from agent.drqv2 import MVMAEDrQV2Agent  # noqa: E402
 from agent.replay import FrameStacker  # noqa: E402
 from config import load_config  # noqa: E402
 from surgical_env.env import make_env  # noqa: E402
 from surgical_env.scripted import ScriptedNeedleLifter  # noqa: E402
+from trainer import build_agent, robot_state  # noqa: E402
 
 CLIP_FRAMES = 20
 
@@ -83,8 +83,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     if ckpt is not None:
-        h, w = env.obs_shape[-2:]
-        agent = MVMAEDrQV2Agent(cfg.agent, cfg.mvmae, (h, w), env.obs_shape[0], env.action_dim, args.device)
+        agent = build_agent(cfg, env, args.device)
         agent.load_state_dict(ckpt["agent"], load_optimizers=False)
         agent.train(False)
         stacker = FrameStacker(n, agent.frame_stack, env.obs_shape, dev)
@@ -108,7 +107,7 @@ def main() -> None:
             for e in range(n):
                 history[e].append(obs[e].cpu())
             if ckpt is not None:
-                action = agent.act(stack, ckpt["env_steps"], eval_mode=False)
+                action = agent.act(stack, ckpt["env_steps"], eval_mode=False, proprio=robot_state(env, agent))
             else:
                 action = controller.compute(*env.poses_in_base())
                 action = (action + args.noise * torch.randn_like(action)).clamp(-1.0, 1.0)

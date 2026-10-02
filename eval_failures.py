@@ -44,11 +44,11 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import vis  # noqa: E402
-from agent.drqv2 import MVMAEDrQV2Agent  # noqa: E402
 from agent.replay import FrameStacker  # noqa: E402
 from config import load_config  # noqa: E402
 from surgical_env import mdp  # noqa: E402
 from surgical_env.env import make_env  # noqa: E402
+from trainer import build_agent, robot_state  # noqa: E402
 
 BUCKETS = ("success", "never_lifted", "lifted_dropped", "missed_goal", "glitch_cut")
 
@@ -95,7 +95,7 @@ def run_round(env, agent, env_step: int, settle_steps: int) -> tuple[list[dict],
             rec["x_mm"], rec["y_mm"] = local[:, 0] * 1000, local[:, 1] * 1000
             rec["yaw_deg"], rec["tilt_deg"] = yaw, tilt
             rec["settle_height_mm"] = (needle.data.root_pos_w[:, 2] - top) * 1000
-        action = agent.act(stack, env_step, eval_mode=True)
+        action = agent.act(stack, env_step, eval_mode=True, proprio=robot_state(env, agent))
         obs, reward, term, trunc, info = env.step(action)
         done = term | trunc
         live = alive & ~done  # still inside the same episode after this step
@@ -192,8 +192,7 @@ def main() -> None:
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     cfg = load_config(overrides=overrides, base=ckpt["config"])
     env = make_env(cfg, device=args.device)
-    h, w = env.obs_shape[-2:]
-    agent = MVMAEDrQV2Agent(cfg.agent, cfg.mvmae, (h, w), env.obs_shape[0], env.action_dim, args.device)
+    agent = build_agent(cfg, env, args.device)
     agent.load_state_dict(ckpt["agent"], load_optimizers=False)
     agent.train(False)
     out = Path(args.out)

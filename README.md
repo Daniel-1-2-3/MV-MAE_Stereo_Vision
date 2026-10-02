@@ -255,6 +255,19 @@ encoder is frozen (neither MV-MAE nor the critic changes it) and the actor and c
 learning on the fixed features. The moment is printed as `ENCODER FROZEN`, saved as
 `ckpt_frozen.pt`, and logged as `train/encoder_frozen` / `train/encoder_frozen_at`.
 
+### Robot state (proprioception)
+
+`agent.proprio=true` gives the actor and critic the robot's own state next to the image
+features: the tool-tip position and orientation in the robot base frame and the two jaw
+angles, all from the robot's kinematics (as a real da Vinci knows them). Nothing about the
+needle is given; where the needle is still has to come from the cameras. Why: in the best
+images-only run, 27% of episodes never lifted the needle and the videos show the jaws
+closing in the air above it. At 96 px the 5 mm stereo baseline shows ~0.1 px of disparity
+change per cm of height, so the images barely tell how far the jaws are above the pad; the
+needle always lies on the pad, so the robot's own tool height closes that gap. Demos must be
+recorded with this version (they store the robot state); `env.shadow_light=true` adds a
+shadow-casting light independently of this.
+
 ## Troubleshooting
 
 | Symptom | Try |

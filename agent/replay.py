@@ -9,6 +9,7 @@ Layout is time-major: row t holds, for every parallel env e,
                    the next row then belongs to a new episode, and the true next
                    frame is unknown
     first[t, e]  - obs[t, e] is the first frame of an episode
+    proprio[t, e]- the robot's own state when obs[t, e] was taken (only with proprio_dim > 0)
 
 Only single frames are stored; frame stacks are rebuilt at sampling time
 (repeating the first frame of an episode, like a frame-stack wrapper does), so
@@ -40,8 +41,10 @@ class ReplayBuffer:
         nstep: int,
         gamma: float,
         device,
+        proprio_dim: int = 0,
     ):
         self.N = num_envs
+        self.P = proprio_dim
         self.F = frame_stack
         self.n = nstep
         self.gamma = gamma
@@ -53,11 +56,16 @@ class ReplayBuffer:
         self.term = torch.zeros((self.R, num_envs), dtype=torch.bool, device=self.device)
         self.trunc = torch.zeros((self.R, num_envs), dtype=torch.bool, device=self.device)
         self.first = torch.zeros((self.R, num_envs), dtype=torch.bool, device=self.device)
+        self.proprio = torch.zeros((self.R, num_envs, proprio_dim), dtype=torch.float32, device=self.device)
         self.t = 0  # rows written so far (global index of the next row)
 
     # ------------------------------------------------------------- writing
-    def add(self, obs, action, reward, term, trunc, first) -> None:
+    def add(self, obs, action, reward, term, trunc, first, proprio=None) -> None:
         i = self.t % self.R
+        if self.P > 0:
+            if proprio is None:
+                raise ValueError("this replay buffer stores the robot state: pass proprio")
+            self.proprio[i] = proprio.to(self.device, non_blocking=True).float()
         self.obs[i] = obs.to(self.device, non_blocking=True)
         self.action[i] = action.to(self.device, non_blocking=True).float()
         self.reward[i] = reward.to(self.device, non_blocking=True).float()
@@ -72,11 +80,17 @@ class ReplayBuffer:
             self.trunc[(self.t - 1) % self.R] = True
 
     @classmethod
-    def from_episodes(cls, data: dict, frame_stack: int, nstep: int, gamma: float, device) -> "ReplayBuffer":
+    def from_episodes(cls, data: dict, frame_stack: int, nstep: int, gamma: float, device,
+                      proprio_dim: int = 0) -> "ReplayBuffer":
         """Static buffer (one 'env' column) from record_demos.py output."""
         obs = data["obs"]
         total = obs.shape[0]
-        buf = cls(total, 1, tuple(obs.shape[1:]), data["action"].shape[-1], frame_stack, nstep, gamma, device)
+        if proprio_dim > 0:
+            if "proprio" not in data or data["proprio"].shape[-1] != proprio_dim:
+                raise ValueError("these demos have no robot state (proprio); record them again with this version")
+        buf = cls(total, 1, tuple(obs.shape[1:]), data["action"].shape[-1], frame_stack, nstep, gamma, device, proprio_dim)
+        if proprio_dim > 0:
+            buf.proprio[:, 0] = data["proprio"].to(buf.device).float()
         if buf.R != total:
             raise ValueError(f"demo file too short ({total} transitions)")
         buf.obs[:, 0] = obs.to(buf.device)
@@ -170,6 +184,8 @@ class ReplayBuffer:
             is_demo=torch.full((batch_size,), is_demo, dtype=torch.bool, device=dev),
             frame_reward=frame_reward,
             frame_reward_valid=frame_valid,
+            proprio=self.proprio[rows % self.R, envs],
+            next_proprio=self.proprio[(rows + m) % self.R, envs],
         )
 
 

@@ -111,6 +111,17 @@ class StereoNeedleEnv:
         self.left = env.scene["stereo_left"]
         self.right = env.scene["stereo_right"]
         self._ee_idx = env.scene["robot"].find_bodies(EE_BODY)[0][0]
+        self._jaw_ids = env.scene["robot"].find_joints(["psm_tool_gripper1_joint", "psm_tool_gripper2_joint"])[0]
+
+    proprio_dim = 9
+
+    def proprio(self) -> torch.Tensor:
+        """(N, 9) robot state from its own kinematics: tool-tip position in the robot base frame (x10, so
+        decimetres), tool-tip orientation quaternion (w >= 0) and the two jaw angles (x2). No needle state."""
+        ee_pos, ee_quat, *_ = self.poses_in_base()
+        quat = torch.where(ee_quat[:, :1] < 0, -ee_quat, ee_quat)
+        jaws = self.env.scene["robot"].data.joint_pos[:, self._jaw_ids]
+        return torch.cat([ee_pos * 10.0, quat, jaws * 2.0], dim=-1).float()
 
     @property
     def obs_shape(self) -> tuple[int, ...]:

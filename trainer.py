@@ -32,6 +32,18 @@ def scalar_logs(log: dict, prefix: str) -> dict[str, float]:
     return out
 
 
+def build_agent(cfg, env, device) -> MVMAEDrQV2Agent:
+    """The agent for this config and env (with the robot state as an extra input if agent.proprio)."""
+    h, w = env.obs_shape[-2:]
+    proprio_dim = env.proprio_dim if cfg.agent.proprio else 0
+    return MVMAEDrQV2Agent(cfg.agent, cfg.mvmae, (h, w), env.obs_shape[0], env.action_dim, device, proprio_dim)
+
+
+def robot_state(env, agent: MVMAEDrQV2Agent):
+    """The env's robot state if the agent uses it, else None."""
+    return env.proprio() if agent.proprio_dim > 0 else None
+
+
 def batch_to(batch: Batch, device) -> Batch:
     return Batch(*[t.to(device, non_blocking=True) for t in vars(batch).values()])
 
@@ -95,10 +107,11 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
     cut_early = torch.zeros(n, dtype=torch.bool, device=dev)
     radius = None
     isaac_logs: list[dict] = []
+    prop = robot_state(env, agent)
     for t in range(env.max_episode_steps + 1):
         if t == 5 and hasattr(env, "needle_xy_local"):  # the needle has landed on the pad
             radius = torch.linalg.vector_norm(env.needle_xy_local(), dim=-1)
-        action = agent.act(stack, env_step, eval_mode=True)
+        action = agent.act(stack, env_step, eval_mode=True, proprio=prop)
         obs, reward, term, trunc, info = env.step(action)
         done = term | trunc
         alive = ~finished
@@ -124,6 +137,7 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
             lifted_prev = torch.where(live, lifted, lifted_prev)
         finished |= done
         stack = stacker.step(obs, done)
+        prop = robot_state(env, agent)
         if bool(finished.all()):
             break
 
@@ -187,18 +201,18 @@ class Trainer:
         set_seed_everywhere(cfg.train.seed)
         t, a, m = cfg.train, cfg.agent, cfg.mvmae
         n = env.num_envs
-        h, w = env.obs_shape[-2:]
-        self.agent = MVMAEDrQV2Agent(a, m, (h, w), env.obs_shape[0], env.action_dim, self.device)
+        self.agent = build_agent(cfg, env, self.device)
+        pd = self.agent.proprio_dim
         replay_device = t.replay_device if (self.device.type == "cuda" or t.replay_device == "cpu") else "cpu"
         self.replay = ReplayBuffer(t.replay_capacity, n, env.obs_shape, env.action_dim, m.frame_stack, a.nstep, a.gamma,
-                                   replay_device)
+                                   replay_device, pd)
         self.demo = None
         if demo_data is not None and t.demo_ratio > 0:
             if tuple(demo_data["obs"].shape[1:]) != tuple(env.obs_shape):
                 raise ValueError(f"demo images {tuple(demo_data['obs'].shape[1:])} != env images {env.obs_shape}")
             if demo_data["action"].shape[-1] != env.action_dim:
                 raise ValueError("demo action size does not match the environment")
-            self.demo = ReplayBuffer.from_episodes(demo_data, m.frame_stack, a.nstep, a.gamma, replay_device)
+            self.demo = ReplayBuffer.from_episodes(demo_data, m.frame_stack, a.nstep, a.gamma, replay_device, pd)
         self.stacker = FrameStacker(n, m.frame_stack, env.obs_shape, env.device)
         self.run_dir = Path(t.run_dir) / (cfg.log.run_name or time.strftime("%Y%m%d-%H%M%S"))
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -214,7 +228,8 @@ class Trainer:
                 config=cfg.to_dict(),
                 dir=str(self.run_dir),
             )
-        print(f"MV-MAE tokens per sample: {self.agent.mvmae.L}, representation size: {self.agent.repr_dim}")
+        print(f"MV-MAE tokens per sample: {self.agent.mvmae.L}, representation size: {self.agent.repr_dim}"
+              + (f", robot state: {pd} values" if pd else ", images only"))
         n_params = sum(p.numel() for p in self.agent.mvmae.parameters())
         print(f"MV-MAE parameters: {n_params / 1e6:.2f} M | replay rows x envs: {self.replay.R} x {n} on {replay_device}"
               + (f" | demos: {self.demo.R} transitions" if self.demo is not None else ""))
@@ -259,9 +274,9 @@ class Trainer:
 
         def fresh_start():
             o = env.reset()
-            return o, self.stacker.reset(o), torch.ones(n, dtype=torch.bool, device=dev)
+            return o, self.stacker.reset(o), torch.ones(n, dtype=torch.bool, device=dev), robot_state(env, agent)
 
-        obs, stack, first = fresh_start()
+        obs, stack, first, prop = fresh_start()
         ep_return = torch.zeros(n, device=dev)
         ep_length = torch.zeros(n, device=dev)
         ep_success_any = torch.zeros(n, dtype=torch.bool, device=dev)
@@ -272,7 +287,7 @@ class Trainer:
             if env_steps < t.seed_env_steps:
                 action = torch.rand(n, env.action_dim, device=dev) * 2.0 - 1.0
             else:
-                action = agent.act(stack, env_steps, eval_mode=False)
+                action = agent.act(stack, env_steps, eval_mode=False, proprio=prop)
             self._sync()
             t1 = time.perf_counter()
             next_obs, reward, term, trunc, info = env.step(action)
@@ -281,7 +296,7 @@ class Trainer:
             timers["act"] += t1 - t0
             timers["env"] += t2 - t1
 
-            self.replay.add(obs, action, reward, term, trunc, first)
+            self.replay.add(obs, action, reward, term, trunc, first, proprio=prop)
             done = term | trunc
             ep_return += reward
             ep_length += 1
@@ -312,6 +327,7 @@ class Trainer:
             first = done
             stack = self.stacker.step(next_obs, first)
             obs = next_obs
+            prop = robot_state(env, agent)
 
             # ---- learn
             if env_steps >= t.seed_env_steps and self.replay.can_sample():
@@ -392,7 +408,7 @@ class Trainer:
                     self.best_score = score
                     print(f"new best eval (success {score[0]:.3f}, success_any {score[1]:.3f}): "
                           f"saved {self.save(env_steps, tag='best', update_latest=False)}", flush=True)
-                obs, stack, first = fresh_start()
+                obs, stack, first, prop = fresh_start()
                 ep_return.zero_()
                 ep_length.zero_()
                 ep_success_any.zero_()

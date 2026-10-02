@@ -37,15 +37,16 @@ def main() -> None:
     controller = ScriptedNeedleLifter(n, env.step_dt, dev, cfg.env.ik_pos_scale, cfg.env.ik_rot_scale)
 
     # Per-env lists of the running episode's steps (kept on the CPU).
-    running = [dict(obs=[], action=[], reward=[], terminated=[], truncated=[]) for _ in range(n)]
+    running = [dict(obs=[], action=[], reward=[], terminated=[], truncated=[], proprio=[]) for _ in range(n)]
     kept: list[dict] = []
     attempts, successes = 0, 0
     obs = env.reset()
+    prop = env.proprio()
     controller.reset_idx()
     while len(kept) < args.num_demos and attempts < args.max_episodes:
         action = controller.compute(*env.poses_in_base())
         next_obs, reward, term, trunc, info = env.step(action)
-        obs_c, act_c, rew_c = obs.cpu(), action.cpu(), reward.cpu()
+        obs_c, act_c, rew_c, prop_c = obs.cpu(), action.cpu(), reward.cpu(), prop.cpu()
         term_c, trunc_c = term.cpu(), trunc.cpu()
         for e in range(n):
             ep = running[e]
@@ -54,6 +55,7 @@ def main() -> None:
             ep["reward"].append(rew_c[e])
             ep["terminated"].append(term_c[e])
             ep["truncated"].append(trunc_c[e])
+            ep["proprio"].append(prop_c[e])
         done = term | trunc
         if bool(done.any()):
             ids = done.nonzero(as_tuple=False).squeeze(-1)
@@ -62,10 +64,11 @@ def main() -> None:
                 if bool(info["final_success"][e]) and len(kept) < args.num_demos:
                     successes += 1
                     kept.append({k: torch.stack(v) for k, v in running[e].items()})
-                running[e] = dict(obs=[], action=[], reward=[], terminated=[], truncated=[])
+                running[e] = dict(obs=[], action=[], reward=[], terminated=[], truncated=[], proprio=[])
             controller.reset_idx(ids)
             print(f"attempts {attempts:4d} | successes {successes:4d} | kept {len(kept)}/{args.num_demos}", flush=True)
         obs = next_obs
+        prop = env.proprio()
 
     if not kept:
         env.close()
@@ -82,6 +85,7 @@ def main() -> None:
         "reward": torch.cat([ep["reward"] for ep in kept]).float(),
         "terminated": torch.cat([ep["terminated"] for ep in kept]).bool(),
         "truncated": torch.cat([ep["truncated"] for ep in kept]).bool(),
+        "proprio": torch.cat([ep["proprio"] for ep in kept]).float(),  # robot state at each obs (for agent.proprio)
         "first": torch.cat(first),
         "meta": {
             "num_episodes": len(kept),

@@ -41,6 +41,11 @@ class FakeStereoEnv:
         self._reset(torch.arange(self.num_envs))
         return self.images()
 
+    proprio_dim = 3
+
+    def proprio(self):
+        return torch.cat([self.pos / self.size, (self.t.float() / self.max_episode_steps)[:, None]], dim=-1)
+
     def needle_xy_local(self):
         return (self.pos - self.size / 2) / 1000.0
 
@@ -71,7 +76,7 @@ def test_training_loop_runs_end_to_end(tmp_path):
         "agent.hidden_dim=32", "agent.feature_dim=8", "agent.amp=false", "train.total_env_steps=600",
         "train.seed_env_steps=100", "train.mae_pretrain_updates=5", "train.updates_per_env_step=0.25",
         "train.replay_capacity=400", "train.replay_device=cpu", "train.eval_every_env_steps=400",
-        "train.checkpoint_every_env_steps=500", "train.freeze_encoder_at=520", f"train.run_dir={tmp_path}", "log.log_every_updates=10",
+        "train.checkpoint_every_env_steps=500", "agent.proprio=true", "train.freeze_encoder_at=520", f"train.run_dir={tmp_path}", "log.log_every_updates=10",
         "log.recon_every_updates=20", "log.wandb_mode=offline", "log.run_name=test",
     ])
     env = FakeStereoEnv(num_envs=4, size=32)
@@ -79,7 +84,7 @@ def test_training_loop_runs_end_to_end(tmp_path):
     n = 60
     demo = dict(obs=torch.randint(0, 256, (n, 2, 3, 32, 32), dtype=torch.uint8), action=torch.rand(n, 7) * 2 - 1,
                 reward=torch.rand(n), terminated=torch.zeros(n, dtype=torch.bool),
-                truncated=torch.zeros(n, dtype=torch.bool), first=torch.zeros(n, dtype=torch.bool),
+                truncated=torch.zeros(n, dtype=torch.bool), first=torch.zeros(n, dtype=torch.bool), proprio=torch.rand(n, 3),
                 meta={"num_episodes": 3})
     demo["first"][[0, 20, 40]] = True
     demo["truncated"][[19, 39, 59]] = True

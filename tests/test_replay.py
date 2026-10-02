@@ -138,3 +138,17 @@ if __name__ == "__main__":
     test_nstep_and_stacking_without_wrap()
     test_nstep_and_stacking_with_wrap()
     print("ok")
+
+
+def test_robot_state_follows_the_frames():
+    """proprio / next_proprio must belong to the last frame of obs / next_obs."""
+    rows = make_stream(4, 300, seed=3)
+    buf = ReplayBuffer(4 * 300, 4, (2, 3, 4, 4), 3, 3, 3, GAMMA, "cpu", proprio_dim=2)
+    for t, r in enumerate(rows):
+        prop = torch.stack([torch.arange(4, dtype=torch.float32), torch.full((4,), float(t))], dim=-1)
+        buf.add(r["obs"], r["action"], r["reward"], r["term"], r["trunc"], r["first"], proprio=prop)
+    b = buf.sample(256)
+    env, t_obs = decode(b.obs[:, -1])
+    env_n, t_next = decode(b.next_obs[:, -1])
+    assert torch.equal(b.proprio[:, 0].long(), env) and torch.equal(b.proprio[:, 1].long(), t_obs)
+    assert torch.equal(b.next_proprio[:, 0].long(), env_n) and torch.equal(b.next_proprio[:, 1].long(), t_next)

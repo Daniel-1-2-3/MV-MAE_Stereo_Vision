@@ -37,14 +37,32 @@ class Batch:
     is_demo: torch.Tensor  # (B,) bool
     frame_reward: torch.Tensor  # (B, F) reward of the transition into each frame
     frame_reward_valid: torch.Tensor  # (B, F) bool
+    proprio: torch.Tensor  # (B, P) robot state at obs's last frame; P = 0 when proprioception is off
+    next_proprio: torch.Tensor  # (B, P) robot state at next_obs's last frame
+
+
+def _proprio_trunk(proprio_dim: int, feature_dim: int) -> nn.Module | None:
+    """Robot-state features (same shape as the image trunk's output), or None without proprioception."""
+    if proprio_dim <= 0:
+        return None
+    return nn.Sequential(nn.Linear(proprio_dim, feature_dim), nn.LayerNorm(feature_dim), nn.Tanh())
+
+
+def _features(trunk: nn.Module, proprio_trunk: nn.Module | None, z: torch.Tensor, proprio: torch.Tensor | None):
+    h = trunk(z)
+    if proprio_trunk is not None:
+        h = torch.cat([h, proprio_trunk(proprio)], dim=-1)
+    return h
 
 
 class Actor(nn.Module):
-    def __init__(self, repr_dim: int, action_dim: int, feature_dim: int, hidden_dim: int):
+    def __init__(self, repr_dim: int, action_dim: int, feature_dim: int, hidden_dim: int, proprio_dim: int = 0):
         super().__init__()
         self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim), nn.LayerNorm(feature_dim), nn.Tanh())
+        self.proprio_trunk = _proprio_trunk(proprio_dim, feature_dim)
+        in_dim = feature_dim * (2 if self.proprio_trunk is not None else 1)
         self.policy = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+            nn.Linear(in_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
@@ -52,19 +70,21 @@ class Actor(nn.Module):
         )
         self.apply(utils.weight_init)
 
-    def forward(self, z: torch.Tensor, std: float) -> utils.TruncatedNormal:
-        mu = torch.tanh(self.policy(self.trunk(z)))
+    def forward(self, z: torch.Tensor, proprio: torch.Tensor | None, std: float) -> utils.TruncatedNormal:
+        mu = torch.tanh(self.policy(_features(self.trunk, self.proprio_trunk, z, proprio)))
         return utils.TruncatedNormal(mu, torch.ones_like(mu) * std)
 
 
 class Critic(nn.Module):
-    def __init__(self, repr_dim: int, action_dim: int, feature_dim: int, hidden_dim: int):
+    def __init__(self, repr_dim: int, action_dim: int, feature_dim: int, hidden_dim: int, proprio_dim: int = 0):
         super().__init__()
         self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim), nn.LayerNorm(feature_dim), nn.Tanh())
+        self.proprio_trunk = _proprio_trunk(proprio_dim, feature_dim)
+        in_dim = feature_dim * (2 if self.proprio_trunk is not None else 1)
 
         def q_net():
             return nn.Sequential(
-                nn.Linear(feature_dim + action_dim, hidden_dim),
+                nn.Linear(in_dim + action_dim, hidden_dim),
                 nn.ReLU(inplace=True),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(inplace=True),
@@ -74,14 +94,16 @@ class Critic(nn.Module):
         self.Q1, self.Q2 = q_net(), q_net()
         self.apply(utils.weight_init)
 
-    def forward(self, z: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        h = torch.cat([self.trunk(z), action], dim=-1)
+    def forward(self, z: torch.Tensor, proprio: torch.Tensor | None, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = torch.cat([_features(self.trunk, self.proprio_trunk, z, proprio), action], dim=-1)
         return self.Q1(h).squeeze(-1), self.Q2(h).squeeze(-1)
 
 
 class MVMAEDrQV2Agent:
-    def __init__(self, agent_cfg, mvmae_cfg, img_hw: tuple[int, int], num_views: int, action_dim: int, device):
+    def __init__(self, agent_cfg, mvmae_cfg, img_hw: tuple[int, int], num_views: int, action_dim: int, device,
+                 proprio_dim: int = 0):
         self.cfg = agent_cfg
+        self.proprio_dim = proprio_dim  # > 0: the actor and critic also get the robot's own state
         self.device = torch.device(device)
         self.action_dim = action_dim
         self.frame_stack = mvmae_cfg.frame_stack
@@ -103,8 +125,8 @@ class MVMAEDrQV2Agent:
         ).to(self.device)
         self.repr_dim = self.mvmae.L * mvmae_cfg.embed_dim
         c = agent_cfg
-        self.actor = Actor(self.repr_dim, action_dim, c.feature_dim, c.hidden_dim).to(self.device)
-        self.critic = Critic(self.repr_dim, action_dim, c.feature_dim, c.hidden_dim).to(self.device)
+        self.actor = Actor(self.repr_dim, action_dim, c.feature_dim, c.hidden_dim, proprio_dim).to(self.device)
+        self.critic = Critic(self.repr_dim, action_dim, c.feature_dim, c.hidden_dim, proprio_dim).to(self.device)
         self.critic_target = copy.deepcopy(self.critic)
         self.critic_target.requires_grad_(False)
 
@@ -145,11 +167,19 @@ class MVMAEDrQV2Agent:
 
     # ------------------------------------------------------------------- act
     @torch.no_grad()
-    def act(self, obs: torch.Tensor, env_step: int, eval_mode: bool) -> torch.Tensor:
-        """obs: (N, F, V, 3, H, W) uint8 -> actions (N, A) in [-1, 1]."""
+    def act(self, obs: torch.Tensor, env_step: int, eval_mode: bool, proprio: torch.Tensor | None = None) -> torch.Tensor:
+        """obs: (N, F, V, 3, H, W) uint8 (+ proprio (N, P) when proprio_dim > 0) -> actions (N, A) in [-1, 1]."""
         z = self._encode(obs.to(self.device))
-        dist = self.actor(z, self.stddev(env_step))
+        p = self._proprio(proprio)
+        dist = self.actor(z, p, self.stddev(env_step))
         return dist.mean if eval_mode else dist.sample(clip=None)
+
+    def _proprio(self, proprio: torch.Tensor | None) -> torch.Tensor | None:
+        if self.proprio_dim <= 0:
+            return None
+        if proprio is None or proprio.shape[-1] != self.proprio_dim:
+            raise ValueError(f"this agent needs the robot state (proprio, {self.proprio_dim} values) with every observation")
+        return proprio.to(self.device).float()
 
     def freeze_encoder(self) -> None:
         """Stop all further encoder training (MV-MAE and critic gradients alike).
@@ -169,6 +199,7 @@ class MVMAEDrQV2Agent:
 
         obs = self._augment(batch.obs)
         next_obs = self._augment(batch.next_obs)
+        p, p_next = self._proprio(batch.proprio), self._proprio(batch.next_proprio)
         s = utils.schedule(str(c.critic_encoder_grad_scale), env_step) if c.critic_grad_to_encoder else 0.0
         if self.encoder_frozen:
             s = 0.0
@@ -183,12 +214,12 @@ class MVMAEDrQV2Agent:
                 z = self._encode(obs)
         with torch.no_grad():
             z_next = self._encode(next_obs)
-            next_action = self.actor(z_next, std).sample(clip=c.stddev_clip)
-            target_q1, target_q2 = self.critic_target(z_next, next_action)
+            next_action = self.actor(z_next, p_next, std).sample(clip=c.stddev_clip)
+            target_q1, target_q2 = self.critic_target(z_next, p_next, next_action)
             target_q = batch.reward + batch.discount * torch.min(target_q1, target_q2)
 
         # ---- critic (+ encoder)
-        q1, q2 = self.critic(z, batch.action)
+        q1, q2 = self.critic(z, p, batch.action)
         critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
         total = critic_loss
         if do_mae:
@@ -210,9 +241,9 @@ class MVMAEDrQV2Agent:
 
         # ---- actor (encoder frozen for this step, as in DrQ-v2)
         z_actor = z.detach()
-        dist = self.actor(z_actor, std)
+        dist = self.actor(z_actor, p, std)
         action = dist.sample(clip=c.stddev_clip)
-        q = torch.min(*self.critic(z_actor, action))
+        q = torch.min(*self.critic(z_actor, p, action))
         use_bc = c.bc_coef > 0 and bool(batch.is_demo.any())
         if use_bc:
             lam = 1.0 / q.abs().mean().detach().clamp(min=1e-6)

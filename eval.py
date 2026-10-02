@@ -25,10 +25,9 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import vis  # noqa: E402
-from agent.drqv2 import MVMAEDrQV2Agent  # noqa: E402
 from config import load_config  # noqa: E402
 from surgical_env.env import make_env  # noqa: E402
-from trainer import evaluate_policy  # noqa: E402
+from trainer import build_agent, evaluate_policy  # noqa: E402
 
 
 def main() -> None:
@@ -37,8 +36,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     cfg = load_config(overrides=overrides, base=ckpt["config"])
     env = make_env(cfg, device=args.device)
-    h, w = env.obs_shape[-2:]
-    agent = MVMAEDrQV2Agent(cfg.agent, cfg.mvmae, (h, w), env.obs_shape[0], env.action_dim, args.device)
+    agent = build_agent(cfg, env, args.device)
     agent.load_state_dict(ckpt["agent"], load_optimizers=False)
     all_metrics = []
     for r in range(args.rounds):

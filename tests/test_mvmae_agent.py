@@ -69,14 +69,14 @@ def test_random_shift_keeps_views_aligned():
     assert torch.allclose(y[:, :9], y[:, 9:])  # same shift for every channel of a sample
 
 
-def small_agent():
+def small_agent(proprio_dim=0):
     a = AgentConfig(batch_size=8, hidden_dim=64, feature_dim=16, encoder_warmup_updates=2, amp=False, bc_coef=0.4)
     m = MVMAEConfig(frame_stack=3, patch_size=8, embed_dim=32, encoder_depth=2, encoder_heads=4, decoder_dim=32,
                     decoder_depth=1, decoder_heads=4)
-    return MVMAEDrQV2Agent(a, m, (32, 32), 2, 7, "cpu")
+    return MVMAEDrQV2Agent(a, m, (32, 32), 2, 7, "cpu", proprio_dim)
 
 
-def fake_batch(b=8, demo=True):
+def fake_batch(b=8, demo=True, proprio_dim=0):
     return Batch(
         obs=torch.randint(0, 256, (b, 3, 2, 3, 32, 32), dtype=torch.uint8),
         action=torch.rand(b, 7) * 2 - 1,
@@ -86,6 +86,8 @@ def fake_batch(b=8, demo=True):
         is_demo=torch.tensor([demo] * (b // 4) + [False] * (b - b // 4)),
         frame_reward=torch.randn(b, 3),
         frame_reward_valid=torch.ones(b, 3, dtype=torch.bool),
+        proprio=torch.randn(b, proprio_dim),
+        next_proprio=torch.randn(b, proprio_dim),
     )
 
 
@@ -152,3 +154,25 @@ def test_frozen_encoder_stays_fixed_while_actor_and_critic_learn():
     other = small_agent()
     other.load_state_dict(agent.state_dict())
     assert other.encoder_frozen
+
+
+def test_agent_with_robot_state():
+    torch.manual_seed(0)
+    agent = small_agent(proprio_dim=9)
+    obs = fake_batch().obs
+    p = torch.randn(8, 9)
+    a1 = agent.act(obs, 0, eval_mode=True, proprio=p)
+    a2 = agent.act(obs, 0, eval_mode=True, proprio=p + 5.0)
+    assert a1.shape == (8, 7) and not torch.allclose(a1, a2), "the robot state must change the action"
+    try:
+        agent.act(obs, 0, eval_mode=True)
+        raise AssertionError("an agent that uses the robot state must refuse to act without it")
+    except ValueError:
+        pass
+    before = [q.detach().clone() for q in agent.actor.proprio_trunk.parameters()]
+    m = agent.update(fake_batch(proprio_dim=9), env_step=0)
+    assert torch.isfinite(m["critic/loss"]) and torch.isfinite(m["actor/loss"])
+    assert any(not torch.equal(x, y) for x, y in zip(before, agent.actor.proprio_trunk.parameters()))
+    other = small_agent(proprio_dim=9)
+    other.load_state_dict(agent.state_dict())
+    assert torch.allclose(agent.act(obs, 0, True, proprio=p), other.act(obs, 0, True, proprio=p))

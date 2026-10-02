@@ -152,6 +152,11 @@ class AgentConfig:
     mae_coef: float = 1.0  # weight of the MV-MAE loss in the encoder update
     reward_pred_coef: float = 1.0
     mae_every: int = 1  # run the MV-MAE loss every N updates
+    # Give the actor and critic the robot's own state as well as the images: tool-tip position and
+    # orientation (robot base frame) and the two jaw angles, all from the robot's kinematics, as a real
+    # da Vinci knows them. Nothing about the needle. Stereo disparity at 96 px shows ~0.1 px per cm of
+    # height, so without this the policy cannot tell how far its jaws are above the pad.
+    proprio: bool = False
     critic_grad_to_encoder: bool = True  # DrQ-v2 style; False = encoder learns from MV-MAE only
     # Scales the critic's gradient into the encoder (forward pass unchanged): a constant ("0.1")
     # or a schedule over environment steps ("linear(1.0,0.0,400000)"). Full strength (1.0) early
