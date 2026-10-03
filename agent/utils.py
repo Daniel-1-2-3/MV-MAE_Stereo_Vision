@@ -22,8 +22,13 @@ def set_seed_everywhere(seed: int) -> None:
 
 
 def weight_init(m: nn.Module) -> None:
+    """DrQ-v2's initialisation: orthogonal weights (ReLU gain for conv layers), zero biases."""
     if isinstance(m, nn.Linear):
         nn.init.orthogonal_(m.weight.data)
+        if m.bias is not None:
+            m.bias.data.fill_(0.0)
+    elif isinstance(m, nn.Conv2d):  # only the conv-encoder baseline has conv layers here
+        nn.init.orthogonal_(m.weight.data, nn.init.calculate_gain("relu"))
         if m.bias is not None:
             m.bias.data.fill_(0.0)
 
