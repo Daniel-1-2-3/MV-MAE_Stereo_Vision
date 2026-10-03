@@ -41,7 +41,7 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdF
 from isaaclab.utils import configclass
 
 from . import mdp
-from .assets import robotic_surgery_assets
+from .assets import ground_plane_usd, robotic_surgery_assets
 from .psm import PSM_BASE_POS, PSM_HIGH_PD_CFG
 from .stereo import StereoRig, make_stereo_rig
 
@@ -277,6 +277,8 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     # Deformable bodies do not work with replicated physics (same as Isaac Lab's own deformable lift task);
     # kept off for the rigid pad too, so both variants build the same scene.
     cfg.scene.replicate_physics = False
+    # Isaac Sim's default grid floor from a local copy (see assets.ground_plane_usd), not downloaded at every start.
+    cfg.scene.plane = cfg.scene.plane.replace(spawn=GroundPlaneCfg(usd_path=ground_plane_usd()))
     tissue_visual = sim_utils.PreviewSurfaceCfg(diffuse_color=env.tissue_color, roughness=0.6)
     if env.tissue_deformable:
         cfg.scene.tissue = _soft_tissue_cfg(env, tissue_visual)
