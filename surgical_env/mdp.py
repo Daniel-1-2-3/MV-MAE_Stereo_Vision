@@ -154,3 +154,39 @@ def pin_tissue_bottom(
     bottom = z <= z.min(dim=1, keepdim=True).values + height_tolerance
     targets[..., 3] = torch.where(bottom, 0.0, 1.0)
     tissue.write_nodal_kinematic_target_to_sim(targets, env_ids=env_ids)
+
+
+# ----------------------------------------------------------------------------- needle handover (two arms)
+# All read HandoverRLEnv.handover_state(), which works out (once per control step) how far each tool
+# tip is from the needle, whether the needle is lifted, and the latched stages of the handover.
+def handover_reach_1(env, std: float) -> torch.Tensor:
+    """Arm 1's tip approaching the needle, until the needle has been picked up."""
+    s = env.handover_state()
+    return (1 - torch.tanh(s["d1"] / std)) * (~s["picked"]).float()
+
+
+def handover_lifted(env) -> torch.Tensor:
+    return env.handover_state()["lifted"].float()
+
+
+def handover_to_point(env, std: float) -> torch.Tensor:
+    """After arm 1 picked it up and before the handover: the lifted needle near the handover point."""
+    s = env.handover_state()
+    active = s["picked"] & ~s["handed_over"] & s["lifted"]
+    return active.float() * (1 - torch.tanh(s["handover_point_distance"] / std))
+
+
+def handover_reach_2(env, std: float) -> torch.Tensor:
+    """Arm 2's tip approaching the needle once arm 1 has lifted it."""
+    s = env.handover_state()
+    return (s["picked"] & s["lifted"]).float() * (1 - torch.tanh(s["d2"] / std))
+
+
+def handover_held_by_2(env) -> torch.Tensor:
+    return env.handover_state()["held_by_2"].float()
+
+
+def handover_goal(env, std: float) -> torch.Tensor:
+    """Held by arm 2 alone after the handover, near the goal."""
+    s = env.handover_state()
+    return s["held_by_2"].float() * (1 - torch.tanh(s["goal_distance"] / std))

@@ -22,6 +22,10 @@ import yaml
 
 @dataclass
 class EnvConfig:
+    # "lift": one arm picks the needle up and lifts it to a goal.
+    # "handover": arm 1 picks the needle up, passes it to arm 2, and arm 2 carries it to the goal
+    # (settings in the handover_* keys below; configs/needle_handover.yaml sets up the whole run).
+    task: str = "lift"
     num_envs: int = 32
     env_spacing: float = 2.5
     # Physics runs at 1 / sim_dt Hz. The policy acts every `decimation` physics
@@ -90,6 +94,21 @@ class EnvConfig:
     # or the needle moving faster than `blowup_needle_speed` (m/s).
     blowup_joint_vel: float = 10.0  # arm joints only: the gripper jaws chatter in contact without anything blowing up
     blowup_needle_speed: float = 2.0
+
+    # Needle handover (task="handover"). Two arms, bases handover_base_x metres either side of the pad
+    # centre along x (arm 1 at -x, arm 2 at +x; the layout of Isaac for Healthcare's dual-PSM handover).
+    # The needle lands on arm 1's half of the pad, centred at handover_needle_x (+- needle_xy_range).
+    # Arm 1 lifts it to the handover point (pad centre, goal_height up); arm 2 grasps it at
+    # handover_grasp_deg on the arc (see surgical_env/handover_geom.py), arm 1 lets go, and arm 2
+    # carries it to the goal at (handover_goal_x, 0, goal_height). Success: the needle within
+    # success_threshold of the goal, held by arm 2 alone, after arm 1 lifted it and handed it over.
+    handover_base_x: float = 0.07
+    handover_needle_x: float = -0.03
+    handover_goal_x: float = 0.04
+    handover_grasp_deg: float = 125.0
+    handover_look_at_x: float = 0.005  # the stereo rig aims this far towards arm 2 from the pad centre
+    hold_distance: float = 0.008  # a tool tip this close to the needle (any point of it) counts as holding it
+    release_distance: float = 0.015  # ... and this far away as having let go
 
 
 @dataclass
@@ -300,3 +319,5 @@ def validate(cfg: Config) -> None:
         raise ValueError("camera.antialiasing must be Off, FXAA, TAA, DLSS or DLAA")
     if cfg.env.needle_asset not in ("sdf", "mesh"):
         raise ValueError("env.needle_asset must be 'sdf' or 'mesh'")
+    if cfg.env.task not in ("lift", "handover"):
+        raise ValueError("env.task must be 'lift' or 'handover'")

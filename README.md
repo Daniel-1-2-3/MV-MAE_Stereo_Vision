@@ -213,6 +213,30 @@ This writes one stereo video per round and a `metrics.json` to `outputs/eval/`.
 * **5 s episodes** instead of 2 s, so there is time to find and grab the needle from
   images.
 
+## The needle handover task (two arms)
+
+`--config configs/needle_handover.yaml` switches every script (`test_stereo.py`,
+`record_demos.py`, `train.py`, `eval_failures.py`) to a two-arm version of the task: arm 1
+picks the needle up and passes it to arm 2, which carries it to the goal. Passing the needle
+between instruments happens before every stitch in real suturing.
+
+| | |
+|---|---|
+| Robots | Two dVRK PSMs, bases 7 cm either side of the pad centre (the layout of Isaac for Healthcare's dual-PSM handover task, which ships without rewards). Arm 1 is on the left of the images, arm 2 on the right |
+| Action | 14 numbers: arm 1's 7 (as in the lift task), then arm 2's 7 |
+| Robot state (`agent.proprio`, on) | 18 numbers: each arm's tool-tip position, orientation and jaw angles |
+| Episode | 8 s (200 steps) |
+| Start | Needle dropped on arm 1's half of the pad, within ±1.5 cm of (−3 cm, 0) |
+| Stages | **picked**: arm 1 holds the lifted needle while arm 2 is clear of it → **handed over**: arm 2 holds the lifted needle while arm 1 is clear of it (≥ 1.5 cm) → carried to the goal |
+| Goal | 4 cm above the pad, 4 cm towards arm 2 from the handover point (the pad centre, 4 cm up) |
+| Success | Handed over, then the needle within 2 cm of the goal with arm 1 still clear of it |
+| Rewards | arm 1 reaching the needle until it is picked (×1), needle lifted (×5), lifted needle near the handover point before the handover (×8), arm 2 reaching the lifted needle (×4), held by arm 2 alone after a real handover (×10), near the goal while held by arm 2 (×16 coarse, ×5 fine), plus the lift task's penalties for both arms. Arm 2 cannot score the later stages by picking the needle off the pad itself |
+| Cameras | Same stereo pair (5 mm gap), facing the arms from the front, 18 cm from a point 3.5 cm above the pad, 30° above horizontal, 20 mm lens (~55° across). Both tools' start positions, the whole pad, the handover point and the needle at the goal are in both images (`tests/test_handover.py`) |
+| Scripted demos | `surgical_env/scripted.py:ScriptedNeedleHandover`: arm 1 grasps the needle at its middle and lifts it to the handover point, arm 2 grasps it about 2 cm along the curve (`env.handover_grasp_deg`), arm 1 opens and backs away, arm 2 carries it to the goal |
+
+Extra wandb metrics: `train/handed_over`, `eval/handed_over` (share of episodes where arm 2
+took the needle over) and `eval/fail/lifted_not_handed_over`.
+
 ## The learning method
 
 1. **MV-MAE.** A shared convolutional stem turns each 96×96 image into a 6×6 grid of
@@ -284,7 +308,7 @@ shadow-casting light independently of this.
 ## Tests (no GPU needed)
 
 ```bash
-pytest          # rotations, stereo geometry, scripted controller, MV-MAE, replay memory, agent, full training loop on a fake env
+pytest          # rotations, stereo geometry, scripted controllers (incl. the two-arm handover), MV-MAE, replay memory, agent, full training loop on fake envs
 ```
 
 ## Credits and licences

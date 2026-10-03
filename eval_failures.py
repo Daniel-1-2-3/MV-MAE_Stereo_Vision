@@ -46,7 +46,6 @@ import torch  # noqa: E402
 import vis  # noqa: E402
 from agent.replay import FrameStacker  # noqa: E402
 from config import load_config  # noqa: E402
-from surgical_env import mdp  # noqa: E402
 from surgical_env.env import make_env  # noqa: E402
 from trainer import build_agent, robot_state  # noqa: E402
 
@@ -87,6 +86,8 @@ def run_round(env, agent, env_step: int, settle_steps: int) -> tuple[list[dict],
     rec_bool = {k: torch.zeros(n, dtype=torch.bool, device=dev) for k in ("final_success", "terminated", "cut_early")}
     final_goal = torch.zeros(n, device=dev)
     final_lifted = torch.zeros(n, dtype=torch.bool, device=dev)  # lifted on the last step inside the episode
+    handed_over = torch.zeros(n, dtype=torch.bool, device=dev)  # handover task: arm 2 took the needle over
+    is_handover = hasattr(env.env, "handed_over")
 
     for t in range(max_steps + 1):
         if t == settle_steps:  # the needle has landed on the pad: record how it lies
@@ -103,7 +104,7 @@ def run_round(env, agent, env_step: int, settle_steps: int) -> tuple[list[dict],
         ever_lifted |= lifted & live
         lifted_steps += (lifted & live).float()
         success_any |= info["success_now"] & live
-        goal_distance = mdp.needle_goal_distance(env.env)
+        goal_distance = env.env.needle_goal_distance()
         min_goal = torch.where(live, torch.minimum(min_goal, goal_distance), min_goal)
         height = (needle.data.root_pos_w[:, 2] - top) * 1000
         max_height = torch.where(live, torch.maximum(max_height, height), max_height)
@@ -117,6 +118,8 @@ def run_round(env, agent, env_step: int, settle_steps: int) -> tuple[list[dict],
         final_lifted |= newly & lifted_prev
         lifted_prev = torch.where(live, lifted, lifted_prev)
         success_any |= newly & info["final_success"]
+        if "handed_over" in info:
+            handed_over |= info["handed_over"] & alive
         history.append(obs.clone())
         valid += live.long()
         alive &= ~done
@@ -146,6 +149,7 @@ def run_round(env, agent, env_step: int, settle_steps: int) -> tuple[list[dict],
             "min_goal_distance_mm": round(float(min_goal[e]) * 1000, 2),
             "final_goal_distance_mm": round(float(final_goal[e]) * 1000, 2),
             "needle_dropped_off": bool(rec_bool["terminated"][e]),
+            **({"handed_over": bool(handed_over[e])} if is_handover else {}),
             **{k: round(float(v[e]), 2) for k, v in rec.items()},
         })
     return episodes, history, valid
@@ -154,6 +158,9 @@ def run_round(env, agent, env_step: int, settle_steps: int) -> tuple[list[dict],
 def summarize(episodes: list[dict]) -> str:
     total = len(episodes)
     lines = [f"episodes: {total}"]
+    if total and "handed_over" in episodes[0]:
+        k = sum(ep["handed_over"] for ep in episodes)
+        lines.append(f"  handed over to arm 2: {k} ({100.0 * k / total:5.1f}%) (handover task)")
     for b in BUCKETS:
         k = sum(ep["bucket"] == b for ep in episodes)
         lines.append(f"  {b:15s} {k:4d}  ({100.0 * k / max(total, 1):5.1f}%)")

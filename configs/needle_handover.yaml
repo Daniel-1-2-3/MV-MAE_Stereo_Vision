@@ -1,0 +1,89 @@
+# Two-arm needle handover with a stereo endoscope, MV-MAE + DrQ-v2.
+# Arm 1 (left in the images) picks the needle off the pad and lifts it to the handover point,
+# arm 2 (right) grasps it, arm 1 lets go, and arm 2 carries it to the goal.
+# Same scene, physics and agent as configs/needle_tissue.yaml except where marked HANDOVER.
+# Every key here is optional; missing keys use the defaults in config.py.
+
+env:
+  task: handover         # HANDOVER
+  handover_base_x: 0.07  # HANDOVER: arm bases 7 cm either side of the pad centre (Isaac for Healthcare layout)
+  handover_needle_x: -0.03   # HANDOVER: needle lands on arm 1's half of the pad ...
+  needle_xy_range: 0.015     # ... within +-1.5 cm of (-3 cm, 0)
+  handover_goal_x: 0.04  # HANDOVER: goal 4 cm towards arm 2 from the handover point, both goal_height up
+  handover_grasp_deg: 125.0  # HANDOVER: where arm 2 grasps the needle (180 = where arm 1 holds it, ~2 cm away)
+  handover_look_at_x: 0.005  # HANDOVER: the cameras aim 5 mm right of the pad centre (the needle sticks out towards arm 2 at the goal)
+  num_envs: 32
+  sim_dt: 0.005          # 200 Hz physics
+  decimation: 8          # -> 25 Hz control
+  episode_length_s: 8.0  # HANDOVER: 200 control steps (the scripted handover takes ~6 s)
+  tissue_deformable: false  # rigid pad (soft FEM pad glitched too often); true = soft tissue
+  tissue_size: [0.10, 0.10, 0.01]
+  tissue_youngs_modulus: 5.0e+4
+  tissue_poissons_ratio: 0.45
+  needle_asset: sdf      # sdf | mesh
+  goal_height: 0.04      # handover point and goal are 4 cm above the tissue
+  lift_height: 0.02
+  success_threshold: 0.02
+  ik_pos_scale: 0.005    # metres per step at action = 1
+  ik_rot_scale: 0.05     # radians per step at action = 1
+  penalty_curriculum: true      # original: action_rate / joint_vel penalties grow to -0.1 after 10k sim steps
+  arm_joint_vel_limit: 3.0      # joint speed caps actually applied by PhysX
+  gripper_joint_vel_limit: 3.0
+  robot_solver_position_iterations: 16   # original 4 / 0; more stops the jaws chattering on the needle
+  robot_solver_velocity_iterations: 4
+  blowup_joint_vel: 10.0        # arm joints; cut an episode (as a time-out) if the physics glitches
+  blowup_needle_speed: 2.0
+
+camera:
+  # HANDOVER: the rig faces the two arms from the front (-y), so arm 1 is on the left of the images and
+  # arm 2 on the right. A wider lens (20 mm, ~55 deg across) fits both tools' start positions, the whole
+  # pad, the handover point and the needle at the goal (checked in tests/test_handover.py).
+  # Disparity ~2.5 px; the needle is ~10 px long.
+  width: 96
+  height: 96
+  baseline: 0.005        # 5 mm between the eyes
+  look_at_height: 0.035  # look-at point above the tissue, env.handover_look_at_x from the centre
+  distance: 0.18
+  azimuth_deg: -90.0
+  elevation_deg: 30.0
+  focal_length: 20.0
+
+mvmae:
+  frame_stack: 3
+  patch_size: 16
+  embed_dim: 256
+  encoder_depth: 8
+  decoder_depth: 6
+  mask_ratio: 0.95
+
+agent:
+  batch_size: 256
+  lr: 1.0e-4
+  encoder_lr: 1.0e-4
+  nstep: 3
+  gamma: 0.99
+  stddev_schedule: linear(0.5,0.1,500000)   # exploration noise: start, end, env steps
+  mae_coef: 1.0
+  mae_every: 2                     # MV-MAE loss every 2nd update
+  critic_encoder_grad_scale: 1.0   # critic gradient into the encoder until it is frozen (see train.freeze_encoder_*)
+  bc_coef: 0.4
+  proprio: true          # both arms' tool poses and jaw angles (18 numbers) as well as the images
+
+train:
+  total_env_steps: 2000000
+  freeze_encoder_success: 0.3
+  freeze_encoder_at: 800000  # HANDOVER: later backstop than the lift task (450k): the task takes longer to learn
+  seed_env_steps: 10000
+  mae_pretrain_updates: 2000
+  updates_per_env_step: 0.25
+  replay_capacity: 100000   # ~5.5 GB of images; lower it on a 24 GB GPU if memory runs out
+  replay_device: cuda
+  demo_path: ""             # e.g. demos/handover_demos.pt from record_demos.py --config configs/needle_handover.yaml
+  demo_ratio: 0.25
+  eval_every_env_steps: 50000
+
+log:
+  wandb_project: mvmae-drqv2-surgery
+  wandb_mode: online        # online | offline | disabled
+  log_every_updates: 250
+  recon_every_updates: 5000
