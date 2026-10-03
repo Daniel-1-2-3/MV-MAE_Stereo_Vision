@@ -1,9 +1,9 @@
-"""Record demonstrations with the scripted controller (needle lift or two-arm handover).
+"""Record demonstrations with the scripted needle-lift controller.
 
     python record_demos.py --num_demos 50 --out demos/needle_demos.pt
 
-Runs the scripted controller for env.task (surgical_env/scripted.py: the Isaac for Healthcare
-pick-and-lift state machine, or the two-arm handover one) in every parallel env, keeps only episodes that end in success, and stores their
+Runs the Isaac for Healthcare pick-and-lift state machine (surgical_env/scripted.py)
+in every parallel env, keeps only episodes that end in success, and stores their
 stereo images, actions and rewards in the format train.py loads with
 train.demo_path=... . Use the same env/camera config as for training.
 """
@@ -27,14 +27,14 @@ import torch  # noqa: E402
 import vis  # noqa: E402
 from config import load_config  # noqa: E402
 from surgical_env.env import make_env  # noqa: E402
-from surgical_env.scripted import make_scripted_controller  # noqa: E402
+from surgical_env.scripted import ScriptedNeedleLifter  # noqa: E402
 
 
 def main() -> None:
     cfg = load_config(args.config, overrides)
     env = make_env(cfg, device=args.device)
-    n = env.num_envs
-    controller = make_scripted_controller(env, cfg)  # lift or handover, per env.task
+    n, dev = env.num_envs, env.device
+    controller = ScriptedNeedleLifter(n, env.step_dt, dev, cfg.env.ik_pos_scale, cfg.env.ik_rot_scale)
 
     # Per-env lists of the running episode's steps (kept on the CPU).
     running = [dict(obs=[], action=[], reward=[], terminated=[], truncated=[], proprio=[]) for _ in range(n)]
@@ -44,7 +44,7 @@ def main() -> None:
     prop = env.proprio()
     controller.reset_idx()
     while len(kept) < args.num_demos and attempts < args.max_episodes:
-        action = controller.act(env)
+        action = controller.compute(*env.poses_in_base())
         next_obs, reward, term, trunc, info = env.step(action)
         obs_c, act_c, rew_c, prop_c = obs.cpu(), action.cpu(), reward.cpu(), prop.cpu()
         term_c, trunc_c = term.cpu(), trunc.cpu()

@@ -105,7 +105,6 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
     lifted_prev = torch.zeros(n, dtype=torch.bool, device=dev)
     final_lifted = torch.zeros(n, dtype=torch.bool, device=dev)
     cut_early = torch.zeros(n, dtype=torch.bool, device=dev)
-    handed_over = torch.zeros(n, dtype=torch.bool, device=dev)  # handover task: arm 2 took the needle over
     radius = None
     isaac_logs: list[dict] = []
     prop = robot_state(env, agent)
@@ -125,8 +124,6 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
         success_any |= newly & info["final_success"]
         goal_dist = torch.where(newly, info["final_goal_distance"], goal_dist)
         cut_early |= newly & trunc & (length < env.max_episode_steps)
-        if "handed_over" in info:
-            handed_over |= info["handed_over"] & alive  # latched in the env; the final value where done
         if info["log"] and bool(newly.any()):
             isaac_logs.append(info["log"])
         if record_video:
@@ -174,10 +171,6 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
     }
     if "needle_lifted" in info:
         metrics.update({f"eval/fail/{b}": buckets[b].float().mean().item() for b in EVAL_BUCKETS})
-    if "handed_over" in info:
-        metrics["eval/handed_over"] = handed_over.float().mean().item()
-        # failed although the needle was lifted, and arm 2 never took it over (an extra view, not a bucket)
-        metrics["eval/fail/lifted_not_handed_over"] = (failed & ~cut_early & ever_lifted & ~handed_over).float().mean().item()
     if radius is not None:
         center = radius < CENTER_RADIUS_M
         if bool(center.any()):
@@ -323,8 +316,6 @@ class Trainer:
                     "train/terminated_frac": term[idx].float().mean().item(),
                     "train/episodes": episodes,
                 }
-                if "handed_over" in info:
-                    log["train/handed_over"] = info["handed_over"][idx].float().mean().item()
                 log.update(scalar_logs(info["log"], "train/isaac/"))
                 self.log(log, env_steps)
                 print(f"[{env_steps:>9d}] episodes {episodes:6d} | return {log['train/episode_return']:8.2f} | "

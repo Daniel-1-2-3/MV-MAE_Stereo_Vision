@@ -10,7 +10,7 @@ What it checks (each prints PASS / FAIL):
   Images      - right shape/dtype, not blank, left and right similar but not identical
   Rig         - camera positions/orientations reported by the simulator match the
                 design: 5 mm apart, parallel, right camera on the right
-  Projection  - needle and tool tip(s) are inside both images, on the same pixel row
+  Projection  - needle and tool tip are inside both images, on the same pixel row
                 in both, shifted sideways by the amount the geometry predicts,
                 and not hidden behind something
   Stereo      - image-only check: warping the right image by the disparity that
@@ -23,7 +23,7 @@ What it checks (each prints PASS / FAIL):
 
 Outputs (default outputs/stereo_check/):
   stereo_check.png  - per env: left | right | red-cyan anaglyph | left depth,
-                      needle marked yellow, tool tip(s) cyan / magenta
+                      needle marked yellow, tool tip cyan
   stereo_check.mp4  - env 0 through the whole test, left | right
   results.json      - every number behind the checks
 Exit code is 0 only if every check passes.
@@ -55,6 +55,7 @@ import torch.nn.functional as F  # noqa: E402
 import vis  # noqa: E402
 from config import load_config  # noqa: E402
 from surgical_env.env import make_env  # noqa: E402
+from surgical_env.psm import PSM_BASE_POS  # noqa: E402
 from surgical_env.rotations import matrix_from_quat  # noqa: E402
 from surgical_env.scripted import GRIPPER_CLOSE, GRIPPER_OPEN, relative_action  # noqa: E402
 from surgical_env.stereo import project_points  # noqa: E402
@@ -86,9 +87,7 @@ def main() -> int:
     n, dev = env.num_envs, env.device
     h, w = cfg.camera.height, cfg.camera.width
     origins = scene.env_origins
-    needle = scene["object"]
-    tip_names = ["tool_tip"] if env.num_arms == 1 else [f"tool_tip_{i + 1}" for i in range(env.num_arms)]
-    print(f"task: {cfg.env.task} | arms: {env.num_arms} | action size: {env.action_dim}")
+    needle, ee_frame = scene["object"], scene["ee_frame"]
     soft = cfg.env.tissue_deformable
     tissue = scene["tissue"] if soft else None
     tissue_top_local = cfg.env.tissue_size[2]
@@ -109,7 +108,7 @@ def main() -> int:
 
     # ------------------------------------------------------------------ settle
     hold = torch.zeros(n, env.action_dim, device=dev)
-    hold[:, 6::7] = GRIPPER_OPEN  # every arm stays still with its gripper open
+    hold[:, 6] = GRIPPER_OPEN
     needle_pos_hist = []
     for _ in range(args.settle_steps):
         obs = step(hold)
@@ -156,11 +155,12 @@ def main() -> int:
 
     # ------------------------------------------------------------------ projection
     needle_w = needle.data.root_pos_w
-    pts = torch.stack([needle_w] + [env.tool_tip_w(i) for i in range(env.num_arms)], dim=1)  # (n, 1 + arms, 3)
+    tip_w = ee_frame.data.target_pos_w[:, 0, :]
+    pts = torch.stack([needle_w, tip_w], dim=1)  # (n, 2, 3)
     uv_l, z_l = project_points(pts, pl, ql, K)
     uv_r, z_r = project_points(pts, pr, qr, env.right.data.intrinsic_matrices)
     depth = env.depths()  # (n, 2, h, w)
-    for j, name in enumerate(["needle"] + tip_names):
+    for j, name in enumerate(("needle", "tool_tip")):
         inside = ((uv_l[:, j, 0] >= 0) & (uv_l[:, j, 0] < w) & (uv_l[:, j, 1] >= 0) & (uv_l[:, j, 1] < h)
                   & (uv_r[:, j, 0] >= 0) & (uv_r[:, j, 0] < w) & (uv_r[:, j, 1] >= 0) & (uv_r[:, j, 1] < h)
                   & (z_l[:, j] > 0) & (z_r[:, j] > 0))
@@ -243,8 +243,8 @@ def main() -> int:
     press_xy = -0.02 * sign  # 2 cm on the far side of the centre from the needle
     rest_top = (rest_z.max(dim=1).values - origins[:, 2]) if soft else torch.full((n,), tissue_top_local, device=dev)
     ended_before_press = terminated_any.clone()
-    base_pos = env.base_pos_local(0)  # arm 1 does the pressing; any other arm holds still
-    ee_pos, ee_quat = env.tool_pose_in_base(0)
+    base_pos = torch.tensor(PSM_BASE_POS, device=dev)
+    ee_pos, ee_quat, *_ = env.poses_in_base()
     hold_quat = ee_quat.clone()
     closed = torch.full((n,), GRIPPER_CLOSE, device=dev)
     phases = [(30, 0.015), (40, -0.004)]  # (steps, height above the rest surface)
@@ -252,15 +252,15 @@ def main() -> int:
         target_local = torch.cat([press_xy, (rest_top + dz)[:, None]], dim=-1)
         target_base = target_local - base_pos
         for _ in range(steps):
-            ee_pos, ee_quat = env.tool_pose_in_base(0)
+            ee_pos, ee_quat, *_ = env.poses_in_base()
             act = relative_action(ee_pos, ee_quat, target_base, hold_quat, closed,
                                   cfg.env.ik_pos_scale, cfg.env.ik_rot_scale)
-            obs = step(env.single_arm_action(act, 0))
-    ee_pos, _ = env.tool_pose_in_base(0)
+            obs = step(act)
+    ee_pos, *_ = env.poses_in_base()
     reach_err = torch.linalg.norm(ee_pos - (torch.cat([press_xy, (rest_top - 0.004)[:, None]], -1) - base_pos), dim=-1)
     if not soft:
         # The tool is driven 4 mm "into" the rigid pad: it must stop on the surface, and nothing may glitch.
-        tip_h = ee_pos[:, 2] + base_pos[:, 2] - rest_top
+        tip_h = ee_pos[:, 2] + base_pos[2] - rest_top
         check("tissue/solid_when_pressed", bool((tip_h > -2e-3).all()),
               f"tool tip height above the pad while pressing {f(tip_h * 1000)} mm (want > -2: it must not sink in)")
         glitch = terminated_any & ~ended_before_press
@@ -284,7 +284,7 @@ def main() -> int:
     for i in range(n):
         left, right = vis.to_hwc(obs_np[i, 0]), vis.to_hwc(obs_np[i, 1])
         l_mark, r_mark, ana = left.copy(), right.copy(), vis.anaglyph(left, right)
-        for j, color in enumerate(((255, 255, 0), (0, 255, 255), (255, 0, 255))[:pts.shape[1]]):
+        for j, color in ((0, (255, 255, 0)), (1, (0, 255, 255))):
             vis.draw_cross(l_mark, float(uv_l[i, j, 0]), float(uv_l[i, j, 1]), color, size=2)
             vis.draw_cross(r_mark, float(uv_r[i, j, 0]), float(uv_r[i, j, 1]), color, size=2)
         dep = vis.depth_to_rgb(snapshot_depth[i, 0].cpu().numpy())

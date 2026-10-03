@@ -42,7 +42,6 @@ from isaaclab.utils import configclass
 
 from . import mdp
 from .assets import robotic_surgery_assets
-from .handover_geom import NEEDLE_SCALE
 from .psm import PSM_BASE_POS, PSM_HIGH_PD_CFG
 from .stereo import StereoRig, make_stereo_rig
 
@@ -266,38 +265,43 @@ def _camera_cfg(prim_name: str, pos, rig: StereoRig, cam, with_depth: bool, trac
     )
 
 
-def tissue_cfg(env) -> DeformableObjectCfg | AssetBaseCfg:
-    """The tissue pad: soft FEM (env.tissue_deformable) or a static rigid collider of the same size and colour."""
+def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = False) -> tuple[NeedleTissueEnvCfg, StereoRig]:
+    """Build the Isaac Lab config from our EnvConfig / CameraConfig (see config.py)."""
+    cfg = NeedleTissueEnvCfg()
     sx, sy, sz = env.tissue_size
+    tissue_top = sz  # the pad's bottom rests on the platform top (z = 0)
+
+    # ---- scene
+    cfg.scene.num_envs = env.num_envs
+    cfg.scene.env_spacing = env.env_spacing
+    # Deformable bodies do not work with replicated physics (same as Isaac Lab's own deformable lift task);
+    # kept off for the rigid pad too, so both variants build the same scene.
+    cfg.scene.replicate_physics = False
     tissue_visual = sim_utils.PreviewSurfaceCfg(diffuse_color=env.tissue_color, roughness=0.6)
     if env.tissue_deformable:
-        return _soft_tissue_cfg(env, tissue_visual)
-    return AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Tissue",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.5 * sz)),
-        spawn=sim_utils.CuboidCfg(
-            size=(sx, sy, sz),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=tissue_visual,
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=env.tissue_friction, dynamic_friction=env.tissue_friction
+        cfg.scene.tissue = _soft_tissue_cfg(env, tissue_visual)
+    else:
+        # Static collider (no rigid-body properties): same size, colour and place as the soft pad.
+        cfg.scene.tissue = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Tissue",
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.5 * sz)),
+            spawn=sim_utils.CuboidCfg(
+                size=(sx, sy, sz),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                visual_material=tissue_visual,
+                physics_material=sim_utils.RigidBodyMaterialCfg(
+                    static_friction=env.tissue_friction, dynamic_friction=env.tissue_friction
+                ),
             ),
-        ),
-    )
-
-
-def needle_cfg(env, spawn_xy: tuple[float, float] = (0.0, 0.0)) -> RigidObjectCfg:
-    """The suture needle, dropped from env.needle_spawn_height above the tissue top at `spawn_xy`."""
-    tissue_top = env.tissue_size[2]
-    usd = robotic_surgery_assets.Needle_SDF if env.needle_asset == "sdf" else robotic_surgery_assets.Needle
-    return RigidObjectCfg(
+        )
+    cfg.tissue_deformable = env.tissue_deformable
+    needle_usd = robotic_surgery_assets.Needle_SDF if env.needle_asset == "sdf" else robotic_surgery_assets.Needle
+    cfg.scene.object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(spawn_xy[0], spawn_xy[1], tissue_top + env.needle_spawn_height), rot=(1, 0, 0, 0)
-        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, tissue_top + env.needle_spawn_height), rot=(1, 0, 0, 0)),
         spawn=UsdFileCfg(
-            usd_path=usd,
-            scale=(NEEDLE_SCALE, NEEDLE_SCALE, NEEDLE_SCALE),
+            usd_path=needle_usd,
+            scale=(0.4, 0.4, 0.4),
             rigid_props=RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
                 solver_velocity_iteration_count=8,
@@ -308,14 +312,25 @@ def needle_cfg(env, spawn_xy: tuple[float, float] = (0.0, 0.0)) -> RigidObjectCf
             ),
         ),
     )
+    # ---- lighting (CHANGED, optional): the dome light alone casts no visible shadows, so from the
+    # images the tool's height above the pad is only visible through a few pixels of stereo disparity.
+    # A tilted distant light adds the tool's shadow on the pad, a direct cue for how far above it is.
+    cfg.scene.light = cfg.scene.light.replace(spawn=cfg.scene.light.spawn.replace(intensity=env.dome_light_intensity))
+    if env.shadow_light:
+        cfg.scene.shadow_light = AssetBaseCfg(
+            prim_path="/World/shadow_light",
+            init_state=AssetBaseCfg.InitialStateCfg(rot=_down_light_quat(env.shadow_light_tilt_deg, env.shadow_light_azimuth_deg)),
+            spawn=sim_utils.DistantLightCfg(intensity=env.shadow_light_intensity, angle=0.5),
+        )
+    look_at = (env.goal_xy[0], env.goal_xy[1], tissue_top + cam.look_at_height)
+    rig = make_stereo_rig(cam, look_at)
+    cfg.scene.stereo_left = _camera_cfg("StereoLeft", rig.left_pos, rig, cam, with_depth, track_camera_pose)
+    cfg.scene.stereo_right = _camera_cfg("StereoRight", rig.right_pos, rig, cam, with_depth, track_camera_pose)
 
-
-def tuned_robot_cfg(robot: ArticulationCfg, env) -> ArticulationCfg:
-    """CHANGED from the vendored PSM config: more solver iterations (16 / 4 instead of 4 / 0) keep the
-    gripper jaws from chattering when they squeeze the needle, and joint speed caps that Isaac Lab >= 2.0
-    actually applies (`velocity_limit_sim`; it ignores `velocity_limit` for implicit actuators)."""
-    spawn = robot.spawn
-    robot = robot.replace(
+    # ---- robot solver iterations (CHANGED from 4 / 0): more iterations keep the gripper jaws from
+    # chattering when they squeeze the needle against the pad
+    spawn = cfg.scene.robot.spawn
+    cfg.scene.robot = cfg.scene.robot.replace(
         spawn=spawn.replace(
             articulation_props=spawn.articulation_props.replace(
                 solver_position_iteration_count=env.robot_solver_position_iterations,
@@ -323,84 +338,14 @@ def tuned_robot_cfg(robot: ArticulationCfg, env) -> ArticulationCfg:
             )
         )
     )
-    act = robot.actuators
-    return robot.replace(
+    # ---- robot joint speed caps (CHANGED): `velocity_limit_sim` is what Isaac Lab >= 2.0 applies
+    act = cfg.scene.robot.actuators
+    cfg.scene.robot = cfg.scene.robot.replace(
         actuators={
             "psm": act["psm"].replace(velocity_limit=None, velocity_limit_sim=env.arm_joint_vel_limit),
             "psm_tool": act["psm_tool"].replace(velocity_limit=None, velocity_limit_sim=env.gripper_joint_vel_limit),
         }
     )
-
-
-def ik_arm_action_cfg(asset_name: str, env) -> DifferentialInverseKinematicsActionCfg:
-    """Relative end-effector pose (IK) action: 6 numbers in [-1, 1]."""
-    p, r = env.ik_pos_scale, env.ik_rot_scale
-    return DifferentialInverseKinematicsActionCfg(
-        asset_name=asset_name,
-        joint_names=PSM_ARM_JOINTS,
-        body_name=EE_BODY,
-        controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls"),
-        scale=(p, p, p, r, r, r),
-    )
-
-
-def gripper_action_cfg(asset_name: str) -> mdp.BinaryJointPositionActionCfg:
-    """Binary gripper action: 1 number, < 0 closes, >= 0 opens."""
-    return mdp.BinaryJointPositionActionCfg(
-        asset_name=asset_name,
-        joint_names=["psm_tool_gripper.*_joint"],
-        open_command_expr={"psm_tool_gripper1_joint": -0.5, "psm_tool_gripper2_joint": 0.5},
-        close_command_expr={"psm_tool_gripper1_joint": -0.09, "psm_tool_gripper2_joint": 0.09},
-    )
-
-
-def setup_lights_and_cameras(scene, env, cam, look_at_xy, with_depth: bool, track_camera_pose: bool) -> StereoRig:
-    """Dome light (+ optional shadow light) and the stereo rig aimed `cam.look_at_height` above the tissue at `look_at_xy`."""
-    # CHANGED (optional): the dome light alone casts no visible shadows, so from the images the tool's
-    # height above the pad is only visible through a few pixels of stereo disparity. A tilted distant
-    # light adds the tool's shadow on the pad, a direct cue for how far above it is.
-    scene.light = scene.light.replace(spawn=scene.light.spawn.replace(intensity=env.dome_light_intensity))
-    if env.shadow_light:
-        scene.shadow_light = AssetBaseCfg(
-            prim_path="/World/shadow_light",
-            init_state=AssetBaseCfg.InitialStateCfg(rot=_down_light_quat(env.shadow_light_tilt_deg, env.shadow_light_azimuth_deg)),
-            spawn=sim_utils.DistantLightCfg(intensity=env.shadow_light_intensity, angle=0.5),
-        )
-    look_at = (look_at_xy[0], look_at_xy[1], env.tissue_size[2] + cam.look_at_height)
-    rig = make_stereo_rig(cam, look_at)
-    scene.stereo_left = _camera_cfg("StereoLeft", rig.left_pos, rig, cam, with_depth, track_camera_pose)
-    scene.stereo_right = _camera_cfg("StereoRight", rig.right_pos, rig, cam, with_depth, track_camera_pose)
-    return rig
-
-
-def setup_timing(cfg: ManagerBasedRLEnvCfg, env, cam) -> None:
-    cfg.decimation = env.decimation
-    cfg.sim.dt = env.sim_dt
-    cfg.sim.render_interval = env.decimation
-    cfg.sim.render.antialiasing_mode = cam.antialiasing
-    cfg.episode_length_s = env.episode_length_s
-    # Re-render after resets so the first image of a new episode shows the reset scene.
-    cfg.rerender_on_reset = True
-    cfg.viewer.eye = (0.2, 0.2, 0.1)
-    cfg.viewer.lookat = (0.0, 0.0, 0.04)
-
-
-def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = False) -> tuple[NeedleTissueEnvCfg, StereoRig]:
-    """Build the Isaac Lab config from our EnvConfig / CameraConfig (see config.py)."""
-    cfg = NeedleTissueEnvCfg()
-    tissue_top = env.tissue_size[2]  # the pad's bottom rests on the platform top (z = 0)
-
-    # ---- scene
-    cfg.scene.num_envs = env.num_envs
-    cfg.scene.env_spacing = env.env_spacing
-    # Deformable bodies do not work with replicated physics (same as Isaac Lab's own deformable lift task);
-    # kept off for the rigid pad too, so both variants build the same scene.
-    cfg.scene.replicate_physics = False
-    cfg.scene.tissue = tissue_cfg(env)
-    cfg.tissue_deformable = env.tissue_deformable
-    cfg.scene.object = needle_cfg(env)
-    rig = setup_lights_and_cameras(cfg.scene, env, cam, env.goal_xy, with_depth, track_camera_pose)
-    cfg.scene.robot = tuned_robot_cfg(cfg.scene.robot, env)
     cfg.terminations.blowup_joint_speed.params = {
         "max_joint_vel": env.blowup_joint_vel,
         "robot_cfg": SceneEntityCfg("robot", joint_names=PSM_ARM_JOINTS),  # jaw chatter is not a blowup
@@ -408,7 +353,14 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     cfg.terminations.blowup_needle_speed.params = {"max_object_speed": env.blowup_needle_speed}
 
     # ---- actions: relative end-effector pose (IK) + binary gripper, 7 numbers in [-1, 1]
-    cfg.actions.body_joint_pos = ik_arm_action_cfg("robot", env)
+    p, r = env.ik_pos_scale, env.ik_rot_scale
+    cfg.actions.body_joint_pos = DifferentialInverseKinematicsActionCfg(
+        asset_name="robot",
+        joint_names=PSM_ARM_JOINTS,
+        body_name=EE_BODY,
+        controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls"),
+        scale=(p, p, p, r, r, r),
+    )
 
     # ---- fixed goal, expressed in the robot base frame (base has no rotation)
     gx, gy = env.goal_xy
@@ -439,5 +391,14 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     cfg.success_threshold = env.success_threshold
     cfg.tissue_top_w = tissue_top
 
-    setup_timing(cfg, env, cam)
+    # ---- timing
+    cfg.decimation = env.decimation
+    cfg.sim.dt = env.sim_dt
+    cfg.sim.render_interval = env.decimation
+    cfg.sim.render.antialiasing_mode = cam.antialiasing
+    cfg.episode_length_s = env.episode_length_s
+    # Re-render after resets so the first image of a new episode shows the reset scene.
+    cfg.rerender_on_reset = True
+    cfg.viewer.eye = (0.2, 0.2, 0.1)
+    cfg.viewer.lookat = (0.0, 0.0, 0.04)
     return cfg, rig
