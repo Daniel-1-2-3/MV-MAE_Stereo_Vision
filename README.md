@@ -255,6 +255,18 @@ encoder is frozen (neither MV-MAE nor the critic changes it) and the actor and c
 learning on the fixed features. The moment is printed as `ENCODER FROZEN`, saved as
 `ckpt_frozen.pt`, and logged as `train/encoder_frozen` / `train/encoder_frozen_at`.
 
+### Baseline without MV-MAE (`agent.encoder=cnn`)
+
+To measure what MV-MAE adds, `agent.encoder=cnn` swaps it for DrQ-v2's own image encoder: 4
+conv layers (32 channels, 3×3, the first with stride 2) on the raw pixels, with every stacked
+frame of both cameras as input channels (3 frames × 2 views × 3 colours = 18), so the left and
+right images are combined from the first layer. It is trained by the critic only, exactly as in
+DrQ-v2, with no reconstruction, reward prediction or pre-training. Everything else is unchanged:
+actor, critic, random-shift augmentation, demonstrations and behaviour cloning, robot state,
+exploration schedule and encoder freezing. Its representation (32 × 41 × 41 = 53,792 numbers) is
+about the same size as MV-MAE's (216 tokens × 256 = 55,296). For a fair comparison, run it with the
+same command, demos and seed as the MV-MAE run, adding only `agent.encoder=cnn`.
+
 ### Robot state (proprioception)
 
 `agent.proprio=true` gives the actor and critic the robot's own state next to the image

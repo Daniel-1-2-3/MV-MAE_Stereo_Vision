@@ -133,6 +133,12 @@ class MVMAEConfig:
 
 @dataclass
 class AgentConfig:
+    # Image encoder. "mvmae": the MV-MAE transformer (trained by its reconstruction / reward-prediction
+    # losses plus the critic). "cnn": baseline without MV-MAE -- DrQ-v2's own 4-layer conv encoder on the
+    # raw stereo frames (both views and all stacked frames as input channels), trained by the critic only.
+    # Everything else (actor, critic, augmentation, demos, robot state, encoder freezing) is identical;
+    # the mvmae.* settings other than frame_stack and the MV-MAE losses/pre-training are unused with "cnn".
+    encoder: str = "mvmae"
     lr: float = 1e-4  # actor and critic
     encoder_lr: float = 1e-4  # MV-MAE encoder + decoder
     encoder_warmup_updates: int = 2500
@@ -290,6 +296,8 @@ def validate(cfg: Config) -> None:
         raise ValueError("embedding dims must be divisible by the number of heads")
     if not 0.5 <= m.mask_ratio < 1.0:
         raise ValueError("mvmae.mask_ratio must be in [0.5, 1) with two views (one view is always fully hidden)")
+    if a.encoder not in ("mvmae", "cnn"):
+        raise ValueError("agent.encoder must be 'mvmae' or 'cnn'")
     if not 0.0 <= t.demo_ratio < 1.0:
         raise ValueError("train.demo_ratio must be in [0, 1)")
     if a.nstep < 1 or m.frame_stack < 1:

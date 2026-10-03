@@ -228,10 +228,11 @@ class Trainer:
                 config=cfg.to_dict(),
                 dir=str(self.run_dir),
             )
-        print(f"MV-MAE tokens per sample: {self.agent.mvmae.L}, representation size: {self.agent.repr_dim}"
-              + (f", robot state: {pd} values" if pd else ", images only"))
-        n_params = sum(p.numel() for p in self.agent.mvmae.parameters())
-        print(f"MV-MAE parameters: {n_params / 1e6:.2f} M | replay rows x envs: {self.replay.R} x {n} on {replay_device}"
+        enc = (f"MV-MAE tokens per sample: {self.agent.mvmae.L}" if self.agent.uses_mvmae
+               else "BASELINE image encoder: DrQ-v2 conv net on the raw stereo frames (no MV-MAE)")
+        print(f"{enc}, representation size: {self.agent.repr_dim}" + (f", robot state: {pd} values" if pd else ", images only"))
+        n_params = sum(p.numel() for p in self.agent.encoder.parameters())
+        print(f"encoder parameters: {n_params / 1e6:.2f} M | replay rows x envs: {self.replay.R} x {n} on {replay_device}"
               + (f" | demos: {self.demo.R} transitions" if self.demo is not None else ""))
 
     # ------------------------------------------------------------------ utils
@@ -268,7 +269,7 @@ class Trainer:
         metrics_avg = MetricAverager()
         env_steps, episodes, update_credit = 0, 0, 0.0
         next_eval, next_ckpt = t.eval_every_env_steps, t.checkpoint_every_env_steps
-        mae_pretrained = t.mae_pretrain_updates <= 0
+        mae_pretrained = t.mae_pretrain_updates <= 0 or not agent.uses_mvmae  # nothing to pre-train in the baseline
         last_log_updates, last_log_time, last_log_steps = 0, time.time(), 0
         last_batch_obs = None
 
@@ -464,7 +465,7 @@ class Trainer:
                 print(f"checkpoint upload failed ({tag}): {e}")
 
     def _log_reconstruction(self, obs: torch.Tensor | None, env_steps: int) -> None:
-        if obs is None:
+        if obs is None or not self.agent.uses_mvmae:
             return
         img = vis.upscale(self.agent.reconstruction_image(obs).numpy(), 2)
         vis.save_png(img, self.run_dir / "reconstructions" / f"recon_{self.agent.num_updates}.png")

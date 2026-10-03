@@ -104,3 +104,23 @@ def test_training_loop_runs_end_to_end(tmp_path):
     assert trainer.agent.num_updates > 0
     ckpt = torch.load(run / "ckpt_final.pt", map_location="cpu")
     assert ckpt["env_steps"] >= 600 and "mvmae" in ckpt["agent"]
+
+
+def test_training_loop_with_the_conv_encoder_baseline(tmp_path):
+    os.environ["WANDB_SILENT"] = "true"
+    cfg = load_config("configs/needle_tissue.yaml", [
+        "agent.encoder=cnn", "env.num_envs=4", "camera.width=32", "camera.height=32", "agent.batch_size=16",
+        "agent.hidden_dim=32", "agent.feature_dim=8", "agent.amp=false", "train.total_env_steps=500",
+        "train.seed_env_steps=100", "train.replay_capacity=400", "train.replay_device=cpu",
+        "train.eval_every_env_steps=400", "train.checkpoint_every_env_steps=500", "agent.proprio=true",
+        f"train.run_dir={tmp_path}", "log.log_every_updates=10", "log.recon_every_updates=20",
+        "log.wandb_mode=offline", "log.run_name=cnn",
+    ])
+    env = FakeStereoEnv(num_envs=4, size=32)
+    trainer = Trainer(cfg, env, device="cpu")
+    trainer.train()
+    run = tmp_path / "cnn"
+    assert (run / "ckpt_final.pt").exists() and trainer.agent.num_updates > 0 and not trainer.agent.uses_mvmae
+    assert not (run / "reconstructions").exists()  # nothing to reconstruct without MV-MAE
+    ckpt = torch.load(run / "ckpt_final.pt", map_location="cpu")
+    assert "encoder" in ckpt["agent"] and "mvmae" not in ckpt["agent"] and ckpt["config"]["agent"]["encoder"] == "cnn"

@@ -1,7 +1,9 @@
 """MV-MAE + DrQ-v2 agent.
 
 * Representation: the MV-MAE encoder's unmasked tokens for the whole stereo
-  video clip, flattened (as DrQ-v2 flattens its conv features).
+  video clip, flattened (as DrQ-v2 flattens its conv features). Baseline
+  (agent.encoder="cnn"): DrQ-v2's conv encoder on the raw frames instead, trained
+  by the critic only -- the same agent without MV-MAE.
 * Actor-critic: DrQ-v2 -- twin Q critics with a slow target copy, an actor with
   scheduled Gaussian exploration noise, n-step returns, random-shift image
   augmentation.
@@ -39,6 +41,33 @@ class Batch:
     frame_reward_valid: torch.Tensor  # (B, F) bool
     proprio: torch.Tensor  # (B, P) robot state at obs's last frame; P = 0 when proprioception is off
     next_proprio: torch.Tensor  # (B, P) robot state at next_obs's last frame
+
+
+class ConvEncoder(nn.Module):
+    """DrQ-v2's image encoder (Yarats et al. 2021), for the baseline without MV-MAE.
+
+    All stacked frames of both views go in as channels (F * V * 3), so the left/right pair is
+    fused from the first layer: 4 conv layers (32 channels, 3x3, first with stride 2), ReLU,
+    flattened. Pixels are scaled to [-0.5, 0.5] as in DrQ-v2. 96 x 96 input -> 32 x 41 x 41.
+    """
+
+    def __init__(self, in_channels: int, img_hw: tuple[int, int]):
+        super().__init__()
+        self.convnet = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 3, stride=2), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
+        )
+        self.apply(utils.weight_init)
+        with torch.no_grad():
+            self.repr_dim = int(self.convnet(torch.zeros(1, in_channels, *img_hw)).numel())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, F, V, 3, H, W) uint8 or float in [0, 255] -> (B, repr_dim)."""
+        b, f, v, c, h, w = x.shape
+        x = x.float().reshape(b, f * v * c, h, w) / 255.0 - 0.5
+        return self.convnet(x).flatten(1)
 
 
 def _proprio_trunk(proprio_dim: int, feature_dim: int) -> nn.Module | None:
@@ -107,6 +136,33 @@ class MVMAEDrQV2Agent:
         self.device = torch.device(device)
         self.action_dim = action_dim
         self.frame_stack = mvmae_cfg.frame_stack
+        self.uses_mvmae = getattr(agent_cfg, "encoder", "mvmae") == "mvmae"
+        if not self.uses_mvmae:  # baseline: plain conv encoder on the images
+            self.mvmae = None
+            self.encoder = ConvEncoder(mvmae_cfg.frame_stack * num_views * 3, img_hw).to(self.device)
+            self.repr_dim = self.encoder.repr_dim
+        else:
+            self._build_mvmae(mvmae_cfg, img_hw, num_views)
+        c = agent_cfg
+        self.actor = Actor(self.repr_dim, action_dim, c.feature_dim, c.hidden_dim, proprio_dim).to(self.device)
+        self.critic = Critic(self.repr_dim, action_dim, c.feature_dim, c.hidden_dim, proprio_dim).to(self.device)
+        self.critic_target = copy.deepcopy(self.critic)
+        self.critic_target.requires_grad_(False)
+
+        self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=c.encoder_lr)
+        # The transformer gets a learning-rate warm-up; DrQ-v2's conv encoder has none.
+        warmup = max(1, c.encoder_warmup_updates) if self.uses_mvmae else 1
+        self.encoder_sched = torch.optim.lr_scheduler.LambdaLR(
+            self.encoder_opt, lambda u: min(1.0, (u + 1) / warmup)
+        )
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=c.lr)
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=c.lr)
+        self.aug = utils.RandomShiftsAug(c.aug_pad)
+        self.use_amp = bool(c.amp) and self.device.type == "cuda"
+        self.num_updates = 0
+        self.encoder_frozen = False  # see freeze_encoder()
+
+    def _build_mvmae(self, mvmae_cfg, img_hw, num_views) -> None:
         self.mvmae = MVMAE(
             img_hw=img_hw,
             num_views=num_views,
@@ -123,24 +179,8 @@ class MVMAEDrQV2Agent:
             loss_on_masked_only=mvmae_cfg.loss_on_masked_only,
             reward_prediction=mvmae_cfg.reward_prediction,
         ).to(self.device)
+        self.encoder = self.mvmae
         self.repr_dim = self.mvmae.L * mvmae_cfg.embed_dim
-        c = agent_cfg
-        self.actor = Actor(self.repr_dim, action_dim, c.feature_dim, c.hidden_dim, proprio_dim).to(self.device)
-        self.critic = Critic(self.repr_dim, action_dim, c.feature_dim, c.hidden_dim, proprio_dim).to(self.device)
-        self.critic_target = copy.deepcopy(self.critic)
-        self.critic_target.requires_grad_(False)
-
-        self.encoder_opt = torch.optim.Adam(self.mvmae.parameters(), lr=c.encoder_lr)
-        warmup = max(1, c.encoder_warmup_updates)
-        self.encoder_sched = torch.optim.lr_scheduler.LambdaLR(
-            self.encoder_opt, lambda u: min(1.0, (u + 1) / warmup)
-        )
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=c.lr)
-        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=c.lr)
-        self.aug = utils.RandomShiftsAug(c.aug_pad)
-        self.use_amp = bool(c.amp) and self.device.type == "cuda"
-        self.num_updates = 0
-        self.encoder_frozen = False  # see freeze_encoder()
 
     # ----------------------------------------------------------------- utils
     def _autocast(self):
@@ -154,6 +194,8 @@ class MVMAEDrQV2Agent:
         return self.aug(x.float().reshape(b, f * v * c, h, w)).reshape(b, f, v, c, h, w)
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.uses_mvmae:
+            return self.encoder(x)  # float32, like DrQ-v2
         with self._autocast():
             z = self.mvmae.encode(x)
         return z.float().flatten(1)
@@ -162,7 +204,7 @@ class MVMAEDrQV2Agent:
         return utils.schedule(self.cfg.stddev_schedule, env_step)
 
     def train(self, training: bool = True) -> None:
-        for m in (self.mvmae, self.actor, self.critic):
+        for m in (self.encoder, self.actor, self.critic):
             m.train(training)
 
     # ------------------------------------------------------------------- act
@@ -182,20 +224,21 @@ class MVMAEDrQV2Agent:
         return proprio.to(self.device).float()
 
     def freeze_encoder(self) -> None:
-        """Stop all further encoder training (MV-MAE and critic gradients alike).
+        """Stop all further encoder training (MV-MAE and critic gradients alike; for the conv baseline, the critic's).
 
         The actor and critic keep learning on the now-fixed features, like policies
         trained on a frozen pretrained encoder.
         """
         self.encoder_frozen = True
-        self.mvmae.requires_grad_(False)
+        self.encoder.requires_grad_(False)
 
     # ---------------------------------------------------------------- update
     def update(self, batch: Batch, env_step: int) -> dict[str, torch.Tensor]:
         c = self.cfg
         metrics: dict[str, torch.Tensor] = {}
         std = self.stddev(env_step)
-        do_mae = c.mae_coef > 0 and not self.encoder_frozen and self.num_updates % max(1, c.mae_every) == 0
+        do_mae = (self.uses_mvmae and c.mae_coef > 0 and not self.encoder_frozen
+                  and self.num_updates % max(1, c.mae_every) == 0)
 
         obs = self._augment(batch.obs)
         next_obs = self._augment(batch.next_obs)
@@ -232,7 +275,7 @@ class MVMAEDrQV2Agent:
         self.critic_opt.zero_grad(set_to_none=True)
         total.backward()
         if not self.encoder_frozen:
-            metrics["grad/encoder"] = nn.utils.clip_grad_norm_(self.mvmae.parameters(), c.max_grad_norm)
+            metrics["grad/encoder"] = nn.utils.clip_grad_norm_(self.encoder.parameters(), c.max_grad_norm)
         metrics["grad/critic"] = nn.utils.clip_grad_norm_(self.critic.parameters(), c.max_grad_norm)
         if not self.encoder_frozen:
             self.encoder_opt.step()
@@ -277,6 +320,8 @@ class MVMAEDrQV2Agent:
 
     def update_mae_only(self, batch: Batch) -> dict[str, torch.Tensor]:
         """MV-MAE pre-training step (no RL losses)."""
+        if not self.uses_mvmae:
+            raise RuntimeError("the conv-encoder baseline has no MV-MAE to pre-train")
         c = self.cfg
         obs = self._augment(batch.obs)
         with self._autocast():
@@ -297,6 +342,7 @@ class MVMAEDrQV2Agent:
         One row per frame: truth L | truth R | visible L | visible R | recon L | recon R.
         Hidden regions are grey in the "visible" panels; the reconstruction panels
         show the model's prediction for hidden regions and the truth elsewhere.
+        MV-MAE only.
         """
         m = self.mvmae
         x = obs[:1].to(self.device)
@@ -318,7 +364,7 @@ class MVMAEDrQV2Agent:
     # ----------------------------------------------------------- checkpoint
     def state_dict(self) -> dict:
         return {
-            "mvmae": self.mvmae.state_dict(),
+            ("mvmae" if self.uses_mvmae else "encoder"): self.encoder.state_dict(),
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
             "critic_target": self.critic_target.state_dict(),
@@ -331,7 +377,10 @@ class MVMAEDrQV2Agent:
         }
 
     def load_state_dict(self, state: dict, load_optimizers: bool = True) -> None:
-        self.mvmae.load_state_dict(state["mvmae"])
+        key = "mvmae" if self.uses_mvmae else "encoder"
+        if key not in state:
+            raise ValueError(f"checkpoint has no '{key}' weights: it was trained with the other agent.encoder setting")
+        self.encoder.load_state_dict(state[key])
         self.actor.load_state_dict(state["actor"])
         self.critic.load_state_dict(state["critic"])
         self.critic_target.load_state_dict(state["critic_target"])
