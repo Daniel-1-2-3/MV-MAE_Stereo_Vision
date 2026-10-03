@@ -134,11 +134,15 @@ class MVMAEConfig:
 @dataclass
 class AgentConfig:
     # Image encoder. "mvmae": the MV-MAE transformer (trained by its reconstruction / reward-prediction
-    # losses plus the critic). "cnn": baseline without MV-MAE -- DrQ-v2's own 4-layer conv encoder on the
-    # raw stereo frames (both views and all stacked frames as input channels), trained by the critic only.
+    # losses plus the critic). Baselines without MV-MAE:
+    #   "cnn":    DrQ-v2's own 4-layer conv encoder on the raw stereo frames (both views and all stacked
+    #             frames as input channels), trained by the critic only.
+    #   "pixels": no learned image encoder at all: the raw frames, shrunk by averaging pixel_downsample x
+    #             pixel_downsample blocks, flattened and fed straight to the actor's and critic's first layer.
     # Everything else (actor, critic, augmentation, demos, robot state, encoder freezing) is identical;
-    # the mvmae.* settings other than frame_stack and the MV-MAE losses/pre-training are unused with "cnn".
+    # the mvmae.* settings other than frame_stack and the MV-MAE losses/pre-training are unused by the baselines.
     encoder: str = "mvmae"
+    pixel_downsample: int = 2  # "pixels": 96 px -> 48 px, 3 frames x 2 views x 3 colours x 48 x 48 = 41,472 numbers
     lr: float = 1e-4  # actor and critic
     encoder_lr: float = 1e-4  # MV-MAE encoder + decoder
     encoder_warmup_updates: int = 2500
@@ -296,8 +300,10 @@ def validate(cfg: Config) -> None:
         raise ValueError("embedding dims must be divisible by the number of heads")
     if not 0.5 <= m.mask_ratio < 1.0:
         raise ValueError("mvmae.mask_ratio must be in [0.5, 1) with two views (one view is always fully hidden)")
-    if a.encoder not in ("mvmae", "cnn"):
-        raise ValueError("agent.encoder must be 'mvmae' or 'cnn'")
+    if a.encoder not in ("mvmae", "cnn", "pixels"):
+        raise ValueError("agent.encoder must be 'mvmae', 'cnn' or 'pixels'")
+    if a.pixel_downsample < 1 or c.height % a.pixel_downsample or c.width % a.pixel_downsample:
+        raise ValueError("agent.pixel_downsample must be >= 1 and divide the image width and height")
     if not 0.0 <= t.demo_ratio < 1.0:
         raise ValueError("train.demo_ratio must be in [0, 1)")
     if a.nstep < 1 or m.frame_stack < 1:

@@ -1,9 +1,10 @@
 """MV-MAE + DrQ-v2 agent.
 
 * Representation: the MV-MAE encoder's unmasked tokens for the whole stereo
-  video clip, flattened (as DrQ-v2 flattens its conv features). Baseline
-  (agent.encoder="cnn"): DrQ-v2's conv encoder on the raw frames instead, trained
-  by the critic only -- the same agent without MV-MAE.
+  video clip, flattened (as DrQ-v2 flattens its conv features). Baselines, the
+  same agent without MV-MAE: agent.encoder="cnn" uses DrQ-v2's conv encoder on the
+  raw frames, trained by the critic only; agent.encoder="pixels" has no learned
+  image encoder at all (shrunk raw pixels straight into the actor and critic).
 * Actor-critic: DrQ-v2 -- twin Q critics with a slow target copy, an actor with
   scheduled Gaussian exploration noise, n-step returns, random-shift image
   augmentation.
@@ -68,6 +69,30 @@ class ConvEncoder(nn.Module):
         b, f, v, c, h, w = x.shape
         x = x.float().reshape(b, f * v * c, h, w) / 255.0 - 0.5
         return self.convnet(x).flatten(1)
+
+
+class PixelEncoder(nn.Module):
+    """Raw-pixel baseline: no learned image encoder.
+
+    The stacked frames of both views, scaled to [-0.5, 0.5] and shrunk by averaging
+    `downsample` x `downsample` pixel blocks, are flattened and passed on as they are. The
+    first learned layer is the actor's / critic's own trunk (Linear -> LayerNorm -> Tanh),
+    exactly as for the other encoders. No parameters.
+    """
+
+    def __init__(self, in_channels: int, img_hw: tuple[int, int], downsample: int):
+        super().__init__()
+        self.downsample = int(downsample)
+        h, w = img_hw
+        self.repr_dim = in_channels * (h // self.downsample) * (w // self.downsample)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, F, V, 3, H, W) uint8 or float in [0, 255] -> (B, repr_dim)."""
+        b, f, v, c, h, w = x.shape
+        x = x.float().reshape(b, f * v * c, h, w) / 255.0 - 0.5
+        if self.downsample > 1:
+            x = F.avg_pool2d(x, self.downsample)
+        return x.flatten(1)
 
 
 def _proprio_trunk(proprio_dim: int, feature_dim: int) -> nn.Module | None:
@@ -136,10 +161,16 @@ class MVMAEDrQV2Agent:
         self.device = torch.device(device)
         self.action_dim = action_dim
         self.frame_stack = mvmae_cfg.frame_stack
-        self.uses_mvmae = getattr(agent_cfg, "encoder", "mvmae") == "mvmae"
-        if not self.uses_mvmae:  # baseline: plain conv encoder on the images
+        self.encoder_kind = getattr(agent_cfg, "encoder", "mvmae")
+        self.uses_mvmae = self.encoder_kind == "mvmae"
+        channels = mvmae_cfg.frame_stack * num_views * 3
+        if self.encoder_kind == "cnn":  # baseline: plain conv encoder on the images
             self.mvmae = None
-            self.encoder = ConvEncoder(mvmae_cfg.frame_stack * num_views * 3, img_hw).to(self.device)
+            self.encoder = ConvEncoder(channels, img_hw).to(self.device)
+            self.repr_dim = self.encoder.repr_dim
+        elif self.encoder_kind == "pixels":  # baseline: raw (shrunk) pixels, no image encoder
+            self.mvmae = None
+            self.encoder = PixelEncoder(channels, img_hw, getattr(agent_cfg, "pixel_downsample", 2)).to(self.device)
             self.repr_dim = self.encoder.repr_dim
         else:
             self._build_mvmae(mvmae_cfg, img_hw, num_views)
@@ -149,7 +180,9 @@ class MVMAEDrQV2Agent:
         self.critic_target = copy.deepcopy(self.critic)
         self.critic_target.requires_grad_(False)
 
-        self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=c.encoder_lr)
+        # (the raw-pixel baseline has no encoder parameters: its optimiser holds an empty placeholder)
+        enc_params = list(self.encoder.parameters()) or [nn.Parameter(torch.zeros(0, device=self.device))]
+        self.encoder_opt = torch.optim.Adam(enc_params, lr=c.encoder_lr)
         # The transformer gets a learning-rate warm-up; DrQ-v2's conv encoder has none.
         warmup = max(1, c.encoder_warmup_updates) if self.uses_mvmae else 1
         self.encoder_sched = torch.optim.lr_scheduler.LambdaLR(
@@ -321,7 +354,7 @@ class MVMAEDrQV2Agent:
     def update_mae_only(self, batch: Batch) -> dict[str, torch.Tensor]:
         """MV-MAE pre-training step (no RL losses)."""
         if not self.uses_mvmae:
-            raise RuntimeError("the conv-encoder baseline has no MV-MAE to pre-train")
+            raise RuntimeError("the baselines have no MV-MAE to pre-train")
         c = self.cfg
         obs = self._augment(batch.obs)
         with self._autocast():

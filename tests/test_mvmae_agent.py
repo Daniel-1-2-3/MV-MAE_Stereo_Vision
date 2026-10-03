@@ -69,9 +69,9 @@ def test_random_shift_keeps_views_aligned():
     assert torch.allclose(y[:, :9], y[:, 9:])  # same shift for every channel of a sample
 
 
-def small_agent(proprio_dim=0, encoder="mvmae"):
+def small_agent(proprio_dim=0, encoder="mvmae", pixel_downsample=2):
     a = AgentConfig(batch_size=8, hidden_dim=64, feature_dim=16, encoder_warmup_updates=2, amp=False, bc_coef=0.4,
-                    encoder=encoder)
+                    encoder=encoder, pixel_downsample=pixel_downsample)
     m = MVMAEConfig(frame_stack=3, patch_size=8, embed_dim=32, encoder_depth=2, encoder_heads=4, decoder_dim=32,
                     decoder_depth=1, decoder_heads=4)
     return MVMAEDrQV2Agent(a, m, (32, 32), 2, 7, "cpu", proprio_dim)
@@ -223,3 +223,35 @@ def test_conv_baseline_agent_learns_from_the_critic_only():
         raise AssertionError("an MV-MAE agent must refuse a baseline checkpoint")
     except ValueError:
         pass
+
+
+def test_raw_pixel_baseline_feeds_shrunk_pixels_straight_to_actor_and_critic():
+    """agent.encoder=pixels: no learned image encoder, the shrunk frames go straight into the actor / critic."""
+    from agent.drqv2 import PixelEncoder
+
+    torch.manual_seed(0)
+    agent = small_agent(proprio_dim=9, encoder="pixels", pixel_downsample=2)
+    assert agent.mvmae is None and isinstance(agent.encoder, PixelEncoder)
+    assert sum(p.numel() for p in agent.encoder.parameters()) == 0  # nothing learned before the actor / critic
+    assert agent.repr_dim == 3 * 2 * 3 * 16 * 16  # frames x views x colours x (32 / 2)^2
+    obs = fake_batch().obs
+    z = agent._encode(obs)
+    # exactly the 2x2-averaged pixels, scaled to [-0.5, 0.5], in (frame, view, colour, row, col) order
+    x = obs.float() / 255.0 - 0.5
+    expected = x.reshape(8, 3, 2, 3, 16, 2, 16, 2).mean(dim=(5, 7)).flatten(1)
+    assert torch.allclose(z, expected, atol=1e-6)
+    p = torch.randn(8, 9)
+    a = agent.act(obs, 0, eval_mode=False, proprio=p)
+    assert a.shape == (8, 7) and a.abs().max() <= 1.0
+    before = [q.detach().clone() for q in agent.critic.trunk.parameters()]
+    for _ in range(2):
+        m = agent.update(fake_batch(proprio_dim=9), env_step=0)
+    assert "mvmae/recon_loss" not in m and torch.isfinite(m["critic/loss"]) and torch.isfinite(m["actor/loss"])
+    assert any(not torch.equal(x, y) for x, y in zip(before, agent.critic.trunk.parameters()))
+    agent.freeze_encoder()  # harmless: nothing to freeze
+    agent.update(fake_batch(proprio_dim=9), env_step=0)
+    other = small_agent(proprio_dim=9, encoder="pixels", pixel_downsample=2)
+    other.load_state_dict(agent.state_dict())
+    assert torch.allclose(agent.act(obs, 0, True, proprio=p), other.act(obs, 0, True, proprio=p))
+    # no shrinking: every pixel
+    assert small_agent(encoder="pixels", pixel_downsample=1).repr_dim == 3 * 2 * 3 * 32 * 32

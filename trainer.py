@@ -228,8 +228,11 @@ class Trainer:
                 config=cfg.to_dict(),
                 dir=str(self.run_dir),
             )
-        enc = (f"MV-MAE tokens per sample: {self.agent.mvmae.L}" if self.agent.uses_mvmae
-               else "BASELINE image encoder: DrQ-v2 conv net on the raw stereo frames (no MV-MAE)")
+        enc = {
+            "mvmae": f"MV-MAE tokens per sample: {self.agent.mvmae.L}" if self.agent.uses_mvmae else "",
+            "cnn": "BASELINE image encoder: DrQ-v2 conv net on the raw stereo frames (no MV-MAE)",
+            "pixels": f"BASELINE: raw stereo pixels (shrunk {cfg.agent.pixel_downsample}x), no image encoder",
+        }[self.agent.encoder_kind]
         print(f"{enc}, representation size: {self.agent.repr_dim}" + (f", robot state: {pd} values" if pd else ", images only"))
         n_params = sum(p.numel() for p in self.agent.encoder.parameters())
         print(f"encoder parameters: {n_params / 1e6:.2f} M | replay rows x envs: {self.replay.R} x {n} on {replay_device}"

@@ -124,3 +124,19 @@ def test_training_loop_with_the_conv_encoder_baseline(tmp_path):
     assert not (run / "reconstructions").exists()  # nothing to reconstruct without MV-MAE
     ckpt = torch.load(run / "ckpt_final.pt", map_location="cpu")
     assert "encoder" in ckpt["agent"] and "mvmae" not in ckpt["agent"] and ckpt["config"]["agent"]["encoder"] == "cnn"
+
+
+def test_training_loop_with_the_raw_pixel_baseline(tmp_path):
+    os.environ["WANDB_SILENT"] = "true"
+    cfg = load_config("configs/needle_tissue.yaml", [
+        "agent.encoder=pixels", "agent.pixel_downsample=2", "env.num_envs=4", "camera.width=32", "camera.height=32",
+        "agent.batch_size=16", "agent.hidden_dim=32", "agent.feature_dim=8", "agent.amp=false",
+        "train.total_env_steps=500", "train.seed_env_steps=100", "train.replay_capacity=400", "train.replay_device=cpu",
+        "train.eval_every_env_steps=400", "train.checkpoint_every_env_steps=500", "agent.proprio=true",
+        f"train.run_dir={tmp_path}", "log.log_every_updates=10", "log.recon_every_updates=20",
+        "log.wandb_mode=offline", "log.run_name=pix",
+    ])
+    trainer = Trainer(cfg, FakeStereoEnv(num_envs=4, size=32), device="cpu")
+    trainer.train()
+    assert (tmp_path / "pix" / "ckpt_final.pt").exists() and trainer.agent.num_updates > 0
+    assert trainer.agent.encoder_kind == "pixels" and trainer.agent.repr_dim == 3 * 2 * 3 * 16 * 16
