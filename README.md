@@ -255,23 +255,16 @@ encoder is frozen (neither MV-MAE nor the critic changes it) and the actor and c
 learning on the fixed features. The moment is printed as `ENCODER FROZEN`, saved as
 `ckpt_frozen.pt`, and logged as `train/encoder_frozen` / `train/encoder_frozen_at`.
 
-### Baselines without MV-MAE (`agent.encoder=cnn` / `pixels`)
+### Baseline without MV-MAE (`agent.encoder=pixels`)
 
-To measure what MV-MAE adds, `agent.encoder=cnn` swaps it for DrQ-v2's own image encoder: 4
-conv layers (32 channels, 3×3, the first with stride 2) on the raw pixels, with every stacked
-frame of both cameras as input channels (3 frames × 2 views × 3 colours = 18), so the left and
-right images are combined from the first layer. It is trained by the critic only, exactly as in
-DrQ-v2, with no reconstruction, reward prediction or pre-training. Everything else is unchanged:
-actor, critic, random-shift augmentation, demonstrations and behaviour cloning, robot state,
-exploration schedule and encoder freezing. Its representation (32 × 41 × 41 = 53,792 numbers) is
-about the same size as MV-MAE's (216 tokens × 256 = 55,296). For a fair comparison, run it with the
-same command, demos and seed as the MV-MAE run, adding only `agent.encoder=cnn`.
-
-`agent.encoder=pixels` is the plainest baseline: **no learned image encoder at all**. The raw
+`agent.encoder=pixels` trains the same agent with **no learned image encoder at all**: the raw
 frames (3 frames × 2 views × 3 colours), scaled to [−0.5, 0.5] and shrunk by averaging
 `agent.pixel_downsample` × `agent.pixel_downsample` pixel blocks (default 2: 96 → 48 px,
-41,472 numbers), are flattened and fed straight into the actor's and critic's first layer, the
-same Linear → LayerNorm → Tanh layer every variant has. Everything else is unchanged.
+41,472 numbers, about the size of MV-MAE's 216 tokens × 256 = 55,296), are flattened and fed
+straight into the actor's and critic's first layer, the same Linear → LayerNorm → Tanh layer the
+MV-MAE agent has. Actor, critic, random-shift augmentation, demonstrations and behaviour cloning,
+robot state and exploration are unchanged, so a run with the same command, demos and seed plus
+`agent.encoder=pixels` shows what MV-MAE adds.
 
 ### Robot state (proprioception)
 

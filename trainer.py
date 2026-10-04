@@ -230,7 +230,6 @@ class Trainer:
             )
         enc = {
             "mvmae": f"MV-MAE tokens per sample: {self.agent.mvmae.L}" if self.agent.uses_mvmae else "",
-            "cnn": "BASELINE image encoder: DrQ-v2 conv net on the raw stereo frames (no MV-MAE)",
             "pixels": f"BASELINE: raw stereo pixels (shrunk {cfg.agent.pixel_downsample}x), no image encoder",
         }[self.agent.encoder_kind]
         print(f"{enc}, representation size: {self.agent.repr_dim}" + (f", robot state: {pd} values" if pd else ", images only"))
@@ -272,7 +271,7 @@ class Trainer:
         metrics_avg = MetricAverager()
         env_steps, episodes, update_credit = 0, 0, 0.0
         next_eval, next_ckpt = t.eval_every_env_steps, t.checkpoint_every_env_steps
-        mae_pretrained = t.mae_pretrain_updates <= 0 or not agent.uses_mvmae  # nothing to pre-train in the baseline
+        mae_pretrained = t.mae_pretrain_updates <= 0 or not agent.uses_mvmae  # nothing to pre-train for "pixels"
         last_log_updates, last_log_time, last_log_steps = 0, time.time(), 0
         last_batch_obs = None
 

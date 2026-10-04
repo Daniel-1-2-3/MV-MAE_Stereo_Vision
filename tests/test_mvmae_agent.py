@@ -179,52 +179,6 @@ def test_agent_with_robot_state():
     assert torch.allclose(agent.act(obs, 0, True, proprio=p), other.act(obs, 0, True, proprio=p))
 
 
-def test_conv_baseline_agent_learns_from_the_critic_only():
-    """agent.encoder=cnn: DrQ-v2's conv encoder on the raw stereo frames, no MV-MAE anywhere."""
-    from agent.drqv2 import ConvEncoder
-
-    torch.manual_seed(0)
-    agent = small_agent(proprio_dim=9, encoder="cnn")
-    assert agent.mvmae is None and isinstance(agent.encoder, ConvEncoder) and not agent.uses_mvmae
-    # 3 frames x 2 views x 3 colours in; 32 px -> 15 (3x3 stride 2) -> 13 -> 11 -> 9, 32 channels
-    assert agent.encoder.convnet[0].in_channels == 18 and agent.repr_dim == 32 * 9 * 9
-    obs, p = fake_batch().obs, torch.randn(8, 9)
-    a = agent.act(obs, 0, eval_mode=False, proprio=p)
-    assert a.shape == (8, 7) and a.abs().max() <= 1.0
-    # the left and right views both reach the encoder
-    obs2 = obs.clone()
-    obs2[:, :, 1] = 0
-    assert not torch.allclose(agent._encode(obs), agent._encode(obs2))
-    before = [q.detach().clone() for q in agent.encoder.parameters()]
-    m = agent.update(fake_batch(proprio_dim=9), env_step=0)
-    assert "mvmae/recon_loss" not in m and torch.isfinite(m["grad/encoder"]) and torch.isfinite(m["critic/loss"])
-    assert any(not torch.equal(x, y) for x, y in zip(before, agent.encoder.parameters())), "the critic must train the encoder"
-    # without the critic's gradient nothing trains it
-    agent.cfg.critic_grad_to_encoder = False
-    before = [q.detach().clone() for q in agent.encoder.parameters()]
-    agent.update(fake_batch(proprio_dim=9), env_step=0)
-    assert all(torch.equal(x, y) for x, y in zip(before, agent.encoder.parameters()))
-    agent.cfg.critic_grad_to_encoder = True
-    try:
-        agent.update_mae_only(fake_batch(proprio_dim=9))
-        raise AssertionError("the baseline has nothing to pre-train")
-    except RuntimeError:
-        pass
-    # freezing and checkpoints work the same way
-    agent.freeze_encoder()
-    frozen = [q.detach().clone() for q in agent.encoder.parameters()]
-    agent.update(fake_batch(proprio_dim=9), env_step=0)
-    assert all(torch.equal(x, y) for x, y in zip(frozen, agent.encoder.parameters()))
-    other = small_agent(proprio_dim=9, encoder="cnn")
-    other.load_state_dict(agent.state_dict())
-    assert other.encoder_frozen and torch.allclose(agent.act(obs, 0, True, proprio=p), other.act(obs, 0, True, proprio=p))
-    try:
-        small_agent(proprio_dim=9).load_state_dict(agent.state_dict())
-        raise AssertionError("an MV-MAE agent must refuse a baseline checkpoint")
-    except ValueError:
-        pass
-
-
 def test_raw_pixel_baseline_feeds_shrunk_pixels_straight_to_actor_and_critic():
     """agent.encoder=pixels: no learned image encoder, the shrunk frames go straight into the actor / critic."""
     from agent.drqv2 import PixelEncoder

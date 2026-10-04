@@ -1,10 +1,9 @@
 """MV-MAE + DrQ-v2 agent.
 
 * Representation: the MV-MAE encoder's unmasked tokens for the whole stereo
-  video clip, flattened (as DrQ-v2 flattens its conv features). Baselines, the
-  same agent without MV-MAE: agent.encoder="cnn" uses DrQ-v2's conv encoder on the
-  raw frames, trained by the critic only; agent.encoder="pixels" has no learned
-  image encoder at all (shrunk raw pixels straight into the actor and critic).
+  video clip, flattened (as DrQ-v2 flattens its conv features). Baseline
+  (agent.encoder="pixels"): the same agent without MV-MAE and without any learned
+  image encoder -- shrunk raw pixels go straight into the actor and critic.
 * Actor-critic: DrQ-v2 -- twin Q critics with a slow target copy, an actor with
   scheduled Gaussian exploration noise, n-step returns, random-shift image
   augmentation.
@@ -42,33 +41,6 @@ class Batch:
     frame_reward_valid: torch.Tensor  # (B, F) bool
     proprio: torch.Tensor  # (B, P) robot state at obs's last frame; P = 0 when proprioception is off
     next_proprio: torch.Tensor  # (B, P) robot state at next_obs's last frame
-
-
-class ConvEncoder(nn.Module):
-    """DrQ-v2's image encoder (Yarats et al. 2021), for the baseline without MV-MAE.
-
-    All stacked frames of both views go in as channels (F * V * 3), so the left/right pair is
-    fused from the first layer: 4 conv layers (32 channels, 3x3, first with stride 2), ReLU,
-    flattened. Pixels are scaled to [-0.5, 0.5] as in DrQ-v2. 96 x 96 input -> 32 x 41 x 41.
-    """
-
-    def __init__(self, in_channels: int, img_hw: tuple[int, int]):
-        super().__init__()
-        self.convnet = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 3, stride=2), nn.ReLU(),
-            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
-            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
-            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
-        )
-        self.apply(utils.weight_init)
-        with torch.no_grad():
-            self.repr_dim = int(self.convnet(torch.zeros(1, in_channels, *img_hw)).numel())
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, F, V, 3, H, W) uint8 or float in [0, 255] -> (B, repr_dim)."""
-        b, f, v, c, h, w = x.shape
-        x = x.float().reshape(b, f * v * c, h, w) / 255.0 - 0.5
-        return self.convnet(x).flatten(1)
 
 
 class PixelEncoder(nn.Module):
@@ -164,11 +136,7 @@ class MVMAEDrQV2Agent:
         self.encoder_kind = getattr(agent_cfg, "encoder", "mvmae")
         self.uses_mvmae = self.encoder_kind == "mvmae"
         channels = mvmae_cfg.frame_stack * num_views * 3
-        if self.encoder_kind == "cnn":  # baseline: plain conv encoder on the images
-            self.mvmae = None
-            self.encoder = ConvEncoder(channels, img_hw).to(self.device)
-            self.repr_dim = self.encoder.repr_dim
-        elif self.encoder_kind == "pixels":  # baseline: raw (shrunk) pixels, no image encoder
+        if self.encoder_kind == "pixels":  # baseline: raw (shrunk) pixels, no image encoder
             self.mvmae = None
             self.encoder = PixelEncoder(channels, img_hw, getattr(agent_cfg, "pixel_downsample", 2)).to(self.device)
             self.repr_dim = self.encoder.repr_dim
@@ -183,8 +151,7 @@ class MVMAEDrQV2Agent:
         # (the raw-pixel baseline has no encoder parameters: its optimiser holds an empty placeholder)
         enc_params = list(self.encoder.parameters()) or [nn.Parameter(torch.zeros(0, device=self.device))]
         self.encoder_opt = torch.optim.Adam(enc_params, lr=c.encoder_lr)
-        # The transformer gets a learning-rate warm-up; DrQ-v2's conv encoder has none.
-        warmup = max(1, c.encoder_warmup_updates) if self.uses_mvmae else 1
+        warmup = max(1, c.encoder_warmup_updates)
         self.encoder_sched = torch.optim.lr_scheduler.LambdaLR(
             self.encoder_opt, lambda u: min(1.0, (u + 1) / warmup)
         )
@@ -228,7 +195,7 @@ class MVMAEDrQV2Agent:
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         if not self.uses_mvmae:
-            return self.encoder(x)  # float32, like DrQ-v2
+            return self.encoder(x)  # raw pixels, float32
         with self._autocast():
             z = self.mvmae.encode(x)
         return z.float().flatten(1)
@@ -257,7 +224,7 @@ class MVMAEDrQV2Agent:
         return proprio.to(self.device).float()
 
     def freeze_encoder(self) -> None:
-        """Stop all further encoder training (MV-MAE and critic gradients alike; for the conv baseline, the critic's).
+        """Stop all further encoder training (MV-MAE and critic gradients alike; nothing to stop for "pixels").
 
         The actor and critic keep learning on the now-fixed features, like policies
         trained on a frozen pretrained encoder.
@@ -354,7 +321,7 @@ class MVMAEDrQV2Agent:
     def update_mae_only(self, batch: Batch) -> dict[str, torch.Tensor]:
         """MV-MAE pre-training step (no RL losses)."""
         if not self.uses_mvmae:
-            raise RuntimeError("the baselines have no MV-MAE to pre-train")
+            raise RuntimeError("the raw-pixel baseline has no MV-MAE to pre-train")
         c = self.cfg
         obs = self._augment(batch.obs)
         with self._autocast():
