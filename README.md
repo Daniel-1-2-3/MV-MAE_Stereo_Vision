@@ -4,7 +4,9 @@ A da Vinci surgical arm (dVRK PSM) learns to pick up a suture needle lying on a
 tissue pad and lift it to a target point, **using only the two images of a stereo
 camera**, the way a real da Vinci sees through its stereo endoscope.
 
-* **Simulator:** NVIDIA Isaac Sim 5.1 + Isaac Lab 2.3.0. The needle-lift task and the
+* **Simulator:** NVIDIA Isaac Sim 6.0.1 + Isaac Lab 3.0 (v3.0.0-beta2.patch1, the release built for
+  Isaac Sim 6.0), PhysX physics and the Isaac RTX renderer. (Branch `isaacsim6`; `main` uses Isaac Sim 5.1 +
+  Isaac Lab 2.3.0, which crashes at start-up on 595-series drivers.) The needle-lift task and the
   robot come from [Isaac for Healthcare](https://github.com/isaac-for-healthcare/i4h-workflows)
   v0.4.0 (originally [ORBIT-Surgical](https://github.com/orbit-surgical/orbit-surgical)).
   This project replaces the table with a tissue pad and adds the stereo camera. The pad
@@ -45,10 +47,11 @@ camera**, the way a real da Vinci sees through its stereo endoscope.
 * An NVIDIA **RTX** GPU (with ray-tracing cores) and at least 24 GB of memory.
   L40S, RTX 6000 Ada, RTX A6000, RTX 4500/PRO 4500 and RTX 4090 work. **A100/H100/H200 do
   not render cameras**, because they have no RT cores.
-* NVIDIA driver 535 or newer (Isaac Lab recommends 580+). Blackwell cards such as the
-  RTX PRO 4500 need 570 or newer.
+* A current NVIDIA production driver; Isaac Lab recommends the latest production branch. This branch
+  is for the 595-series drivers on current RunPod hosts (595.91), where Isaac Sim 5.1 crashes in
+  `librtx.scenedb.plugin.so` (isaac-sim/IsaacSim issue #677). Blackwell cards need 570 or newer.
 * About 40 GB of disk space, and at least 16 CPU cores for a comfortable run.
-* Python 3.11. Isaac Sim 5.x requires exactly this version.
+* Python 3.12. Isaac Sim 6.0 / Isaac Lab 3.0 require exactly this version.
 
 Before installing, check that the GPU can render. Isaac Sim needs Vulkan, not just CUDA:
 
@@ -63,23 +66,40 @@ the pod template's environment variables, or pick a different machine.
 ## Install
 
 ```bash
-git clone https://github.com/Daniel-1-2-3/MV-MAE_Stereo_Vision.git
+git clone --branch isaacsim6 https://github.com/Daniel-1-2-3/MV-MAE_Stereo_Vision.git
 cd MV-MAE_Stereo_Vision
 
-# Python 3.11 environment (conda shown; a python3.11 venv also works)
-conda create -n mvmae python=3.11 -y
+# Python 3.12 environment (conda shown; a python3.12 venv also works)
+conda create -n mvmae python=3.12 -y
 conda activate mvmae
 
 # Isaac Sim asks you to accept the NVIDIA Omniverse license:
 # read https://docs.omniverse.nvidia.com/eula, then
 export OMNI_KIT_ACCEPT_EULA=YES
 
-bash install.sh        # 20-40 min: Isaac Sim 5.1.0, Isaac Lab v2.3.0, PyTorch 2.7.0+cu128, ...
+bash install.sh        # 20-40 min: Isaac Sim 6.0.1, Isaac Lab v3.0.0-beta2.patch1, PyTorch 2.10.0+cu128, ...
 ```
 
 `install.sh` installs into the active environment, clones Isaac Lab into
 `third_party/IsaacLab`, and prints the installed versions. When run as root on apt-based
 images (for example RunPod), it also installs the few system libraries Isaac Sim needs.
+The robot and needle models are the same Isaac for Healthcare files as before (asset catalog v0.3.0),
+downloaded by `surgical_env/assets.py`; the `i4h_asset_helper` package is no longer installed.
+
+Quick check that Isaac Sim starts (prints `ISAAC SIM STARTED OK`):
+
+```bash
+python -c "from isaacsim import SimulationApp; app=SimulationApp({'headless':True,'enable_cameras':True}); print('ISAAC SIM STARTED OK'); app.close()"
+```
+
+**Isaac Sim 6.0 / Isaac Lab 3.0 vs 5.1 / 2.3.** The task, rewards, observations, agent and training are
+unchanged; the code only follows Isaac Lab 3.0's API (quaternions are (x, y, z, w) inside Isaac Lab and are
+converted at the boundary, so the robot state the agent sees is the same; `Camera` with the RTX renderer
+replaces the deprecated `TiledCamera`; asset data is read with `.torch`). The renderer settings (RTX
+real-time mode, FXAA, 96 × 96) are the same, but Isaac Sim 6.0's RTX renderer is a newer version, so images
+can differ slightly in shading and noise from 5.1's; MV-MAE checkpoints trained on 5.1 images are not
+guaranteed to transfer. With `env.tissue_deformable=true`, the soft pad's simulation mesh resolution
+(`env.tissue_hex_resolution`) can no longer be set (Omni Physics 110 chooses it).
 
 ## Step 1: check the stereo setup
 
@@ -350,7 +370,7 @@ shadow-casting light independently of this.
 
 | Symptom | Try |
 |---|---|
-| `tissue/needle_on_surface` or `needle_settled` fails (the needle sinks or jitters) | `env.needle_asset=mesh` (plain-mesh needle), or a finer tissue mesh: `env.tissue_hex_resolution=16` |
+| `tissue/needle_on_surface` or `needle_settled` fails (the needle sinks or jitters) | `env.needle_asset=mesh` (plain-mesh needle) |
 | `tissue/solid_when_pressed` or `no_glitch_when_pressed` fails (rigid pad) | Run `python diagnose_blowups.py --noise 0.3 env.num_envs=8` and look at the saved clips |
 | `tissue/dents_when_pressed` fails (soft pad) | Softer tissue: `env.tissue_youngs_modulus=2e4`. Check the reported tool-tip distance from its target |
 | `projection/*_not_occluded` or `*_in_view` fails | Move the cameras: `camera.azimuth_deg`, `camera.elevation_deg`, `camera.distance` |

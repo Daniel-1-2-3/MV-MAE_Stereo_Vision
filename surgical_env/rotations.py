@@ -1,13 +1,32 @@
 """Small quaternion / frame helpers in pure PyTorch.
 
-Conventions match Isaac Lab (``isaaclab.utils.math``): quaternions are (w, x, y, z).
+Conventions match Isaac Lab 2.x (``isaaclab.utils.math``): quaternions are (w, x, y, z).
+Isaac Lab 3.0 (Isaac Sim 6.0) stores and expects (x, y, z, w) everywhere (asset data, configs,
+spawners, its math utilities), so values are converted with ``wxyz_from_xyzw`` / ``xyzw_from_wxyz``
+exactly where they cross into or out of Isaac Lab; everything in this project stays (w, x, y, z).
 Kept free of Isaac imports so the scripted controller and the stereo geometry
 can be unit-tested without the simulator.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
+
+
+def wxyz_from_xyzw(q):
+    """Isaac Lab 3.0 quaternion (x, y, z, w) -> (w, x, y, z). Tensors (..., 4) or a sequence of 4 numbers."""
+    if isinstance(q, torch.Tensor):
+        return torch.cat([q[..., 3:], q[..., :3]], dim=-1)
+    return (q[3], q[0], q[1], q[2])
+
+
+def xyzw_from_wxyz(q: torch.Tensor | Sequence[float]):
+    """(w, x, y, z) -> Isaac Lab 3.0 quaternion (x, y, z, w). Tensors (..., 4) or a sequence of 4 numbers."""
+    if isinstance(q, torch.Tensor):
+        return torch.cat([q[..., 1:], q[..., :1]], dim=-1)
+    return (q[1], q[2], q[3], q[0])
 
 
 def quat_conjugate(q: torch.Tensor) -> torch.Tensor:

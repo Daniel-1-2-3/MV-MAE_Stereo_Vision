@@ -14,6 +14,14 @@
 #   * joint speed caps that are actually applied (see EnvConfig.arm_joint_vel_limit) and
 #     `blowup_*` time-outs that end an episode if the simulation glitches.
 # Reward terms, weights, the other terminations and the curriculum are the original ones.
+#
+# Isaac Lab 3.0 / Isaac Sim 6.0 port (same scene, physics and rendering as on 2.3 / 5.1):
+#   * quaternions in Isaac Lab configs are (x, y, z, w) now; this project keeps (w, x, y, z) and
+#     converts with rotations.xyzw_from_wxyz where a quaternion enters an Isaac Lab config;
+#   * TiledCamera is deprecated: Camera now renders all envs as one tiled image itself. The RTX
+#     renderer is selected explicitly (IsaacRtxRendererCfg), which also turns on the post-reset render;
+#   * PhysX-specific schema / material configs moved to isaaclab_physx (same fields);
+#   * rerender_on_reset became num_rerenders_on_reset (1 = the old True).
 
 """Isaac Lab configuration for needle lifting from a tissue pad with a stereo camera rig."""
 
@@ -35,14 +43,21 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import FrameTransformerCfg, TiledCameraCfg
-from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
+from isaaclab.sensors import CameraCfg, FrameTransformerCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
+from isaaclab_physx.renderers import IsaacRtxRendererCfg
+from isaaclab_physx.sim.schemas import (
+    PhysxCollisionPropertiesCfg,
+    PhysxDeformableBodyPropertiesCfg,
+    PhysxRigidBodyPropertiesCfg,
+)
+from isaaclab_physx.sim.spawners.materials import PhysxDeformableBodyMaterialCfg, PhysxRigidBodyMaterialCfg
 
 from . import mdp
 from .assets import ground_plane_usd, robotic_surgery_assets
 from .psm import PSM_BASE_POS, PSM_HIGH_PD_CFG
+from .rotations import xyzw_from_wxyz
 from .stereo import StereoRig, make_stereo_rig
 
 PSM_ARM_JOINTS = [
@@ -72,7 +87,7 @@ class NeedleTissueSceneCfg(InteractiveSceneCfg):
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -0.01)),
         spawn=sim_utils.CuboidCfg(
             size=(0.40, 0.40, 0.02),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
+            collision_props=PhysxCollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.30, 0.32, 0.35), roughness=0.8),
         ),
     )
@@ -87,8 +102,8 @@ class NeedleTissueSceneCfg(InteractiveSceneCfg):
     )
     # Optional directional light that casts shadows (env.shadow_light), set in make_env_cfg.
     shadow_light: AssetBaseCfg | None = None
-    stereo_left: TiledCameraCfg = MISSING
-    stereo_right: TiledCameraCfg = MISSING
+    stereo_left: CameraCfg = MISSING
+    stereo_right: CameraCfg = MISSING
 
 
 @configclass
@@ -217,13 +232,14 @@ def _soft_tissue_cfg(env, visual) -> DeformableObjectCfg:
         prim_path="{ENV_REGEX_NS}/Tissue",
         spawn=sim_utils.MeshCuboidCfg(
             size=tuple(env.tissue_size),
-            deformable_props=sim_utils.DeformableBodyPropertiesCfg(
+            # Isaac Lab 3.0 / Omni Physics 110 volume deformable. The simulation mesh resolution
+            # (env.tissue_hex_resolution on 2.3) is no longer settable: PhysX picks it itself.
+            deformable_props=PhysxDeformableBodyPropertiesCfg(
                 rest_offset=0.0,
                 contact_offset=0.001,
-                simulation_hexahedral_resolution=env.tissue_hex_resolution,
             ),
             visual_material=visual,
-            physics_material=sim_utils.DeformableBodyMaterialCfg(
+            physics_material=PhysxDeformableBodyMaterialCfg(
                 youngs_modulus=env.tissue_youngs_modulus,
                 poissons_ratio=env.tissue_poissons_ratio,
                 dynamic_friction=env.tissue_friction,
@@ -248,10 +264,12 @@ def _down_light_quat(tilt_deg: float, azimuth_deg: float) -> tuple[float, float,
     return (math.cos(t / 2), axis[0] * s, axis[1] * s, 0.0)
 
 
-def _camera_cfg(prim_name: str, pos, rig: StereoRig, cam, with_depth: bool, track_pose: bool) -> TiledCameraCfg:
-    return TiledCameraCfg(
+def _camera_cfg(prim_name: str, pos, rig: StereoRig, cam, with_depth: bool, track_pose: bool) -> CameraCfg:
+    return CameraCfg(
         prim_path="{ENV_REGEX_NS}/" + prim_name,
-        offset=TiledCameraCfg.OffsetCfg(pos=pos, rot=rig.quat_ros, convention="ros"),
+        offset=CameraCfg.OffsetCfg(pos=pos, rot=xyzw_from_wxyz(rig.quat_ros), convention="ros"),
+        # the RTX renderer (as TiledCamera used on 2.3): all envs rendered into one tiled image
+        renderer_cfg=IsaacRtxRendererCfg(),
         data_types=["rgb", "distance_to_image_plane"] if with_depth else ["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=cam.focal_length,
@@ -289,9 +307,9 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
             init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.5 * sz)),
             spawn=sim_utils.CuboidCfg(
                 size=(sx, sy, sz),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
+                collision_props=PhysxCollisionPropertiesCfg(),
                 visual_material=tissue_visual,
-                physics_material=sim_utils.RigidBodyMaterialCfg(
+                physics_material=PhysxRigidBodyMaterialCfg(
                     static_friction=env.tissue_friction, dynamic_friction=env.tissue_friction
                 ),
             ),
@@ -300,11 +318,12 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     needle_usd = robotic_surgery_assets.Needle_SDF if env.needle_asset == "sdf" else robotic_surgery_assets.Needle
     cfg.scene.object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, tissue_top + env.needle_spawn_height), rot=(1, 0, 0, 0)),
+        # identity orientation, (x, y, z, w) in Isaac Lab 3.0 (was (1, 0, 0, 0) as (w, x, y, z))
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, tissue_top + env.needle_spawn_height), rot=(0, 0, 0, 1)),
         spawn=UsdFileCfg(
             usd_path=needle_usd,
             scale=(0.4, 0.4, 0.4),
-            rigid_props=RigidBodyPropertiesCfg(
+            rigid_props=PhysxRigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
                 solver_velocity_iteration_count=8,
                 max_angular_velocity=200,
@@ -321,7 +340,8 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     if env.shadow_light:
         cfg.scene.shadow_light = AssetBaseCfg(
             prim_path="/World/shadow_light",
-            init_state=AssetBaseCfg.InitialStateCfg(rot=_down_light_quat(env.shadow_light_tilt_deg, env.shadow_light_azimuth_deg)),
+            init_state=AssetBaseCfg.InitialStateCfg(
+                rot=xyzw_from_wxyz(_down_light_quat(env.shadow_light_tilt_deg, env.shadow_light_azimuth_deg))),
             spawn=sim_utils.DistantLightCfg(intensity=env.shadow_light_intensity, angle=0.5),
         )
     look_at = (env.goal_xy[0], env.goal_xy[1], tissue_top + cam.look_at_height)
@@ -400,7 +420,7 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     cfg.sim.render.antialiasing_mode = cam.antialiasing
     cfg.episode_length_s = env.episode_length_s
     # Re-render after resets so the first image of a new episode shows the reset scene.
-    cfg.rerender_on_reset = True
+    cfg.num_rerenders_on_reset = 1  # Isaac Lab 3.0 name of rerender_on_reset = True
     cfg.viewer.eye = (0.2, 0.2, 0.1)
     cfg.viewer.lookat = (0.0, 0.0, 0.04)
     return cfg, rig

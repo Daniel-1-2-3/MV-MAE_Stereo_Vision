@@ -10,6 +10,9 @@ Import only after the simulator has been launched (see sim_app.py).
   shadow-casting distant light switched on. Each saves the exact USD values it changes (the same xformOp attributes
   Isaac Sim's XFormPrim.set_local_poses writes) and returns a function that writes them back and checks them, or
   raises RuntimeError with the reason when it cannot do so.
+
+Isaac Lab 3.0: its spawners take orientations as (x, y, z, w) (converted from this project's (w, x, y, z) with
+``xyzw_from_wxyz``); USD's own Gf quaternions are unaffected (real part first, as before).
 """
 
 from __future__ import annotations
@@ -21,13 +24,14 @@ import numpy as np
 
 import vis
 
+from .rotations import xyzw_from_wxyz
 from .stereo import make_stereo_rig, quat_ros_to_opengl
 
 
 def _stage():
-    import omni.usd
+    import isaaclab.sim as sim_utils
 
-    return omni.usd.get_context().get_stage()
+    return sim_utils.get_current_stage()
 
 
 def spawn_view_camera(prim_path: str, pos_local, quat_ros, width: int, height: int, focal_length: float,
@@ -39,7 +43,7 @@ def spawn_view_camera(prim_path: str, pos_local, quat_ros, width: int, height: i
         focal_length=focal_length, focus_distance=400.0, horizontal_aperture=horizontal_aperture,
         vertical_aperture=horizontal_aperture * height / width, clipping_range=tuple(clipping), lock_camera=False)
     cfg.func(prim_path, cfg, translation=tuple(float(v) for v in pos_local),
-             orientation=tuple(float(v) for v in quat_ros_to_opengl(quat_ros)))
+             orientation=tuple(float(v) for v in xyzw_from_wxyz(quat_ros_to_opengl(quat_ros))))
 
 
 class HiResRecorder:
@@ -211,7 +215,8 @@ def add_shadow_light(env_cfg, prim_path: str = "/World/robust_shadow_light"):
 
     stage = _stage()
     cfg = sim_utils.DistantLightCfg(intensity=env_cfg.shadow_light_intensity, angle=0.5)
-    cfg.func(prim_path, cfg, orientation=_down_light_quat(env_cfg.shadow_light_tilt_deg, env_cfg.shadow_light_azimuth_deg))
+    cfg.func(prim_path, cfg,
+             orientation=xyzw_from_wxyz(_down_light_quat(env_cfg.shadow_light_tilt_deg, env_cfg.shadow_light_azimuth_deg)))
 
     def restore():
         stage.RemovePrim(prim_path)

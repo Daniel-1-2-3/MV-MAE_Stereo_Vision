@@ -48,6 +48,7 @@ from agent.replay import FrameStacker  # noqa: E402
 from config import load_config  # noqa: E402
 from surgical_env import mdp  # noqa: E402
 from surgical_env.env import make_env  # noqa: E402
+from surgical_env.rotations import wxyz_from_xyzw  # noqa: E402
 from trainer import build_agent, robot_state  # noqa: E402
 
 BUCKETS = ("success", "never_lifted", "lifted_dropped", "missed_goal", "glitch_cut")
@@ -90,11 +91,11 @@ def run_round(env, agent, env_step: int, settle_steps: int) -> tuple[list[dict],
 
     for t in range(max_steps + 1):
         if t == settle_steps:  # the needle has landed on the pad: record how it lies
-            local = needle.data.root_pos_w - scene.env_origins
-            yaw, tilt = yaw_tilt_deg(needle.data.root_quat_w)
+            local = needle.data.root_pos_w.torch - scene.env_origins
+            yaw, tilt = yaw_tilt_deg(wxyz_from_xyzw(needle.data.root_quat_w.torch))  # Isaac Lab 3.0 quats are (x, y, z, w)
             rec["x_mm"], rec["y_mm"] = local[:, 0] * 1000, local[:, 1] * 1000
             rec["yaw_deg"], rec["tilt_deg"] = yaw, tilt
-            rec["settle_height_mm"] = (needle.data.root_pos_w[:, 2] - top) * 1000
+            rec["settle_height_mm"] = (needle.data.root_pos_w.torch[:, 2] - top) * 1000
         action = agent.act(stack, env_step, eval_mode=True, proprio=robot_state(env, agent))
         obs, reward, term, trunc, info = env.step(action)
         done = term | trunc
@@ -105,7 +106,7 @@ def run_round(env, agent, env_step: int, settle_steps: int) -> tuple[list[dict],
         success_any |= info["success_now"] & live
         goal_distance = mdp.needle_goal_distance(env.env)
         min_goal = torch.where(live, torch.minimum(min_goal, goal_distance), min_goal)
-        height = (needle.data.root_pos_w[:, 2] - top) * 1000
+        height = (needle.data.root_pos_w.torch[:, 2] - top) * 1000
         max_height = torch.where(live, torch.maximum(max_height, height), max_height)
         length += alive.long()
         newly = done & alive

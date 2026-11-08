@@ -56,7 +56,7 @@ import vis  # noqa: E402
 from config import load_config  # noqa: E402
 from surgical_env.env import make_env  # noqa: E402
 from surgical_env.psm import PSM_BASE_POS  # noqa: E402
-from surgical_env.rotations import matrix_from_quat  # noqa: E402
+from surgical_env.rotations import matrix_from_quat, wxyz_from_xyzw  # noqa: E402
 from surgical_env.scripted import GRIPPER_CLOSE, GRIPPER_OPEN, relative_action  # noqa: E402
 from surgical_env.stereo import project_points  # noqa: E402
 
@@ -112,7 +112,7 @@ def main() -> int:
     needle_pos_hist = []
     for _ in range(args.settle_steps):
         obs = step(hold)
-        needle_pos_hist.append(needle.data.root_pos_w.clone())
+        needle_pos_hist.append(needle.data.root_pos_w.torch.clone())
 
     # ------------------------------------------------------------------ images
     ok_shape = obs.shape == (n, 2, 3, h, w) and obs.dtype == torch.uint8
@@ -129,9 +129,10 @@ def main() -> int:
           f"mean |L-R| per env {f(lr_diff)} (want between 0.2 and 40: similar but not identical)", lr_diff=f(lr_diff))
 
     # ------------------------------------------------------------------ rig
-    pl, pr = env.left.data.pos_w, env.right.data.pos_w
-    ql, qr = env.left.data.quat_w_ros, env.right.data.quat_w_ros
-    K = env.left.data.intrinsic_matrices
+    # (Isaac Lab 3.0: .torch views of the camera data; its quaternions are (x, y, z, w), ours (w, x, y, z))
+    pl, pr = env.left.data.pos_w.torch, env.right.data.pos_w.torch
+    ql, qr = wxyz_from_xyzw(env.left.data.quat_w_ros.torch), wxyz_from_xyzw(env.right.data.quat_w_ros.torch)
+    K = env.left.data.intrinsic_matrices.torch
     baseline_m = torch.linalg.norm(pr - pl, dim=-1)
     check("rig/baseline", bool(((baseline_m - rig.baseline).abs() < 0.05 * rig.baseline).all()),
           f"measured {f(baseline_m * 1000)} mm, designed {rig.baseline * 1000:.2f} mm", baseline_m=f(baseline_m))
@@ -154,11 +155,11 @@ def main() -> int:
     check("rig/intrinsics", bool((fx_err < 1e-3).all()), f"fx {f(K[:, 0, 0])} px, designed {rig.fx:.3f} px")
 
     # ------------------------------------------------------------------ projection
-    needle_w = needle.data.root_pos_w
-    tip_w = ee_frame.data.target_pos_w[:, 0, :]
+    needle_w = needle.data.root_pos_w.torch
+    tip_w = ee_frame.data.target_pos_w.torch[:, 0, :]
     pts = torch.stack([needle_w, tip_w], dim=1)  # (n, 2, 3)
     uv_l, z_l = project_points(pts, pl, ql, K)
-    uv_r, z_r = project_points(pts, pr, qr, env.right.data.intrinsic_matrices)
+    uv_r, z_r = project_points(pts, pr, qr, env.right.data.intrinsic_matrices.torch)
     depth = env.depths()  # (n, 2, h, w)
     for j, name in enumerate(("needle", "tool_tip")):
         inside = ((uv_l[:, j, 0] >= 0) & (uv_l[:, j, 0] < w) & (uv_l[:, j, 1] >= 0) & (uv_l[:, j, 1] < h)
@@ -210,8 +211,8 @@ def main() -> int:
 
     # ------------------------------------------------------------------ needle on tissue
     if soft:
-        nodes = tissue.data.nodal_pos_w  # (n, V, 3)
-        rest = tissue.data.default_nodal_state_w[..., :3]
+        nodes = tissue.data.nodal_pos_w.torch  # (n, V, 3)
+        rest = tissue.data.default_nodal_state_w.torch[..., :3]
         top_now = nodes[..., 2].max(dim=1).values
     else:
         top_now = origins[:, 2] + tissue_top_local
@@ -226,7 +227,7 @@ def main() -> int:
     hist = torch.stack(needle_pos_hist[-10:], dim=0)  # (10, n, 3)
     drift = torch.linalg.norm(hist - hist[-1:], dim=-1).max(dim=0).values
     z_drift = hist[..., 2].max(0).values - hist[..., 2].min(0).values
-    speed = torch.linalg.norm(needle.data.root_lin_vel_w, dim=-1)
+    speed = torch.linalg.norm(needle.data.root_lin_vel_w.torch, dim=-1)
     check("tissue/needle_settled", bool((drift < 1e-3).all()),
           f"needle movement over the last 10 steps {f(drift * 1000)} mm (want < 1), height change {f(z_drift * 1000)} mm, "
           f"instantaneous speed {f(speed)} m/s", drift_m=f(drift))
@@ -266,7 +267,7 @@ def main() -> int:
         glitch = terminated_any & ~ended_before_press
         check("tissue/no_glitch_when_pressed", not bool(glitch.any()),
               "no episode ended while the tool pressed on the pad (a physics glitch would end it)")
-    press_nodes = tissue.data.nodal_pos_w if soft else None
+    press_nodes = tissue.data.nodal_pos_w.torch if soft else None
     rest_local = rest - origins[:, None, :] if soft else None
     if soft:
         near = (torch.linalg.norm(rest_local[..., :2] - press_xy[:, None, :], dim=-1) < 0.012) & \

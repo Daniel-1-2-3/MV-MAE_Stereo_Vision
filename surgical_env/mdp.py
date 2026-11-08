@@ -6,6 +6,10 @@
 # Reward / observation functions from Isaac for Healthcare v0.4.0
 # (robotic.surgery.tasks/.../surgical/lift/mdp), unchanged. `pin_tissue_bottom`,
 # `needle_success` and the `blowup_*` terms are additions for the soft-tissue version of the task.
+# Isaac Lab 3.0 port: asset / sensor `.data.*` fields are ProxyArrays now, read as tensors with `.torch`
+# (as Isaac Lab 3.0's own lift task does); the deprecated `root_state_w` is replaced by the same values
+# (`root_pos_w` / `root_quat_w` = its pose part, `root_link_pose_w` + `root_com_vel_w` = all of it);
+# quaternions from Isaac Lab are (x, y, z, w) and only go into Isaac Lab's own math (same convention).
 
 """MDP terms for needle lifting on soft tissue."""
 
@@ -33,9 +37,9 @@ def object_position_in_robot_root_frame(
     """The position of the object in the robot's root frame."""
     robot: RigidObject = env.scene[robot_cfg.name]
     object: RigidObject = env.scene[object_cfg.name]
-    object_pos_w = object.data.root_pos_w[:, :3]
+    object_pos_w = object.data.root_pos_w.torch[:, :3]
     object_pos_b, _ = subtract_frame_transforms(
-        robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], object_pos_w
+        robot.data.root_pos_w.torch, robot.data.root_quat_w.torch, object_pos_w
     )
     return object_pos_b
 
@@ -46,7 +50,7 @@ def object_is_lifted(
 ) -> torch.Tensor:
     """Reward the agent for lifting the object above the minimal height."""
     object: RigidObject = env.scene[object_cfg.name]
-    return torch.where(object.data.root_pos_w[:, 2] > minimal_height, 1.0, 0.0)
+    return torch.where(object.data.root_pos_w.torch[:, 2] > minimal_height, 1.0, 0.0)
 
 
 def object_ee_distance(
@@ -58,8 +62,8 @@ def object_ee_distance(
     """Reward the agent for reaching the object using tanh-kernel."""
     object: RigidObject = env.scene[object_cfg.name]
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    cube_pos_w = object.data.root_pos_w
-    ee_w = ee_frame.data.target_pos_w[..., 0, :]
+    cube_pos_w = object.data.root_pos_w.torch
+    ee_w = ee_frame.data.target_pos_w.torch[..., 0, :]
     object_ee_distance = torch.norm(cube_pos_w - ee_w, dim=1)
     return 1 - torch.tanh(object_ee_distance / std)
 
@@ -77,9 +81,9 @@ def object_goal_distance(
     object: RigidObject = env.scene[object_cfg.name]
     command = env.command_manager.get_command(command_name)
     des_pos_b = command[:, :3]
-    des_pos_w, _ = combine_frame_transforms(robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], des_pos_b)
-    distance = torch.norm(des_pos_w - object.data.root_pos_w[:, :3], dim=1)
-    return (object.data.root_pos_w[:, 2] > minimal_height) * (1 - torch.tanh(distance / std))
+    des_pos_w, _ = combine_frame_transforms(robot.data.root_pos_w.torch, robot.data.root_quat_w.torch, des_pos_b)
+    distance = torch.norm(des_pos_w - object.data.root_pos_w.torch[:, :3], dim=1)
+    return (object.data.root_pos_w.torch[:, 2] > minimal_height) * (1 - torch.tanh(distance / std))
 
 
 # ----------------------------------------------------------------------------- additions
@@ -93,14 +97,14 @@ def needle_goal_distance(
     robot: RigidObject = env.scene[robot_cfg.name]
     object: RigidObject = env.scene[object_cfg.name]
     command = env.command_manager.get_command(command_name)
-    des_pos_w, _ = combine_frame_transforms(robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], command[:, :3])
-    return torch.norm(des_pos_w - object.data.root_pos_w[:, :3], dim=1)
+    des_pos_w, _ = combine_frame_transforms(robot.data.root_pos_w.torch, robot.data.root_quat_w.torch, command[:, :3])
+    return torch.norm(des_pos_w - object.data.root_pos_w.torch[:, :3], dim=1)
 
 
 def needle_success(env: ManagerBasedRLEnv, minimal_height: float, threshold: float) -> torch.Tensor:
     """Needle lifted above `minimal_height` (world z) and within `threshold` metres of the goal, (num_envs,) bool."""
     object: RigidObject = env.scene["object"]
-    lifted = object.data.root_pos_w[:, 2] > minimal_height
+    lifted = object.data.root_pos_w.torch[:, 2] > minimal_height
     return lifted & (needle_goal_distance(env) < threshold)
 
 
@@ -112,8 +116,9 @@ def blowup_nonfinite(
     """Termination: NaN/inf in the robot or needle state, (num_envs,) bool."""
     robot = env.scene[robot_cfg.name]
     object: RigidObject = env.scene[object_cfg.name]
-    ok = torch.isfinite(robot.data.joint_pos).all(dim=1) & torch.isfinite(robot.data.joint_vel).all(dim=1)
-    ok &= torch.isfinite(object.data.root_state_w).all(dim=1)
+    ok = torch.isfinite(robot.data.joint_pos.torch).all(dim=1) & torch.isfinite(robot.data.joint_vel.torch).all(dim=1)
+    ok &= torch.isfinite(object.data.root_link_pose_w.torch).all(dim=1)  # with the next line: the old root_state_w
+    ok &= torch.isfinite(object.data.root_com_vel_w.torch).all(dim=1)
     return ~ok
 
 
@@ -121,7 +126,7 @@ def blowup_joint_speed(env: ManagerBasedRLEnv, max_joint_vel: float, robot_cfg: 
     """Termination: a robot joint (those in `robot_cfg.joint_names`) moves faster than any real
     motion could (rad/s or m/s), (num_envs,) bool."""
     robot = env.scene[robot_cfg.name]
-    return robot.data.joint_vel[:, robot_cfg.joint_ids].abs().amax(dim=1) > max_joint_vel
+    return robot.data.joint_vel.torch[:, robot_cfg.joint_ids].abs().amax(dim=1) > max_joint_vel
 
 
 def blowup_needle_speed(
@@ -129,7 +134,7 @@ def blowup_needle_speed(
 ) -> torch.Tensor:
     """Termination: the needle moves faster than `max_object_speed` m/s (e.g. squeezed out of a contact), (num_envs,) bool."""
     object: RigidObject = env.scene[object_cfg.name]
-    return torch.linalg.vector_norm(object.data.root_lin_vel_w, dim=1) > max_object_speed
+    return torch.linalg.vector_norm(object.data.root_lin_vel_w.torch, dim=1) > max_object_speed
 
 
 def pin_tissue_bottom(
@@ -147,10 +152,10 @@ def pin_tissue_bottom(
     tissue: DeformableObject = env.scene[asset_cfg.name]
     if env_ids is None or isinstance(env_ids, slice):
         env_ids = torch.arange(env.num_envs, device=env.device)
-    rest = tissue.data.default_nodal_state_w[env_ids, :, :3]
-    targets = tissue.data.nodal_kinematic_target[env_ids].clone()
+    rest = tissue.data.default_nodal_state_w.torch[env_ids, :, :3]
+    targets = tissue.data.nodal_kinematic_target.torch[env_ids].clone()
     targets[..., :3] = rest
     z = rest[..., 2]
     bottom = z <= z.min(dim=1, keepdim=True).values + height_tolerance
     targets[..., 3] = torch.where(bottom, 0.0, 1.0)
-    tissue.write_nodal_kinematic_target_to_sim(targets, env_ids=env_ids)
+    tissue.write_nodal_kinematic_target_to_sim_index(targets, env_ids=env_ids)  # Isaac Lab 3.0 name

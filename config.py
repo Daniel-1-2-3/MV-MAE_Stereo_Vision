@@ -40,7 +40,7 @@ class EnvConfig:
     tissue_youngs_modulus: float = 5.0e4  # Pa
     tissue_poissons_ratio: float = 0.45
     tissue_friction: float = 1.0
-    tissue_hex_resolution: int = 12  # simulation voxels along the longest side
+    tissue_hex_resolution: int = 12  # simulation voxels along the longest side (Isaac Lab 2.3 only; ignored on 3.0)
     tissue_color: tuple[float, float, float] = (0.78, 0.38, 0.38)
     pin_tissue_bottom: bool = True
 

@@ -55,12 +55,12 @@ def steps_per_s(env, steps: int, warmup: int, capture=None) -> float:
 
 
 def main() -> None:
-    import omni.usd
+    import isaaclab.sim as sim_utils
 
     cfg = load_config(args.config, overrides)
     out = Path(args.out)
     env = make_env(cfg, device=args.device, hires_camera=False)
-    stage = omni.usd.get_context().get_stage()
+    stage = sim_utils.get_current_stage()
     a, b = [], []
     for r in range(args.repeats):
         a.append(steps_per_s(env, args.steps, args.warmup))

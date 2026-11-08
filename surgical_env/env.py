@@ -1,6 +1,11 @@
 """Vectorised stereo-image environment around the Isaac Lab needle-on-tissue task.
 
 Import this module only after the simulator has been launched (see sim_app.py).
+
+Isaac Lab 3.0: asset / sensor ``.data.*`` fields and camera outputs are ProxyArrays, read as
+tensors with ``.torch``. Isaac Lab quaternions are (x, y, z, w); they are converted to this
+project's (w, x, y, z) with ``wxyz_from_xyzw`` as soon as they are read, so every value this
+wrapper returns (robot state, poses for the scripted controller) is the same as on Isaac Lab 2.3.
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 
 from . import mdp
 from .env_cfg import EE_BODY, NeedleTissueEnvCfg, make_env_cfg
-from .rotations import subtract_frame_transforms
+from .rotations import subtract_frame_transforms, wxyz_from_xyzw
 from .stereo import StereoRig
 
 
@@ -55,23 +60,23 @@ class NeedleTissueRLEnv(ManagerBasedRLEnv):
             return
         robot, needle = self.scene["robot"], self.scene["object"]
         top = self.cfg.tissue_top_w
-        jv = robot.data.joint_vel[ids].abs()
-        tip = self.scene["ee_frame"].data.target_pos_w[ids, 0, :]
-        npos = needle.data.root_pos_w[ids]
+        jv = robot.data.joint_vel.torch[ids].abs()
+        tip = self.scene["ee_frame"].data.target_pos_w.torch[ids, 0, :]
+        npos = needle.data.root_pos_w.torch[ids]
         if self.cfg.tissue_deformable:
             tissue = self.scene["tissue"]
-            dent = (tissue.data.default_nodal_state_w[ids, :, 2] - tissue.data.nodal_pos_w[ids, :, 2]).amax(dim=1)
+            dent = (tissue.data.default_nodal_state_w.torch[ids, :, 2] - tissue.data.nodal_pos_w.torch[ids, :, 2]).amax(dim=1)
         else:
             dent = torch.zeros(ids.numel(), device=self.device)  # rigid pad cannot dent
         g = robot.find_joints(["psm_tool_gripper1_joint", "psm_tool_gripper2_joint"])[0]
-        opening = robot.data.joint_pos[ids][:, g[1]] - robot.data.joint_pos[ids][:, g[0]]
+        opening = robot.data.joint_pos.torch[ids][:, g[1]] - robot.data.joint_pos.torch[ids][:, g[0]]
         action = self.action_manager.action[ids]
         rows = {
             "episode_step": self.episode_length_buf[ids].float(),
             "max_joint_speed": jv.amax(dim=1),
             "fastest_joint": jv.argmax(dim=1).float(),
-            "needle_speed": torch.linalg.vector_norm(needle.data.root_lin_vel_w[ids], dim=1),
-            "needle_ang_speed": torch.linalg.vector_norm(needle.data.root_ang_vel_w[ids], dim=1),
+            "needle_speed": torch.linalg.vector_norm(needle.data.root_lin_vel_w.torch[ids], dim=1),
+            "needle_ang_speed": torch.linalg.vector_norm(needle.data.root_ang_vel_w.torch[ids], dim=1),
             "needle_height_mm": (npos[:, 2] - top) * 1000.0,
             "tip_height_mm": (tip[:, 2] - top) * 1000.0,
             "tip_to_needle_mm": torch.linalg.vector_norm(tip - npos, dim=1) * 1000.0,
@@ -124,7 +129,7 @@ class StereoNeedleEnv:
         decimetres), tool-tip orientation quaternion (w >= 0) and the two jaw angles (x2). No needle state."""
         ee_pos, ee_quat, *_ = self.poses_in_base()
         quat = torch.where(ee_quat[:, :1] < 0, -ee_quat, ee_quat)
-        jaws = self.env.scene["robot"].data.joint_pos[:, self._jaw_ids]
+        jaws = self.env.scene["robot"].data.joint_pos.torch[:, self._jaw_ids]
         return torch.cat([ee_pos * 10.0, quat, jaws * 2.0], dim=-1).float()
 
     @property
@@ -133,14 +138,14 @@ class StereoNeedleEnv:
         return (2, 3, h, w)
 
     def images(self) -> torch.Tensor:
-        left = self.left.data.output["rgb"]  # (N, H, W, 3) uint8, a view into the RGBA buffer
-        right = self.right.data.output["rgb"]
+        left = self.left.data.output["rgb"].torch  # (N, H, W, 3) uint8, a view into the RGBA buffer
+        right = self.right.data.output["rgb"].torch
         return torch.stack([left, right], dim=1).permute(0, 1, 4, 2, 3).contiguous()
 
     def depths(self) -> torch.Tensor:
         """(N, 2, H, W) float metres; only available when the env was built with depth."""
-        left = self.left.data.output["distance_to_image_plane"][..., 0]
-        right = self.right.data.output["distance_to_image_plane"][..., 0]
+        left = self.left.data.output["distance_to_image_plane"].torch[..., 0]
+        right = self.right.data.output["distance_to_image_plane"].torch[..., 0]
         return torch.stack([left, right], dim=1)
 
     def reset(self) -> torch.Tensor:
@@ -156,7 +161,7 @@ class StereoNeedleEnv:
             "final_goal_distance": self.env.final_goal_distance.clone(),
             # valid only where not done: state of the running episode
             "success_now": self.env.success(),
-            "needle_lifted": self.env.scene["object"].data.root_pos_w[:, 2] > self.env.cfg.lift_height_w,
+            "needle_lifted": self.env.scene["object"].data.root_pos_w.torch[:, 2] > self.env.cfg.lift_height_w,
             # Isaac Lab episode statistics (per reward term etc.), present when something reset
             "log": dict(extras.get("log", {})) if bool(done.any()) else {},
         }
@@ -164,20 +169,22 @@ class StereoNeedleEnv:
 
     # -------------------------------------------------------------- state access
     def poses_in_base(self):
-        """(ee_pos, ee_quat, needle_pos, needle_quat, goal_pos, goal_quat), robot base frame."""
+        """(ee_pos, ee_quat, needle_pos, needle_quat, goal_pos, goal_quat), robot base frame, quaternions (w, x, y, z)."""
         robot = self.env.scene["robot"]
         needle = self.env.scene["object"]
-        root_pos, root_quat = robot.data.root_pos_w, robot.data.root_quat_w
+        root_pos, root_quat = robot.data.root_pos_w.torch, wxyz_from_xyzw(robot.data.root_quat_w.torch)
         ee_pos, ee_quat = subtract_frame_transforms(
-            root_pos, root_quat, robot.data.body_pos_w[:, self._ee_idx], robot.data.body_quat_w[:, self._ee_idx]
+            root_pos, root_quat, robot.data.body_pos_w.torch[:, self._ee_idx],
+            wxyz_from_xyzw(robot.data.body_quat_w.torch[:, self._ee_idx]),
         )
-        obj_pos, obj_quat = subtract_frame_transforms(root_pos, root_quat, needle.data.root_pos_w, needle.data.root_quat_w)
-        goal = self.env.command_manager.get_command("object_pose")
-        return ee_pos, ee_quat, obj_pos, obj_quat, goal[:, :3], goal[:, 3:7]
+        obj_pos, obj_quat = subtract_frame_transforms(root_pos, root_quat, needle.data.root_pos_w.torch,
+                                                      wxyz_from_xyzw(needle.data.root_quat_w.torch))
+        goal = self.env.command_manager.get_command("object_pose")  # (x, y, z, qx, qy, qz, qw) in Isaac Lab 3.0
+        return ee_pos, ee_quat, obj_pos, obj_quat, goal[:, :3], wxyz_from_xyzw(goal[:, 3:7])
 
     def needle_xy_local(self) -> torch.Tensor:
         """(N, 2) needle position on the pad, metres from the pad centre."""
-        pos = self.env.scene["object"].data.root_pos_w - self.env.scene.env_origins
+        pos = self.env.scene["object"].data.root_pos_w.torch - self.env.scene.env_origins
         return pos[:, :2]
 
     def close(self) -> None:

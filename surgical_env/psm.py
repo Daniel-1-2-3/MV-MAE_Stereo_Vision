@@ -4,7 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
 # From Isaac for Healthcare v0.4.0 (robotic.surgery.assets/robotic/surgery/assets/psm.py), unchanged
-# apart from the asset import path.
+# apart from the asset import path and, for Isaac Lab 3.0, the PhysX schema classes' new names
+# (isaaclab_physx.sim.schemas.Physx*PropertiesCfg, same fields and values).
 
 """Configuration for the da Vinci Research Kit (dVRK) Patient Side Manipulator (PSM).
 
@@ -18,6 +19,7 @@ Reference: https://github.com/med-air/SurRoL
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
+from isaaclab_physx.sim.schemas import PhysxArticulationRootPropertiesCfg, PhysxRigidBodyPropertiesCfg
 
 from .assets import robotic_surgery_assets
 
@@ -25,11 +27,11 @@ PSM_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=robotic_surgery_assets.dVRK_PSM,
         activate_contact_sensors=False,
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+        rigid_props=PhysxRigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=5.0,
         ),
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+        articulation_props=PhysxArticulationRootPropertiesCfg(
             enabled_self_collisions=False, solver_position_iteration_count=4, solver_velocity_iteration_count=0
         ),
     ),

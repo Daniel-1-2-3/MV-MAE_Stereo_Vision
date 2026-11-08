@@ -113,7 +113,7 @@ def main() -> None:
                 action = (action + args.noise * torch.randn_like(action)).clamp(-1.0, 1.0)
             obs, reward, term, trunc, info = env.step(action)
             done = term | trunc
-            jv = robot.data.joint_vel.abs()
+            jv = robot.data.joint_vel.torch.abs()
             closed = action[:, -1] < 0
             jaw_speed_closed.append(jv[:, jaw_ids].amax(dim=1)[closed & ~done].cpu())
             arm_speed.append(jv[:, arm_ids].amax(dim=1)[~done].cpu())

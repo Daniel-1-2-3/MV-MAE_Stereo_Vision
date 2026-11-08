@@ -6,6 +6,9 @@ calls ``launch(parser)`` first and imports those modules afterwards.
 
 Cameras need the rendering "experience", so ``--enable_cameras`` is always on,
 and scripts run headless (no window, as on a cloud pod) unless ``--gui`` is given.
+Isaac Lab 3.0 deprecated the ``--headless`` command-line flag in favour of ``--viz``:
+the window is now the "kit" visualizer, and setting ``headless`` here (not on the
+command line) keeps the old behaviour without the deprecation warning.
 """
 
 from __future__ import annotations
@@ -20,7 +23,9 @@ def launch(parser: argparse.ArgumentParser):
     AppLauncher.add_app_launcher_args(parser)
     args, overrides = parser.parse_known_args()
     args.enable_cameras = True
-    if not args.gui:
+    if args.gui:
+        args.visualizer = ["kit"]  # the Isaac Sim window
+    else:
         args.headless = True
     app_launcher = AppLauncher(args)
     return app_launcher.app, args, overrides
