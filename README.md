@@ -95,10 +95,12 @@ python -c "from isaacsim import SimulationApp; app=SimulationApp({'headless':Tru
 **Isaac Sim 6.0 / Isaac Lab 3.0 vs 5.1 / 2.3.** The task, rewards, observations, agent and training are
 unchanged; the code only follows Isaac Lab 3.0's API (quaternions are (x, y, z, w) inside Isaac Lab and are
 converted at the boundary, so the robot state the agent sees is the same; `Camera` with the RTX renderer
-replaces the deprecated `TiledCamera`; asset data is read with `.torch`). The renderer settings (RTX
-real-time mode, FXAA, 96 × 96) are the same, but Isaac Sim 6.0's RTX renderer is a newer version, so images
-can differ slightly in shading and noise from 5.1's; MV-MAE checkpoints trained on 5.1 images are not
-guaranteed to transfer. With `env.tissue_deformable=true`, the soft pad's simulation mesh resolution
+replaces the deprecated `TiledCamera`; asset data is read with `.torch`). The renderer is pinned to what 5.1
+used: RTX Real-Time (`/rtx/rendermode = RaytracedLighting`) with FXAA at 96 × 96 (Isaac Sim 6.0's own default
+is RTX Real-Time 2.0, path tracing with temporal DLSS denoising and upscaling). Isaac Sim 6.0's RTX renderer is
+still a newer version, so images can differ slightly in shading and noise from 5.1's; MV-MAE checkpoints trained
+on 5.1 images are not guaranteed to transfer. `test_stereo.py` prints a stereo diagnostic (measured vs predicted
+disparity, renderer and camera settings) to check the stereo pair on a new setup. With `env.tissue_deformable=true`, the soft pad's simulation mesh resolution
 (`env.tissue_hex_resolution`) can no longer be set (Omni Physics 110 chooses it).
 
 ## Step 1: check the stereo setup

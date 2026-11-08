@@ -21,7 +21,9 @@
 #   * TiledCamera is deprecated: Camera now renders all envs as one tiled image itself. The RTX
 #     renderer is selected explicitly (IsaacRtxRendererCfg), which also turns on the post-reset render;
 #   * PhysX-specific schema / material configs moved to isaaclab_physx (same fields);
-#   * rerender_on_reset became num_rerenders_on_reset (1 = the old True).
+#   * rerender_on_reset became num_rerenders_on_reset (1 = the old True);
+#   * the RTX render mode (RaytracedLighting, as on 5.1) and the anti-aliasing operator are set explicitly:
+#     Isaac Sim 6.0 would otherwise render with RTX Real-Time 2.0.
 
 """Isaac Lab configuration for needle lifting from a tissue pad with a stereo camera rig."""
 
@@ -69,6 +71,8 @@ PSM_ARM_JOINTS = [
     "psm_tool_yaw_joint",
 ]
 EE_BODY = "psm_tool_tip_link"
+# RTX anti-aliasing operator (/rtx/post/aa/op) per CameraConfig.antialiasing, as replicator sets it
+_AA_OP = {"Off": 0, "TAA": 1, "FXAA": 2, "DLSS": 3, "DLAA": 4}
 
 
 @configclass
@@ -417,7 +421,12 @@ def make_env_cfg(env, cam, with_depth: bool = False, track_camera_pose: bool = F
     cfg.decimation = env.decimation
     cfg.sim.dt = env.sim_dt
     cfg.sim.render_interval = env.decimation
-    cfg.sim.render.antialiasing_mode = cam.antialiasing
+    # Renderer: RTX Real-Time ("RaytracedLighting") with the camera.antialiasing operator - what this project got
+    # on Isaac Sim 5.1, where Isaac Lab 2.3 applied antialiasing_mode through replicator's set_render_rtx_realtime
+    # and then re-set the mode's exact spelling. Isaac Lab 3.0 dropped that fix-up, and Isaac Sim 6.0's own default
+    # is RTX Real-Time 2.0 (path tracing + temporal DLSS denoising/upscaling), so both settings are written directly
+    # (antialiasing_mode stays None: replicator must not switch the mode afterwards).
+    cfg.sim.render.carb_settings = {"rtx.rendermode": "RaytracedLighting", "rtx.post.aa.op": _AA_OP[cam.antialiasing]}
     cfg.episode_length_s = env.episode_length_s
     # Re-render after resets so the first image of a new episode shows the reset scene.
     cfg.num_rerenders_on_reset = 1  # Isaac Lab 3.0 name of rerender_on_reset = True

@@ -15,7 +15,12 @@ What it checks (each prints PASS / FAIL):
                 and not hidden behind something
   Stereo      - image-only check: warping the right image by the disparity that
                 the depth map predicts reproduces the left image better than no
-                shift, the opposite shift, or a vertical shift
+                shift, the opposite shift, or a vertical shift. A diagnostic then
+                measures the whole-pixel shift that best aligns right to left
+                (whole image and needle / tool region) next to the disparity the
+                geometry predicts, checks the depth image against the pad's
+                geometry, prints the renderer / camera settings, and says whether
+                the images or only the prediction are off
   Tissue      - the needle rests on the tissue (not sunk through, not bouncing).
                 Rigid pad (default): the tool pressed into it stays on its surface
                 without a physics glitch. Soft pad (env.tissue_deformable=true): the
@@ -70,6 +75,162 @@ def check(name: str, passed: bool, detail: str, **numbers) -> None:
 
 def f(x) -> list[float]:
     return [round(float(v), 5) for v in torch.as_tensor(x).flatten().tolist()]
+
+
+def shift_errors(left: torch.Tensor, right: torch.Tensor, max_dx: int = 10, max_dy: int = 0,
+                 mask: torch.Tensor | None = None) -> torch.Tensor:
+    """Photometric error of aligning the right image to the left by whole-pixel shifts.
+
+    left, right: (n, 3, H, W) float. Returns (n, 2 * max_dy + 1, 2 * max_dx + 1): entry [dy, dx] is the mean
+    |left(u, v) - right(u - dx, v - dy)| over the overlap (and `mask`, (n, H, W) bool, if given). A point the
+    left camera sees at column u is at u - d in the right image (right camera on the right), so for a working
+    stereo pair the best dx is the disparity d > 0 and the best dy is 0.
+    """
+    n, _, hh, ww = left.shape
+    err = torch.full((n, 2 * max_dy + 1, 2 * max_dx + 1), float("inf"), device=left.device)
+    for iy, dy in enumerate(range(-max_dy, max_dy + 1)):
+        for ix, dx in enumerate(range(-max_dx, max_dx + 1)):
+            u0, u1, v0, v1 = max(dx, 0), ww + min(dx, 0), max(dy, 0), hh + min(dy, 0)
+            diff = (left[:, :, v0:v1, u0:u1] - right[:, :, v0 - dy:v1 - dy, u0 - dx:u1 - dx]).abs().mean(dim=1)
+            if mask is None:
+                err[:, iy, ix] = diff.mean(dim=(1, 2))
+            else:
+                m = mask[:, v0:v1, u0:u1].float()
+                cnt = m.sum(dim=(1, 2))
+                err[:, iy, ix] = torch.where(cnt > 0, (diff * m).sum(dim=(1, 2)) / cnt.clamp(min=1),
+                                             torch.full_like(cnt, float("inf")))
+    return err
+
+
+def subpixel_best(err_row: torch.Tensor, offset: int) -> torch.Tensor:
+    """(n, k) errors over shifts -offset..offset -> best shift per row, refined with a parabola through the minimum."""
+    i = err_row.argmin(dim=1)
+    best = (i - offset).float()
+    k = err_row.shape[1]
+    for r in range(err_row.shape[0]):
+        j = int(i[r])
+        if 0 < j < k - 1:
+            a, b, c = (float(err_row[r, j + s]) for s in (-1, 0, 1))
+            den = a - 2 * b + c
+            if den > 1e-9:
+                best[r] += 0.5 * (a - c) / den
+    return best
+
+
+def stereo_diagnostic(env, obs, depth, uv_l, uv_r, z_l, pl, pr, ql, rot_l, K, disp_map, origins, tissue_top_local,
+                      needle_w, rig) -> None:
+    """Did the images lose their stereo disparity, or did only the depth-based prediction change?
+
+    Measures the whole-pixel horizontal shift that best aligns the right image to the left (whole image and the
+    needle / tool-tip region) and prints it next to the disparity the geometry predicts; checks that the depth
+    image agrees with the camera geometry on the pad (catches a renderer projection / field of view that differs
+    from the intrinsics); prints the camera prims' optics, the depth output, and the right camera's offset in the
+    left camera's frame. Ends with the verdict.
+    """
+    import isaaclab.sim as sim_utils
+    from pxr import UsdGeom
+
+    n, _, _, h, w = obs.shape
+    dev = obs.device
+    left, right = obs[:, 0].float(), obs[:, 1].float()
+    print("-" * 72 + "\n[stereo diagnostic]", flush=True)
+
+    # ---- renderer, optics and outputs as the simulator has them (2: depth type / units / shape, intrinsics)
+    sim = env.env.sim
+    print("  renderer: " + ", ".join(f"{k}={sim.get_setting(k)}" for k in (
+        "/rtx/rendermode", "/rtx/post/aa/op", "/rtx/post/dlss/execMode", "/rtx-transient/dldenoiser/enabled")))
+    stage = sim_utils.get_current_stage()
+    env0 = env.env.scene.env_prim_paths[0]
+    for name in ("StereoLeft", "StereoRight"):
+        cam = UsdGeom.Camera(stage.GetPrimAtPath(f"{env0}/{name}"))
+        proj = cam.GetPrim().GetAttribute("cameraProjectionType")
+        print(f"  {name} prim: focal length {cam.GetFocalLengthAttr().Get()}, horizontal aperture "
+              f"{cam.GetHorizontalApertureAttr().Get()}, vertical aperture {cam.GetVerticalApertureAttr().Get()}, "
+              f"clipping {cam.GetClippingRangeAttr().Get()}, projection {proj.Get() if proj else 'n/a'}")
+    print(f"  intrinsics in use (left, env 0): fx {float(K[0, 0, 0]):.3f}, fy {float(K[0, 1, 1]):.3f}, "
+          f"cx {float(K[0, 0, 2]):.2f}, cy {float(K[0, 1, 2]):.2f} for {w} x {h} px; design fx {rig.fx:.3f}")
+    outs = {k: (tuple(v.torch.shape), str(v.torch.dtype)) for k, v in env.left.data.output.items()}
+    print(f"  left camera data_types {list(env.left.cfg.data_types)} -> outputs {outs}")
+    d0 = depth[0, 0]
+    fin = torch.isfinite(d0) & (d0 > 0)
+    if bool(fin.any()):
+        print(f"  depth image (distance_to_image_plane, env 0 left): {float(fin.float().mean()):.2f} of pixels finite, "
+              f"min / median / max {float(d0[fin].min()):.4f} / {float(d0[fin].median()):.4f} / {float(d0[fin].max()):.4f} m")
+
+    # ---- the two cameras' poses (3: right camera 5 mm along the rig's right axis, same orientation)
+    off = torch.einsum("nji,nj->ni", rot_l, pr - pl) * 1000.0  # right - left position in the left camera frame (x right)
+    for i in range(n):
+        print(f"  env {i}: right camera offset in the left camera's frame (x right, y down, z forward) "
+              f"{[round(float(v), 3) for v in off[i]]} mm, design [{rig.baseline * 1000:.1f}, 0, 0]")
+
+    # ---- 1: measured shift vs geometry
+    lr = (left - right).abs()
+    roi = torch.zeros(n, h, w, dtype=torch.bool, device=dev)  # +-8 px around the projected needle and tool tip
+    for i in range(n):
+        for j in range(uv_l.shape[1]):
+            u, v = float(uv_l[i, j, 0]), float(uv_l[i, j, 1])
+            if np.isfinite(u) and np.isfinite(v):
+                u0, u1, v0, v1 = max(0, int(u) - 8), min(w, int(u) + 9), max(0, int(v) - 8), min(h, int(v) + 9)
+                if u1 > u0 and v1 > v0:
+                    roi[i, v0:v1, u0:u1] = True
+    err_whole = shift_errors(left, right, 10, 0)[:, 0]
+    err_roi = shift_errors(left, right, 10, 0, roi)[:, 0]
+    err_2d = shift_errors(left, right, 10, 3)
+    best_whole, best_roi = subpixel_best(err_whole, 10), subpixel_best(err_roi, 10)
+    flat = err_2d.flatten(1).argmin(dim=1)
+    best_dy, best_dx_2d = flat // 21 - 3, flat % 21 - 10
+    pred_geom = rig.fx * rig.baseline / z_l  # (n, 2): needle, tool tip
+    proj_disp = uv_l[..., 0] - uv_r[..., 0]
+    pred_map = torch.stack([disp_map[i][disp_map[i] > 0].median() if bool((disp_map[i] > 0).any())
+                            else torch.tensor(float("nan"), device=dev) for i in range(n)])
+
+    # ---- depth image vs geometry on the pad top (renderer projection = intrinsics?)
+    g = torch.linspace(-0.04, 0.04, 9, device=dev)
+    gx, gy = torch.meshgrid(g, g, indexing="ij")
+    grid = torch.stack([gx.flatten(), gy.flatten()], dim=-1)  # (81, 2) pad-local x, y
+    top = origins[:, 2] + tissue_top_local
+    pts = torch.cat([origins[:, None, :2] + grid[None], top[:, None, None].expand(n, grid.shape[0], 1)], dim=-1)
+    far_from_needle = torch.linalg.norm(pts[..., :2] - needle_w[:, None, :2], dim=-1) > 0.015
+    uv_p, z_p = project_points(pts, pl, ql, K)
+    ui, vi = uv_p[..., 0].floor().long(), uv_p[..., 1].floor().long()
+    inside = (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h) & (z_p > 0) & far_from_needle
+    d_img = depth[torch.arange(n, device=dev)[:, None], 0, vi.clamp(0, h - 1), ui.clamp(0, w - 1)]
+    depth_err_mm = torch.stack([((d_img[i] - z_p[i])[inside[i]]).abs().median() if bool(inside[i].any())
+                                else torch.tensor(float("nan"), device=dev) for i in range(n)]) * 1000.0
+    depth_ok = bool((depth_err_mm < 2.0).all())
+    check("projection/depth_matches_geometry", depth_ok,
+          f"median |depth image - geometric depth| at {int(inside.sum())} pad-top points {f(depth_err_mm)} mm "
+          f"(want < 2: the rendered projection matches the intrinsics)", depth_err_mm=f(depth_err_mm))
+
+    verdicts = []
+    for i in range(n):
+        p = float(pred_map[i])
+        mw, mr = float(best_whole[i]), float(best_roi[i])
+        print(f"  env {i}: best right->left shift: whole image {mw:+.2f} px (error {float(err_whole[i].min()):.2f}, "
+              f"at 0 px {float(err_whole[i, 10]):.2f}), needle/tool region {mr:+.2f} px, 2-D search (dx, dy) = "
+              f"({int(best_dx_2d[i])}, {int(best_dy[i])}) | geometry predicts: needle {float(pred_geom[i, 0]):.2f}, "
+              f"tool {float(pred_geom[i, 1]):.2f} (projected {float(proj_disp[i, 0]):.2f}, {float(proj_disp[i, 1]):.2f}), "
+              f"depth-map median {p:.2f} px | mean |L-R| {float(lr[i].mean()):.2f}, max {float(lr[i].max()):.0f}")
+        if abs(mw - p) <= max(1.0, 0.3 * p):
+            verdicts.append("ok")
+        elif abs(mw) < 0.75:
+            verdicts.append("no_disparity")
+        else:
+            verdicts.append("different")
+    measured_ok = all(v == "ok" for v in verdicts)
+    check("stereo/measured_disparity", measured_ok,
+          f"best whole-image shift {f(best_whole)} px vs depth-predicted {f(pred_map)} px "
+          f"(needle / tool region {f(best_roi)} px; geometry {f(pred_geom[:, 0])} / {f(pred_geom[:, 1])} px)",
+          measured_px=f(best_whole), measured_roi_px=f(best_roi), predicted_px=f(pred_map))
+    if measured_ok and depth_ok:
+        verdict = "the IMAGES have the stereo disparity the geometry predicts -> only the depth-based prediction is off"
+    elif "no_disparity" in verdicts:
+        verdict = "the IMAGES have (almost) no horizontal disparity -> the stereo pair is broken (camera setup)"
+    elif not depth_ok:
+        verdict = "the depth image does not match the camera geometry -> rendered projection differs from the intrinsics"
+    else:
+        verdict = "the images' disparity differs from the geometry's prediction (see the numbers above)"
+    print(f"  VERDICT: {verdict}\n" + "-" * 72, flush=True)
 
 
 def main() -> int:
@@ -206,6 +367,8 @@ def main() -> int:
     check("stereo/depth_warp", bool(ok.all()),
           f"photometric error: correct shift {f(e_true)}, no shift {f(e_zero)}, opposite shift {f(e_flip)}, "
           f"vertical offset {f(e_vert)}", e_true=f(e_true), e_zero=f(e_zero), e_flip=f(e_flip), e_vert=f(e_vert))
+    stereo_diagnostic(env, obs, depth, uv_l, uv_r, z_l, pl, pr, ql, rot_l, K, disp_map, origins, tissue_top_local,
+                      needle_w, rig)
 
     snapshot, snapshot_depth = obs.clone(), depth.clone()  # for the output image
 
