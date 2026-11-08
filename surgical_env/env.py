@@ -6,6 +6,7 @@ Import this module only after the simulator has been launched (see sim_app.py).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
@@ -100,9 +101,12 @@ class StereoNeedleEnv:
     relative to its current pose, then the gripper (< 0 closes, >= 0 opens).
     """
 
-    def __init__(self, env: NeedleTissueRLEnv, rig: StereoRig):
+    def __init__(self, env: NeedleTissueRLEnv, rig: StereoRig, cfg=None):
         self.env = env
         self.rig = rig
+        self.cfg = cfg  # the experiment Config (needed for the robustness suite's scene changes)
+        self.hires_prim: str | None = None  # env_0's render-only paper camera (add_hires_camera)
+        self._hires_checked = False
         self.num_envs = env.num_envs
         self.device = env.device
         self.action_dim = env.action_manager.total_action_dim
@@ -179,10 +183,88 @@ class StereoNeedleEnv:
     def close(self) -> None:
         self.env.close()
 
+    # -------------------------------------------------------------- evaluation-time tools
+    def training_state(self) -> dict:
+        """Counters and reward weights that extra evaluation episodes would advance (Isaac Lab's reward curriculum
+        reads common_step_counter and changes reward weights); the robustness suite puts them back afterwards."""
+        rm = self.env.reward_manager
+        return {"common_step_counter": self.env.common_step_counter, "sim_step_counter": self.env._sim_step_counter,
+                "reward_weights": {name: rm.get_term_cfg(name).weight for name in rm.active_terms}}
 
-def make_env(cfg, device: str = "cuda:0", with_depth: bool = False, track_camera_pose: bool = False) -> StereoNeedleEnv:
+    def restore_training_state(self, state: dict) -> None:
+        self.env.common_step_counter = state["common_step_counter"]
+        self.env._sim_step_counter = state["sim_step_counter"]
+        rm = self.env.reward_manager
+        for name, weight in state["reward_weights"].items():
+            term = rm.get_term_cfg(name)
+            term.weight = weight
+            rm.set_term_cfg(name, term)
+
+    def sim_perturbation(self, family: str, severity: float):
+        """Apply one scene change of the robustness suite; returns the function that restores the exact previous
+        state. Raises (with the reason) if it cannot be applied and restored exactly."""
+        from . import eval_scene
+
+        if self.cfg is None:
+            raise RuntimeError("the env was built without its config")
+        if family == "camera_azimuth":
+            return eval_scene.orbit_stereo_rig(self.env.scene.env_prim_paths, self.rig, self.cfg.camera, severity, 0.0)
+        if family == "camera_elevation":
+            return eval_scene.orbit_stereo_rig(self.env.scene.env_prim_paths, self.rig, self.cfg.camera, 0.0, severity)
+        if family == "light_intensity":
+            return eval_scene.scale_dome_light(1.0 + severity)
+        if family == "shadow_light":
+            return eval_scene.add_shadow_light(self.cfg.env)
+        raise NotImplementedError(f"no scene perturbation '{family}'")
+
+    def add_hires_camera(self, hcfg, env_cfg) -> None:
+        """Create env_0's render-only paper camera (hires.* settings); no render product until an evaluation."""
+        from . import eval_scene
+        from .stereo import view_camera_pose
+
+        top = env_cfg.tissue_size[2]
+        look_at = (env_cfg.goal_xy[0], env_cfg.goal_xy[1], top + hcfg.look_at_height)
+        pos, quat = view_camera_pose(look_at, hcfg.distance, hcfg.azimuth_deg, hcfg.elevation_deg)
+        prim = f"{self.env.scene.env_prim_paths[0]}/HiResCam"
+        eval_scene.spawn_view_camera(prim, pos, quat, hcfg.width, hcfg.height, hcfg.focal_length,
+                                     hcfg.horizontal_aperture)
+        self.hires_prim = prim
+
+    def _rendered_stereo(self) -> torch.Tensor:
+        """Render (no physics step) and read the stereo cameras again."""
+        self.env.sim.render()
+        self.left.update(0.0, force_recompute=True)
+        self.right.update(0.0, force_recompute=True)
+        return self.images()
+
+    def hires_recorder(self, hcfg, video_dir, env_step: int, fps: float):
+        """Recorder for env_0's paper camera (and the left stereo camera at hires.left_eye_size) for one evaluation:
+        videos/hires_eval_<step>.mp4 and hires_eval_left_<step>.mp4."""
+        from . import eval_scene
+
+        if self.hires_prim is None:
+            raise RuntimeError("no hi-res camera: build the env with make_env(..., hires_camera=True)")
+        video_dir = Path(video_dir)
+        cams = [("main", self.hires_prim, (hcfg.width, hcfg.height), video_dir / f"hires_eval_{env_step}.mp4")]
+        if hcfg.left_eye_size > 0:
+            s = hcfg.left_eye_size
+            cams.append(("left", f"{self.env.scene.env_prim_paths[0]}/StereoLeft", (s, s),
+                         video_dir / f"hires_eval_left_{env_step}.mp4"))
+        check = None if self._hires_checked else self._rendered_stereo  # verify once that the policy's images stay
+        self._hires_checked = True
+        return eval_scene.HiResRecorder(cams, fps, hcfg.crf, hcfg.preset, check=check)
+
+
+def make_env(cfg, device: str = "cuda:0", with_depth: bool = False, track_camera_pose: bool = False,
+             hires_camera: bool = False) -> StereoNeedleEnv:
     env_cfg, rig = make_env_cfg(cfg.env, cfg.camera, with_depth=with_depth, track_camera_pose=track_camera_pose)
     env_cfg.seed = cfg.train.seed
     env_cfg.sim.device = device
     env = NeedleTissueRLEnv(cfg=env_cfg)
-    return StereoNeedleEnv(env, rig)
+    senv = StereoNeedleEnv(env, rig, cfg)
+    if hires_camera:
+        try:
+            senv.add_hires_camera(cfg.hires, cfg.env)
+        except Exception as e:  # the paper video is optional: never stop training for it
+            print(f"WARNING: could not create the hi-res camera ({type(e).__name__}: {e}); no hi-res videos")
+    return senv

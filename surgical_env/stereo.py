@@ -93,6 +93,28 @@ def make_stereo_rig(cam, look_at) -> StereoRig:
     )
 
 
+def view_camera_pose(look_at, distance: float, azimuth_deg: float, elevation_deg: float):
+    """Single camera `distance` from `look_at` in the azimuth/elevation direction, aimed at it (same placement
+    as the stereo rig's centre). Returns (position (3,), quat_ros (w, x, y, z)) as numpy arrays."""
+    az, el = math.radians(azimuth_deg), math.radians(elevation_deg)
+    direction = np.array([math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)])
+    look_at = np.asarray(look_at, dtype=np.float64)
+    eye = look_at + distance * direction
+    return eye, quat_from_matrix(look_at_rotation_ros(eye, look_at))
+
+
+def quat_ros_to_opengl(q_ros) -> np.ndarray:
+    """Camera orientation (w, x, y, z): ROS convention (z forward, y down) -> OpenGL / USD (-z forward, y up).
+
+    Same as Isaac Lab's convert_camera_frame_orientation_convention(origin="ros", target="opengl"): the
+    camera's y and z axes flip (a 180 deg turn about its own x axis). Returned with w >= 0.
+    """
+    r = matrix_from_quat(torch.as_tensor(np.asarray(q_ros, dtype=np.float64))).numpy()
+    r[:, 1] = -r[:, 1]
+    r[:, 2] = -r[:, 2]
+    return quat_from_matrix(r)
+
+
 def project_points(
     points_w: torch.Tensor, cam_pos_w: torch.Tensor, cam_quat_ros: torch.Tensor, intrinsics: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:

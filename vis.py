@@ -85,6 +85,29 @@ def save_mp4(frames: list[np.ndarray], path: str | Path, fps: float) -> None:
             writer.append_data(f)
 
 
+class Mp4Writer:
+    """Streams frames into an H.264 mp4 as they arrive (for large frames that should not pile up in memory).
+
+    crf: x264 quality (lower = better; 18 is close to visually lossless), preset: x264 speed / size trade-off.
+    Frame sizes must be multiples of 16. Nothing is written if no frame arrives.
+    """
+
+    def __init__(self, path: str | Path, fps: float, crf: int = 18, preset: str = "veryfast"):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.frames = 0
+        self._writer = imageio.get_writer(
+            str(self.path), fps=fps, codec="libx264", quality=None, macro_block_size=16, pixelformat="yuv420p",
+            output_params=["-crf", str(int(crf)), "-preset", str(preset), "-movflags", "+faststart"])
+
+    def append(self, frame: np.ndarray) -> None:
+        self._writer.append_data(np.ascontiguousarray(frame))
+        self.frames += 1
+
+    def close(self) -> None:
+        self._writer.close()
+
+
 def wandb_video(mp4_path: str | Path):
     """wandb.Video from an mp4 already written by save_mp4 (no moviepy needed)."""
     import wandb

@@ -139,6 +139,10 @@ class AgentConfig:
     # straight to the actor's and critic's first layer. Everything else (actor, critic, augmentation,
     # demos, robot state) is identical; the mvmae.* settings other than frame_stack and the MV-MAE
     # losses / pre-training / encoder freezing do not apply to "pixels".
+    # "cnn": baseline with DrQ-v2's standard conv encoder (Conv 3x3 stride 2, then 3 x Conv 3x3, 32 channels,
+    # ReLU) on the stacked frames of both views as 18 input channels; 96 px -> 32 x 41 x 41 = 53,792 features.
+    # Trained by the critic loss only (no MV-MAE losses, no pre-training; encoder_lr / encoder_warmup_updates /
+    # critic_encoder_grad_scale apply to it as to MV-MAE). train.freeze_encoder_* freezes it exactly as for "mvmae".
     encoder: str = "mvmae"
     pixel_downsample: int = 2  # "pixels": 96 px -> 48 px, 3 frames x 2 views x 3 colours x 48 x 48 = 41,472 numbers
     lr: float = 1e-4  # actor and critic
@@ -216,6 +220,50 @@ class LogConfig:
 
 
 @dataclass
+class RobustConfig:
+    # Robustness test suite (robustness.py): the current policy (deterministic, no gradients) is run under perturbed
+    # images (view drop / duplicate / swap, noise, occlusion, brightness / contrast / hue, blur, dropped / frozen
+    # frames) and perturbed scenes (camera rig pose, lighting). It never touches training: nothing goes into the
+    # replay memory, no updates, its random numbers come from its own generators (the training random streams are
+    # saved and restored), and the camera / light / step counters are restored afterwards. Every condition runs on the
+    # same needle placements (seed) as the suite's own nominal run. Runs at the first evaluation at or after every
+    # every_env_steps env steps.
+    enabled: bool = True
+    every_env_steps: int = 100_000
+    episodes_per_condition: int = 0  # 0 = env.num_envs (one deterministic episode per parallel env)
+    seed: int = 12345  # needle placements of the suite (the same in every evaluation, so checkpoints are comparable)
+    # Condition or family names (see robustness.FAMILIES / robustness.CONDITIONS); the default is every family.
+    conditions: list[str] = field(default_factory=lambda: [
+        "view_drop", "view_duplicate", "gaussian_noise", "occlusion_one", "occlusion_both", "brightness", "contrast",
+        "hue", "blur", "temporal", "camera_azimuth", "camera_elevation", "light_intensity", "shadow_light"])
+    # Conditions that also get a video of the perturbed stereo input the policy received (a success if there is one).
+    video_conditions: list[str] = field(default_factory=lambda: [
+        "view_drop_right", "view_duplicate_left", "gaussian_noise_0.10", "occlusion_one_25", "brightness_0.6",
+        "blur_2", "frozen_frames_2", "camera_azimuth_+10", "light_dome_0.5"])
+
+
+@dataclass
+class HiResConfig:
+    # Paper-quality video of env_0 at every evaluation: a render-only RGB camera that exists in env_0 only and is
+    # rendered only during the evaluation episode (its render product is created for the evaluation and destroyed
+    # after it), so it does not change the policy's images and costs nothing while training. Saved as H.264
+    # (videos/hires_eval_<step>.mp4) and logged to wandb. Placement like the stereo rig: look-at point above the pad
+    # centre, `distance` away in the direction given by azimuth (from +x towards +y) and elevation.
+    enabled: bool = True
+    width: int = 1280
+    height: int = 720
+    look_at_height: float = 0.025
+    distance: float = 0.35  # frames the tool tip's start, the goal and the whole pad with ~8 % margin (tests/test_geometry.py)
+    azimuth_deg: float = 20.0
+    elevation_deg: float = 30.0
+    focal_length: float = 24.0  # mm, with horizontal_aperture: ~47 deg horizontal field of view
+    horizontal_aperture: float = 20.955
+    left_eye_size: int = 512  # also a square video from the left stereo camera's pose at this size; 0 = off
+    crf: int = 18  # H.264 quality (lower = better)
+    preset: str = "veryfast"
+
+
+@dataclass
 class Config:
     env: EnvConfig = field(default_factory=EnvConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
@@ -223,6 +271,8 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     log: LogConfig = field(default_factory=LogConfig)
+    robust: RobustConfig = field(default_factory=RobustConfig)
+    hires: HiResConfig = field(default_factory=HiResConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -252,6 +302,12 @@ def _coerce(current: Any, value: Any, key: str) -> Any:
         if not isinstance(value, (list, tuple)) or len(value) != len(current):
             raise TypeError(f"{key}: expected a list of {len(current)} values, got {value!r}")
         return tuple(_coerce(c, v, key) for c, v in zip(current, value))
+    if isinstance(current, list):  # variable-length list of names; a single name is a one-element list
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(f"{key}: expected a list, got {value!r}")
+        return [str(v) for v in value]
     if isinstance(current, str):
         return str(value)
     return value
@@ -298,8 +354,8 @@ def validate(cfg: Config) -> None:
         raise ValueError("embedding dims must be divisible by the number of heads")
     if not 0.5 <= m.mask_ratio < 1.0:
         raise ValueError("mvmae.mask_ratio must be in [0.5, 1) with two views (one view is always fully hidden)")
-    if a.encoder not in ("mvmae", "pixels"):
-        raise ValueError("agent.encoder must be 'mvmae' or 'pixels'")
+    if a.encoder not in ("mvmae", "pixels", "cnn"):
+        raise ValueError("agent.encoder must be 'mvmae', 'pixels' or 'cnn'")
     if a.pixel_downsample < 1 or c.height % a.pixel_downsample or c.width % a.pixel_downsample:
         raise ValueError("agent.pixel_downsample must be >= 1 and divide the image width and height")
     if not 0.0 <= t.demo_ratio < 1.0:
@@ -312,3 +368,8 @@ def validate(cfg: Config) -> None:
         raise ValueError("camera.antialiasing must be Off, FXAA, TAA, DLSS or DLAA")
     if cfg.env.needle_asset not in ("sdf", "mesh"):
         raise ValueError("env.needle_asset must be 'sdf' or 'mesh'")
+    if cfg.robust.every_env_steps < 1 or cfg.robust.episodes_per_condition < 0:
+        raise ValueError("robust.every_env_steps must be >= 1 and robust.episodes_per_condition >= 0")
+    h = cfg.hires
+    if h.width % 16 or h.height % 16 or h.left_eye_size % 16 or min(h.width, h.height) < 16 or h.left_eye_size < 0:
+        raise ValueError("hires.width / height / left_eye_size must be multiples of 16 (H.264 macro blocks)")

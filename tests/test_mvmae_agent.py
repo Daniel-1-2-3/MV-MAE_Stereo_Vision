@@ -209,3 +209,64 @@ def test_raw_pixel_baseline_feeds_shrunk_pixels_straight_to_actor_and_critic():
     assert torch.allclose(agent.act(obs, 0, True, proprio=p), other.act(obs, 0, True, proprio=p))
     # no shrinking: every pixel
     assert small_agent(encoder="pixels", pixel_downsample=1).repr_dim == 3 * 2 * 3 * 32 * 32
+
+
+def test_cnn_baseline_trains_drqv2_conv_encoder_with_the_critic_only():
+    """agent.encoder=cnn: DrQ-v2's conv encoder on the 18 stacked stereo channels, updated by the critic loss only."""
+    from agent.drqv2 import CNNEncoder
+
+    torch.manual_seed(0)
+    # the paper setting: 3 frames x 2 views x 3 colours at 96 x 96 -> 32 x 41 x 41 features
+    big = CNNEncoder(18, (96, 96))
+    assert big.repr_dim == 32 * 41 * 41 == 53_792
+    assert big(torch.randint(0, 256, (2, 3, 2, 3, 96, 96), dtype=torch.uint8)).shape == (2, 53_792)
+    convs = [m for m in big.convnet if isinstance(m, torch.nn.Conv2d)]
+    assert [(c.in_channels, c.out_channels, c.stride[0]) for c in convs] == [(18, 32, 2), (32, 32, 1), (32, 32, 1),
+                                                                              (32, 32, 1)]
+    assert all(torch.count_nonzero(c.bias) == 0 for c in convs)  # zero bias; weights orthogonal with the ReLU gain
+    w = convs[1].weight.detach().flatten(1)
+    assert torch.allclose(w @ w.T, torch.eye(32) * torch.nn.init.calculate_gain("relu") ** 2, atol=1e-4)
+
+    agent = small_agent(proprio_dim=9, encoder="cnn")
+    assert agent.mvmae is None and isinstance(agent.encoder, CNNEncoder) and not agent.uses_mvmae
+    assert agent.repr_dim == 32 * 9 * 9  # 32 px: (32 - 3) // 2 + 1 = 15, then three 3x3 convs -> 9
+    obs, p = fake_batch().obs, torch.randn(8, 9)
+    assert agent._encode(obs).shape == (8, agent.repr_dim)
+    a = agent.act(obs, 0, eval_mode=False, proprio=p)
+    assert a.shape == (8, 7) and a.abs().max() <= 1.0
+    enc = [q.detach().clone() for q in agent.encoder.parameters()]
+    critic = [q.detach().clone() for q in agent.critic.parameters()]
+    actor = [q.detach().clone() for q in agent.actor.parameters()]
+    for _ in range(3):
+        m = agent.update(fake_batch(proprio_dim=9), env_step=0)
+    assert "mvmae/recon_loss" not in m and torch.isfinite(m["critic/loss"]) and torch.isfinite(m["grad/encoder"])
+    assert any(not torch.equal(x, y) for x, y in zip(enc, agent.encoder.parameters())), "the critic must train the CNN"
+    assert any(not torch.equal(x, y) for x, y in zip(critic, agent.critic.parameters()))
+    assert any(not torch.equal(x, y) for x, y in zip(actor, agent.actor.parameters()))
+    try:
+        agent.update_mae_only(fake_batch(proprio_dim=9))
+        raise AssertionError("the CNN baseline has no MV-MAE pre-training")
+    except RuntimeError:
+        pass
+    # without the critic gradient nothing trains the CNN
+    still = small_agent(encoder="cnn")
+    still.cfg.critic_grad_to_encoder = False
+    before = [q.detach().clone() for q in still.encoder.parameters()]
+    still.update(fake_batch(), env_step=0)
+    assert all(torch.equal(x, y) for x, y in zip(before, still.encoder.parameters()))
+    # encoder freezing works exactly as for MV-MAE
+    agent.freeze_encoder()
+    enc = [q.detach().clone() for q in agent.encoder.parameters()]
+    m = agent.update(fake_batch(proprio_dim=9), env_step=0)
+    assert float(m["train/encoder_frozen"]) == 1.0
+    assert all(torch.equal(x, y) for x, y in zip(enc, agent.encoder.parameters()))
+    # checkpoint round trip (and a checkpoint of another encoder kind is refused)
+    other = small_agent(proprio_dim=9, encoder="cnn")
+    other.load_state_dict(agent.state_dict())
+    assert other.encoder_frozen
+    assert torch.allclose(agent.act(obs, 0, True, proprio=p), other.act(obs, 0, True, proprio=p))
+    try:
+        small_agent(proprio_dim=9, encoder="pixels").load_state_dict(agent.state_dict())
+        raise AssertionError("a CNN checkpoint must not load into the raw-pixel agent")
+    except ValueError:
+        pass

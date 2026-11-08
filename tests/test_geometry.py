@@ -180,3 +180,55 @@ def test_default_framing_shows_tool_needle_area_and_goal():
         assert (uv[..., 0] > 3).all() and (uv[..., 0] < cam.width - 3).all()
         assert (uv[..., 1] > 3).all() and (uv[..., 1] < cam.height - 3).all()
     assert rig.left_pos[2] < 0.15 and rig.right_pos[2] < 0.15  # below the PSM base
+
+
+def test_view_camera_pose_and_opengl_convention():
+    from surgical_env.stereo import quat_ros_to_opengl, view_camera_pose
+
+    look_at = np.array([0.0, 0.0, 0.045])
+    eye, q = view_camera_pose(look_at, 0.3, 20.0, 30.0)
+    assert np.linalg.norm(eye - look_at) == pytest.approx(0.3)
+    assert eye[2] - look_at[2] == pytest.approx(0.3 * math.sin(math.radians(30.0)))
+    r_ros = matrix_from_quat(torch.tensor(q)).numpy()
+    np.testing.assert_allclose(r_ros[:, 2], (look_at - eye) / np.linalg.norm(look_at - eye), atol=1e-12)  # looks at it
+    # OpenGL / USD camera: same right axis, looks along its -z, its +y points up
+    r_gl = matrix_from_quat(torch.tensor(quat_ros_to_opengl(q))).numpy()
+    np.testing.assert_allclose(r_gl[:, 0], r_ros[:, 0], atol=1e-12)
+    np.testing.assert_allclose(-r_gl[:, 2], r_ros[:, 2], atol=1e-12)
+    assert r_gl[2, 1] > 0
+    # matches Isaac Lab's convert_camera_frame_orientation_convention(origin="ros", target="opengl") up to sign
+    rig = make_stereo_rig(CameraConfig(), (0.0, 0.0, 0.045))
+    m = matrix_from_quat(torch.tensor(rig.quat_ros, dtype=torch.float64)).clone()
+    m[:, 1], m[:, 2] = -m[:, 1], -m[:, 2]
+    np.testing.assert_allclose(matrix_from_quat(torch.tensor(quat_ros_to_opengl(rig.quat_ros))).numpy(), m.numpy(),
+                               atol=1e-12)
+
+
+def test_default_hires_camera_frames_tool_needle_area_tissue_and_goal():
+    """env_0's paper camera (hires.*) must show the tool tip's start, the goal, the whole pad and every needle spawn."""
+    import itertools
+
+    from config import Config
+    from surgical_env.stereo import view_camera_pose
+
+    cfg = Config()
+    h, env = cfg.hires, cfg.env
+    top = env.tissue_size[2]
+    eye, q = view_camera_pose((env.goal_xy[0], env.goal_xy[1], top + h.look_at_height), h.distance, h.azimuth_deg,
+                              h.elevation_deg)
+    fx = h.width * h.focal_length / h.horizontal_aperture  # square pixels: vertical aperture = horizontal * h / w
+    k = torch.tensor([[fx, 0, h.width / 2], [0, fx, h.height / 2], [0, 0, 1]], dtype=torch.float64)
+    sx, sy = env.tissue_size[0] / 2, env.tissue_size[1] / 2
+    r = env.needle_xy_range + 0.005
+    pts = [(0.0, 0.0, 0.08), (0.0, 0.0, 0.10), (env.goal_xy[0], env.goal_xy[1], top + env.goal_height)]
+    pts += [(x, y, z) for x, y in itertools.product((-sx, sx), (-sy, sy)) for z in (0.0, top)]  # the whole pad
+    pts += [(x, y, top + 0.001) for x, y in itertools.product((-r, r), (-r, r))]
+    uv, z = project_points(torch.tensor([pts], dtype=torch.float64), torch.tensor(eye[None], dtype=torch.float64),
+                           torch.tensor(q[None], dtype=torch.float64), k[None])
+    assert (z > 0).all()
+    mx, my = 0.05 * h.width, 0.05 * h.height
+    assert (uv[..., 0] > mx).all() and (uv[..., 0] < h.width - mx).all(), uv[..., 0]
+    assert (uv[..., 1] > my).all() and (uv[..., 1] < h.height - my).all(), uv[..., 1]
+    # and the scene fills the frame (not a tiny object in the middle)
+    assert float(uv[..., 0].max() - uv[..., 0].min()) > 0.35 * h.width
+    assert float(uv[..., 1].max() - uv[..., 1].min()) > 0.5 * h.height

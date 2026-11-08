@@ -14,6 +14,7 @@
 wandb>=0.17,<0.18.3
 imageio[ffmpeg]>=2.31
 pyyaml>=6.0
+matplotlib>=3.7   # robustness / comparison figures
 
 # CPU unit tests (pytest), not needed for training
 pytest>=8.0

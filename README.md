@@ -28,6 +28,11 @@ camera**, the way a real da Vinci sees through its stereo endoscope.
 | `agent/drqv2.py` | DrQ-v2 actor/critic on top of MV-MAE, with optional learning from demonstrations |
 | `agent/replay.py` | Replay memory on the GPU with n-step returns and frame stacking |
 | `trainer.py` | Training loop, evaluation and wandb logging |
+| `robustness.py` | Robustness test suite: the policy under perturbed images and scenes (run at evaluations) |
+| `robustness_eval.py` | The robustness suite on a saved checkpoint, with more episodes |
+| `surgical_env/eval_scene.py` | Evaluation-only scene tools: env_0's paper camera, camera/light perturbations |
+| `tools/compare_runs.py` | Paper figures comparing two runs (e.g. MV-MAE vs the CNN baseline) from wandb |
+| `tools/bench_hires_camera.py` | Measures what the paper camera costs in env steps per second |
 | `test_stereo.py` | **Checks the stereo rig and the tissue scene** (run this first) |
 | `record_demos.py` | Records successful runs of the scripted controller |
 | `train.py` / `eval.py` | Train / evaluate |
@@ -167,7 +172,17 @@ any point, then return). The evaluation video shows a robot that succeeded when 
 * **grad/**: gradient norms of the encoder, critic and actor. **pretrain/**: the MV-MAE
   warm-up phase.
 * **speed/**, **time/**, **system/**: env steps and updates per second, the time split
-  between simulation, acting and learning, and GPU memory.
+  between simulation, acting and learning, and GPU memory. `speed/train_env_steps_per_s` counts only
+  acting + simulating + learning (no evaluation time); `time/eval_s` is the length of each evaluation.
+* **eval/hires_video** (every evaluation): env_0's episode from a 1280×720 render-only camera
+  (`videos/hires_eval_<step>.mp4`, H.264 CRF 18), plus `eval/hires_left_video`, the left eye at 512×512.
+  `eval/hires_env0_success` says how env_0's episode ended (it is the only env with this camera; the
+  low-res `eval/video` still shows a success when there is one).
+* **robust/** (every 100k steps, see *Robustness tests*): `robust/<condition>/success`, `success_any`,
+  `return`, `final_goal_distance` and the same with `_rel` (condition / nominal), `robust/mean_success`,
+  `robust_plot/<family>` (success vs severity, nominal at 0), `robust_plot/all_conditions` (bar chart) and
+  `robust_video/<condition>` (the perturbed stereo input the policy received). Every number is also in
+  `runs/<run_name>/robust_<step>.json`, with a figure in `runs/<run_name>/robust/`.
 
 ## Step 4: evaluate
 
@@ -266,6 +281,58 @@ MV-MAE agent has. Actor, critic, random-shift augmentation, demonstrations and b
 robot state and exploration are unchanged, so a run with the same command, demos and seed plus
 `agent.encoder=pixels` shows what MV-MAE adds.
 
+### Baseline with a CNN encoder (`agent.encoder=cnn`)
+
+`agent.encoder=cnn` replaces MV-MAE with DrQ-v2's standard conv encoder: the stacked frames of both views as
+18 input channels (3 frames × 2 views × 3 colours), scaled to [−0.5, 0.5], then a 3×3 convolution with stride 2
+and three 3×3 convolutions, 32 channels each, with ReLU (96 px → 32 × 41 × 41 = 53,792 features, about the size of
+MV-MAE's 55,296). It is trained by the critic loss only: no reconstruction loss, no pre-training. Everything else is
+the same agent (actor, critic, augmentation, demos, robot state, encoder learning rate and freezing via
+`train.freeze_encoder_*`), so this is the fair "same RL, plain CNN" comparison:
+
+```bash
+python train.py log.run_name=mvmae_seed1
+python train.py agent.encoder=cnn log.run_name=cnn_seed1
+python tools/compare_runs.py --runs <entity>/mvmae-drqv2-surgery/<id1> <entity>/mvmae-drqv2-surgery/<id2> --labels MV-MAE CNN
+```
+
+### Robustness tests
+
+Every `robust.every_env_steps` (100k) env steps, right after the regular evaluation, the current policy
+(deterministic, no gradients) is also run under perturbed conditions, `robust.episodes_per_condition` episodes each
+(default: one per parallel env). Every condition uses the same needle placements as the suite's own nominal run
+(`robust.seed`), so conditions are compared on identical episodes. Image perturbations change only the images the
+policy sees (never the robot state):
+
+| Family | Conditions |
+|---|---|
+| view drop / duplicate | left view black; right view black; right view replaced by the left (no stereo depth); views swapped |
+| Gaussian noise | std 0.05, 0.10, 0.20 (fraction of 255) |
+| occlusion | grey square of 10 / 25 / 40 % of the image, fixed per episode, in one random view or in both (independent positions) |
+| photometric | brightness ×0.6 and ×1.4, contrast ×0.6, hue rotated by 0.1 of the colour wheel |
+| blur | Gaussian blur, sigma 1 and 2 px |
+| temporal | newest frame repeated in the frame stack (one dropped frame); images refreshed only every 2nd step |
+| camera pose | whole stereo rig orbited about its look-at point: azimuth ±5°, ±10°, elevation ±5° |
+| lighting | dome light ×0.5 and ×1.5; shadow-casting light on |
+
+The suite never touches training: nothing goes into the replay memory, its noise comes from its own random
+generators, the training random states and Isaac Lab's step counter / reward weights are put back afterwards, and
+camera and light changes are written to the scene and restored to the exact previous values (a scene change that
+cannot be applied, or that does not change the rendered image, is skipped and the reason printed). A CPU test checks
+that a run with the suite trains to bit-identical weights. Turn it off with `robust.enabled=false`; pick conditions
+with `robust.conditions=[gaussian_noise,blur]`. For a larger sample on a checkpoint:
+
+```bash
+python robustness_eval.py --checkpoint runs/first_run/ckpt_best.pt --episodes 256
+```
+
+### Paper video
+
+At every evaluation, env_0's episode is also rendered by a 1280×720 camera that exists only in env_0 and is
+rendered only during evaluation episodes (its render product is created for the evaluation and destroyed after it),
+so it does not change the policy's images or slow training. Framing and quality: `hires.*` (`hires.enabled=false`
+turns it off). `python tools/bench_hires_camera.py` measures the env steps per second with and without it.
+
 ### Robot state (proprioception)
 
 `agent.proprio=true` gives the actor and critic the robot's own state next to the image
@@ -295,7 +362,7 @@ shadow-casting light independently of this.
 ## Tests (no GPU needed)
 
 ```bash
-pytest          # rotations, stereo geometry, scripted controller, MV-MAE, replay memory, agent, full training loop on a fake env
+pytest          # rotations, stereo geometry, scripted controller, MV-MAE, replay memory, agents (MV-MAE, pixels, CNN), robustness perturbations, full training loop on a fake env
 ```
 
 ## Credits and licences

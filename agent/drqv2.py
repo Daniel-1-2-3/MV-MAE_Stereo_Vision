@@ -4,6 +4,8 @@
   video clip, flattened (as DrQ-v2 flattens its conv features). Baseline
   (agent.encoder="pixels"): the same agent without MV-MAE and without any learned
   image encoder -- shrunk raw pixels go straight into the actor and critic.
+  Baseline (agent.encoder="cnn"): DrQ-v2's own conv encoder on the stacked frames
+  of both views, trained by the critic loss only.
 * Actor-critic: DrQ-v2 -- twin Q critics with a slow target copy, an actor with
   scheduled Gaussian exploration noise, n-step returns, random-shift image
   augmentation.
@@ -65,6 +67,37 @@ class PixelEncoder(nn.Module):
         if self.downsample > 1:
             x = F.avg_pool2d(x, self.downsample)
         return x.flatten(1)
+
+
+class CNNEncoder(nn.Module):
+    """CNN baseline: DrQ-v2's standard conv encoder (Yarats et al. 2021).
+
+    The stacked frames of both views are the input channels (frame_stack x 2 views x 3 colours = 18),
+    scaled to [-0.5, 0.5]: Conv(in, 32, 3, stride 2) -> ReLU -> 3 x [Conv(32, 32, 3) -> ReLU], flattened.
+    96 x 96 input -> 32 x 41 x 41 = 53,792 features. Orthogonal init with the ReLU gain, zero bias.
+    Trained by the critic loss only (no reconstruction loss, no pre-training).
+    """
+
+    def __init__(self, in_channels: int, img_hw: tuple[int, int]):
+        super().__init__()
+        self.convnet = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 3, stride=2), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, stride=1), nn.ReLU(),
+        )
+        h, w = ((s - 3) // 2 + 1 - 3 * 2 for s in img_hw)
+        self.repr_dim = 32 * h * w
+        for m in self.convnet:
+            if isinstance(m, nn.Conv2d):
+                nn.init.orthogonal_(m.weight.data, nn.init.calculate_gain("relu"))
+                m.bias.data.fill_(0.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, F, V, 3, H, W) uint8 or float in [0, 255] -> (B, repr_dim)."""
+        b, f, v, c, h, w = x.shape
+        x = x.float().reshape(b, f * v * c, h, w) / 255.0 - 0.5
+        return self.convnet(x).flatten(1)
 
 
 def _proprio_trunk(proprio_dim: int, feature_dim: int) -> nn.Module | None:
@@ -140,6 +173,10 @@ class MVMAEDrQV2Agent:
             self.mvmae = None
             self.encoder = PixelEncoder(channels, img_hw, getattr(agent_cfg, "pixel_downsample", 2)).to(self.device)
             self.repr_dim = self.encoder.repr_dim
+        elif self.encoder_kind == "cnn":  # baseline: DrQ-v2's conv encoder, trained by the critic only
+            self.mvmae = None
+            self.encoder = CNNEncoder(channels, img_hw).to(self.device)
+            self.repr_dim = self.encoder.repr_dim
         else:
             self._build_mvmae(mvmae_cfg, img_hw, num_views)
         c = agent_cfg
@@ -195,7 +232,7 @@ class MVMAEDrQV2Agent:
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         if not self.uses_mvmae:
-            return self.encoder(x)  # raw pixels, float32
+            return self.encoder(x)  # raw pixels / conv features, float32
         with self._autocast():
             z = self.mvmae.encode(x)
         return z.float().flatten(1)
@@ -321,7 +358,7 @@ class MVMAEDrQV2Agent:
     def update_mae_only(self, batch: Batch) -> dict[str, torch.Tensor]:
         """MV-MAE pre-training step (no RL losses)."""
         if not self.uses_mvmae:
-            raise RuntimeError("the raw-pixel baseline has no MV-MAE to pre-train")
+            raise RuntimeError(f"the '{self.encoder_kind}' baseline has no MV-MAE to pre-train")
         c = self.cfg
         obs = self._augment(batch.obs)
         with self._autocast():
@@ -374,12 +411,16 @@ class MVMAEDrQV2Agent:
             "actor_opt": self.actor_opt.state_dict(),
             "num_updates": self.num_updates,
             "encoder_frozen": self.encoder_frozen,
+            "encoder_kind": self.encoder_kind,
         }
 
     def load_state_dict(self, state: dict, load_optimizers: bool = True) -> None:
         key = "mvmae" if self.uses_mvmae else "encoder"
         if key not in state:
             raise ValueError(f"checkpoint has no '{key}' weights: it was trained with the other agent.encoder setting")
+        if state.get("encoder_kind", self.encoder_kind) != self.encoder_kind:  # (older checkpoints do not store it)
+            raise ValueError(f"checkpoint was trained with agent.encoder={state['encoder_kind']}, "
+                             f"this agent uses agent.encoder={self.encoder_kind}")
         self.encoder.load_state_dict(state[key])
         self.actor.load_state_dict(state["actor"])
         self.critic.load_state_dict(state["critic"])

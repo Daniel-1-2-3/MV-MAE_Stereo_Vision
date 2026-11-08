@@ -34,7 +34,7 @@ def main() -> None:
     torch.backends.cudnn.allow_tf32 = True
     # Load the demos before building the simulator, so a wrong path fails in seconds.
     demo = torch.load(cfg.train.demo_path, map_location="cpu") if cfg.train.demo_path else None
-    env = make_env(cfg, device=args.device)
+    env = make_env(cfg, device=args.device, hires_camera=cfg.hires.enabled)  # paper camera: env_0 only, eval only
     if demo is not None:
         print(f"loaded {demo['meta']['num_episodes']} demo episodes from {cfg.train.demo_path}")
         for section in ("env", "camera"):

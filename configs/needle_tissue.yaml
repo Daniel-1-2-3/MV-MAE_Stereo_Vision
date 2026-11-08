@@ -70,3 +70,13 @@ log:
   wandb_mode: online        # online | offline | disabled
   log_every_updates: 250
   recon_every_updates: 5000
+
+robust:                     # robustness test suite at evaluations (see README "Robustness tests")
+  enabled: true
+  every_env_steps: 100000
+  episodes_per_condition: 0 # 0 = one episode per parallel env
+
+hires:                      # env_0's paper video at every evaluation (render-only camera, eval episodes only)
+  enabled: true
+  width: 1280
+  height: 720

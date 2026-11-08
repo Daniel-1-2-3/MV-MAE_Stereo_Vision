@@ -4,6 +4,9 @@ Kept independent of Isaac Sim: it works with any object that has the interface o
 ``surgical_env.env.StereoNeedleEnv`` (``reset``, ``step``, ``num_envs``,
 ``action_dim``, ``obs_shape``, ``max_episode_steps``, ``step_dt``, ``device``),
 which is how tests/test_train_loop.py runs it on the CPU with a fake environment.
+Optional extras, used when present: ``hires_recorder`` (env 0's paper camera at every
+evaluation), ``sim_perturbation`` and ``training_state`` / ``restore_training_state``
+(scene changes of the robustness suite, see robustness.py).
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+import robustness
 import vis
 from agent.drqv2 import Batch, MVMAEDrQV2Agent
 from agent.replay import FrameStacker, ReplayBuffer, concat_batches
@@ -72,8 +76,12 @@ CENTER_RADIUS_M = 0.015  # needle landing spots closer than this to the pad cent
 
 
 @torch.no_grad()
-def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bool, video_scale: int):
+def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bool, video_scale: int, hires=None):
     """One deterministic episode in every parallel env. Resets the environment first.
+
+    `hires` (optional): called with no arguments after the reset and after every step that is still inside env 0's
+    episode, to grab env 0's frame from its paper camera (metrics["eval/hires_env0_success"] then says how that
+    episode ended: 1 = succeeded, 0.5 = reached success at some point, 0 = neither).
 
     Returns (metrics, frames, fail_frames), frames = one env's stereo views (left | right).
     `frames` shows the first env that succeeded, else the first that ever reached success,
@@ -108,6 +116,8 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
     radius = None
     isaac_logs: list[dict] = []
     prop = robot_state(env, agent)
+    if hires is not None:
+        hires()
     for t in range(env.max_episode_steps + 1):
         if t == 5 and hasattr(env, "needle_xy_local"):  # the needle has landed on the pad
             radius = torch.linalg.vector_norm(env.needle_xy_local(), dim=-1)
@@ -129,6 +139,8 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
         if record_video:
             history.append(obs.clone())
             valid += live.long()  # after `done` the returned frame already shows the reset scene
+        if hires is not None and bool(live[0]):
+            hires()
         if "needle_lifted" in info:
             lifted = info["needle_lifted"]
             lifted_steps += (lifted & live).float()
@@ -182,6 +194,8 @@ def evaluate_policy(env, agent: MVMAEDrQV2Agent, env_step: int, record_video: bo
         metrics["eval/video_env_success"] = pick_ok  # 1 = succeeded, 0.5 = reached success at some point, 0 = neither
         if fail_frames:
             metrics["eval/failure_video_bucket"] = float(EVAL_BUCKETS.index(worst))
+    if hires is not None:
+        metrics["eval/hires_env0_success"] = 1.0 if bool(success[0]) else (0.5 if bool(success_any[0]) else 0.0)
     per_key = defaultdict(list)
     for d in isaac_logs:
         for k, v in scalar_logs(d, "eval/isaac/").items():
@@ -231,11 +245,20 @@ class Trainer:
         enc = {
             "mvmae": f"MV-MAE tokens per sample: {self.agent.mvmae.L}" if self.agent.uses_mvmae else "",
             "pixels": f"BASELINE: raw stereo pixels (shrunk {cfg.agent.pixel_downsample}x), no image encoder",
+            "cnn": "BASELINE: DrQ-v2 conv encoder on the stacked stereo frames, trained by the critic only",
         }[self.agent.encoder_kind]
         print(f"{enc}, representation size: {self.agent.repr_dim}" + (f", robot state: {pd} values" if pd else ", images only"))
         n_params = sum(p.numel() for p in self.agent.encoder.parameters())
         print(f"encoder parameters: {n_params / 1e6:.2f} M | replay rows x envs: {self.replay.R} x {n} on {replay_device}"
               + (f" | demos: {self.demo.R} transitions" if self.demo is not None else ""))
+        # robustness suite (checked now, so a wrong condition name fails before training starts)
+        r = cfg.robust
+        self.robust_conditions = robustness.resolve_conditions(r.conditions) if r.enabled else []
+        self.robust_videos = [c.name for c in robustness.resolve_conditions(r.video_conditions)] if cfg.log.video else []
+        if r.enabled:
+            print(f"robustness suite: {len(self.robust_conditions)} conditions every {r.every_env_steps} env steps, "
+                  f"{r.episodes_per_condition or n} episodes each")
+        self.hires_on = cfg.hires.enabled  # turned off for good if the paper camera fails
 
     # ------------------------------------------------------------------ utils
     def log(self, data: dict, step: int) -> None:
@@ -271,6 +294,7 @@ class Trainer:
         metrics_avg = MetricAverager()
         env_steps, episodes, update_credit = 0, 0, 0.0
         next_eval, next_ckpt = t.eval_every_env_steps, t.checkpoint_every_env_steps
+        next_robust = cfg.robust.every_env_steps
         mae_pretrained = t.mae_pretrain_updates <= 0 or not agent.uses_mvmae  # nothing to pre-train for "pixels"
         last_log_updates, last_log_time, last_log_steps = 0, time.time(), 0
         last_batch_obs = None
@@ -371,6 +395,8 @@ class Trainer:
                     "train/lr_encoder": agent.encoder_opt.param_groups[0]["lr"],
                     "train/replay_size": len(self.replay),
                     "speed/env_steps_per_s": (env_steps - last_log_steps) / max(now - last_log_time, 1e-6),
+                    # acting + simulating + learning only (no evaluation / logging time): training throughput
+                    "speed/train_env_steps_per_s": (env_steps - last_log_steps) / total_t,
                     "speed/updates_per_s": (agent.num_updates - last_log_updates) / max(now - last_log_time, 1e-6),
                     "speed/frac_env": timers["env"] / total_t,
                     "speed/frac_act": timers["act"] / total_t,
@@ -388,7 +414,14 @@ class Trainer:
             if env_steps >= next_eval:
                 next_eval += t.eval_every_env_steps
                 self.replay.mark_last_truncated()
-                metrics, frames, fail_frames = evaluate_policy(env, agent, env_steps, lg.video, lg.video_scale)
+                t_eval = time.time()
+                hires = self._hires_start(env_steps)
+                try:
+                    metrics, frames, fail_frames = evaluate_policy(env, agent, env_steps, lg.video, lg.video_scale,
+                                                                   hires=hires.capture if hires is not None else None)
+                finally:
+                    hires_videos = self._hires_stop(hires)
+                metrics["time/eval_s"] = time.time() - t_eval
                 print(f"[{env_steps:>9d}] EVAL return {metrics['eval/episode_return']:.2f} | "
                       f"success {metrics['eval/success']:.2f}", flush=True)
                 fails = ", ".join(f"{k.split('/')[-1]} {v:.2f}" for k, v in metrics.items() if k.startswith("eval/fail/"))
@@ -404,6 +437,14 @@ class Trainer:
                             metrics[key] = vis.wandb_video(video_path)
                         except Exception as e:  # a failed video must never stop training
                             print(f"video logging failed: {e}")
+                for name, video_path in hires_videos.items():  # env 0 from the paper camera (it is only in env 0)
+                    print(f"[{env_steps:>9d}] hi-res video: {video_path}", flush=True)
+                    if self.wandb is not None:
+                        try:
+                            metrics["eval/hires_video" if name == "main" else f"eval/hires_{name}_video"] = \
+                                vis.wandb_video(video_path)
+                        except Exception as e:  # a failed video must never stop training
+                            print(f"video logging failed: {e}")
                 self.log(metrics, env_steps)
                 self._maybe_freeze_encoder(metrics["eval/success_any"], env_steps)
                 score = (metrics["eval/success"], metrics["eval/success_any"], metrics["eval/episode_return"])
@@ -411,6 +452,10 @@ class Trainer:
                     self.best_score = score
                     print(f"new best eval (success {score[0]:.3f}, success_any {score[1]:.3f}): "
                           f"saved {self.save(env_steps, tag='best', update_latest=False)}", flush=True)
+                if cfg.robust.enabled and env_steps >= next_robust:
+                    while next_robust <= env_steps:
+                        next_robust += cfg.robust.every_env_steps
+                    self._robust_eval(env_steps)
                 obs, stack, first, prop = fresh_start()
                 ep_return.zero_()
                 ep_length.zero_()
@@ -428,6 +473,60 @@ class Trainer:
         self._upload_checkpoints("final", "best", "frozen")
         if self.wandb is not None:
             self.wandb.finish()
+
+    # ------------------------------------------------------- evaluation extras
+    def _hires_start(self, env_steps: int):
+        """env_0's paper-camera recorder for this evaluation (render products exist only until _hires_stop)."""
+        if not self.hires_on:
+            return None
+        if not hasattr(self.env, "hires_recorder"):
+            print("hi-res video: this environment has no paper camera; turned off")
+            self.hires_on = False
+            return None
+        rec = None
+        try:
+            rec = self.env.hires_recorder(self.cfg.hires, self.run_dir / "videos", env_steps, fps=1.0 / self.env.step_dt)
+            rec.start()
+            return rec
+        except Exception as e:  # the paper video must never stop training
+            print(f"hi-res video turned off: {type(e).__name__}: {e}")
+            self.hires_on = False
+            if rec is not None:
+                self._hires_stop(rec)
+            return None
+
+    def _hires_stop(self, rec) -> dict:
+        if rec is None:
+            return {}
+        try:
+            videos = rec.stop()
+        except Exception as e:
+            print(f"hi-res video turned off: {type(e).__name__}: {e}")
+            self.hires_on, videos = False, {}
+        if getattr(rec, "destroy_failed", False):
+            print("hi-res video turned off: its render products could not be removed")
+            self.hires_on = False
+        return videos
+
+    def _robust_eval(self, env_steps: int) -> None:
+        """Robustness suite on the current policy; writes robust_<step>.json (+ a figure) and logs to wandb."""
+        cfg = self.cfg
+        print(f"[{env_steps:>9d}] ROBUSTNESS suite ({len(self.robust_conditions)} conditions) ...", flush=True)
+        res = robustness.run_suite(self.env, self.agent, env_steps, cfg.robust, self.robust_conditions,
+                                   self.robust_videos, cfg.robust.episodes_per_condition,
+                                   video_dir=self.run_dir / "videos", video_scale=cfg.log.video_scale)
+        print("\n".join(f"[{env_steps:>9d}] {line}" for line in robustness.summary_lines(res)), flush=True)
+        print(f"saved {robustness.save_json(res, self.run_dir / f'robust_{env_steps}.json')}", flush=True)
+        try:
+            robustness.save_figures({cfg.agent.encoder: res}, self.run_dir / "robust", f"robust_{env_steps}",
+                                    formats=("png",))
+        except Exception as e:  # plots must never stop training
+            print(f"robustness figure failed: {e}")
+        if self.wandb is not None:
+            try:
+                self.log(robustness.wandb_payload(res), env_steps)
+            except Exception as e:  # logging must never stop training
+                print(f"robustness logging failed: {e}")
 
     def _maybe_freeze_encoder(self, success_any: float, env_steps: int) -> None:
         t = self.cfg.train
