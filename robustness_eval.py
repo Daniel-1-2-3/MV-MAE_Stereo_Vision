@@ -2,6 +2,7 @@
 
     python robustness_eval.py --checkpoint runs/<run>/ckpt_best.pt --episodes 256
     python robustness_eval.py --checkpoint runs/<run>/ckpt_best.pt --conditions gaussian_noise blur --episodes 64
+    python robustness_eval.py --checkpoint runs/<mvmae run>/ckpt_best.pt --recon   # + MV-MAE "reconstruct, then act"
 
 Same conditions, seeds and numbers as the suite that runs during training (robust.* settings, see robustness.py),
 with --episodes episodes per condition (rounds of one deterministic episode in every parallel env; every condition
@@ -23,6 +24,9 @@ parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--episodes", type=int, default=256, help="episodes per condition")
 parser.add_argument("--conditions", nargs="*", default=None, help="condition or family names (default: robust.conditions)")
 parser.add_argument("--video_conditions", nargs="*", default=None, help="default: robust.video_conditions")
+parser.add_argument("--recon", action="store_true",
+                    help="also run the MV-MAE 'reconstruct, then act' conditions (robustness.RECON_FAMILIES; skipped "
+                         "for agents without MV-MAE, left out of mean_success)")
 parser.add_argument("--label", default=None, help="name in the figures (default: agent.encoder)")
 parser.add_argument("--out", default=None)
 simulation_app, args, overrides = launch(parser)
@@ -41,7 +45,10 @@ def main() -> None:
     cfg = load_config(overrides=overrides, base=ckpt["config"])
     out = Path(args.out) if args.out else Path("outputs/robustness") / f"{ckpt_path.parent.name}_{ckpt_path.stem}"
     out.mkdir(parents=True, exist_ok=True)
-    conditions = robustness.resolve_conditions(args.conditions if args.conditions is not None else cfg.robust.conditions)
+    names = list(args.conditions if args.conditions is not None else cfg.robust.conditions)
+    if args.recon:
+        names += list(robustness.RECON_FAMILIES)
+    conditions = robustness.resolve_conditions(names)
     videos = [c.name for c in robustness.resolve_conditions(
         args.video_conditions if args.video_conditions is not None else cfg.robust.video_conditions)]
     env = make_env(cfg, device=args.device)

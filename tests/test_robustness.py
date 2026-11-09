@@ -192,3 +192,98 @@ def test_suite_never_touches_training_and_uses_identical_episodes(tmp_path):
     files = rb.save_figures({"MV-MAE": res, "CNN": again}, tmp_path / "fig", "robust")
     assert {f.name for f in files} == {"robust_curves.png", "robust_curves.pdf", "robust_bars.png", "robust_bars.pdf"}
     assert rb.summary_lines(res)[0].startswith("robustness at 0 env steps")
+
+
+# ======================================================================== MV-MAE "reconstruct, then act"
+RECON_CONDS = [c for c in CONDITIONS if c.family in rb.RECON_FAMILIES]
+
+
+def test_recon_conditions_remove_exactly_the_base_conditions_pixels():
+    assert {c.name for c in RECON_CONDS} == {"view_drop_recon_left", "view_drop_recon_right", "occlusion_one_recon_10",
+                                             "occlusion_one_recon_25", "occlusion_one_recon_40", "occlusion_both_recon_10",
+                                             "occlusion_both_recon_25", "occlusion_both_recon_40"}
+    x = frames()
+    for rc in RECON_CONDS:
+        base = rb.BY_NAME[rc.name.replace("_recon", "", 1)]
+        # same generator -> same occluder positions as the base condition, and the same perturbed pixels
+        g_r, g_b = (rb.condition_generator(c, 11, 0, "cpu") for c in (rc, base))
+        st_r, st_b = rb.episode_state(rc, 4, x.shape[1:], x.device, g_r), rb.episode_state(base, 4, x.shape[1:], x.device, g_b)
+        assert st_r.keys() == st_b.keys() and all(torch.equal(st_r[k], st_b[k]) for k in st_r)
+        assert torch.equal(perturb_images(x, rc, st_r), perturb_images(x, base, st_b))
+
+
+def test_mvmae_fill_changes_only_the_missing_pixels():
+    from tests.test_mvmae_agent import small_agent
+
+    torch.manual_seed(0)
+    agent = small_agent()
+    m = agent.mvmae
+    stack = torch.randint(0, 256, (4, 3, 2, 3, 32, 32), generator=gen(1), dtype=torch.uint8)
+    before = stack.clone()
+    for name in ("occlusion_one_recon_25", "occlusion_both_recon_40", "view_drop_recon_left"):
+        c = rb.BY_NAME[name]
+        st = rb.episode_state(c, 4, (2, 3, 32, 32), "cpu", gen(3))
+        missing = rb.missing_pixels(c, st, 4, (2, 3, 32, 32), "cpu")
+        out = rb.mvmae_fill(agent, stack, missing)
+        assert out.shape == stack.shape and out.dtype == torch.uint8
+        assert torch.equal(stack, before), "the input stack (the frame stacker's buffer) must not change"
+        miss6 = missing[:, None, :, None].expand_as(stack)  # the same pixels in every frame and colour
+        assert torch.equal(out[~miss6], stack[~miss6]), "every real pixel is kept"
+        assert not torch.equal(out[miss6], stack[miss6]), "the missing pixels come from the reconstruction"
+        # a token is hidden exactly when its patch has a missing pixel (the occluders do not align with the grid)
+        hid = rb.hidden_tokens(m, missing).reshape(4, m.F, m.V, m.gh, m.gw)
+        has_missing = missing.reshape(4, m.V, m.gh, m.p, m.gw, m.p).any(dim=5).any(dim=3)
+        assert all(torch.equal(hid[:, f], has_missing) for f in range(m.F))
+
+
+def test_whole_dropped_view_hides_exactly_that_views_tokens():
+    from tests.test_mvmae_agent import small_agent
+
+    agent = small_agent()
+    m = agent.mvmae
+    stack = perturb_images(frames(), rb.BY_NAME["view_drop_right"])[:, None].expand(4, 3, 2, 3, 32, 32).contiguous()
+    c = rb.BY_NAME["view_drop_recon_right"]
+    missing = rb.missing_pixels(c, {}, 4, (2, 3, 32, 32), "cpu")
+    assert missing[:, 1].all() and not missing[:, 0].any()
+    hid = rb.hidden_tokens(m, missing).reshape(4, m.F, m.V, m.N)
+    assert hid[:, :, 1].all() and not hid[:, :, 0].any()  # every frame: all right-view tokens, no left-view token
+    out = rb.mvmae_fill(agent, stack, missing)
+    assert torch.equal(out[:, :, 0], stack[:, :, 0]) and not torch.equal(out[:, :, 1], stack[:, :, 1])
+    # in the pipeline: the stack keeps the perturbed (black) frames, `shown` is the filled newest frame
+    pipe = PerturbedObservations(c, 4, 3, (2, 3, 32, 32), "cpu", gen(), fill=lambda s, mm: rb.mvmae_fill(agent, s, mm))
+    seen = pipe.reset(frames())
+    for t in range(3):
+        assert (pipe.fed[:, 1] == 0).all() and (pipe.stacker.frames[:, :, 1] == 0).all()  # stack: perturbed frames
+        assert torch.equal(pipe.shown, seen[:, -1]) and not (seen[:, :, 1] == 0).all()  # policy: filled in
+        assert torch.equal(seen[:, -1, 0], pipe.fed[:, 0])  # the real view is untouched
+        seen = pipe.step(frames(seed=t + 1), torch.zeros(4, dtype=torch.bool))  # recomputed every step
+
+
+def test_recon_conditions_skipped_without_mvmae_and_left_out_of_the_mean(tmp_path):
+    from config import RobustConfig
+    from tests.test_mvmae_agent import small_agent
+    from tests.test_train_loop import FakeStereoEnv
+
+    base = rb.resolve_conditions(["view_drop", "occlusion_one", "occlusion_both", "blur"])
+    with_recon = rb.resolve_conditions(["view_drop", "occlusion_one", "occlusion_both", "blur", *rb.RECON_FAMILIES])
+    quiet = dict(episodes=4, log=lambda s: None)
+    # the CNN agent: every _recon condition skipped, with the reason
+    env = FakeStereoEnv(num_envs=4, size=32, episode=10)
+    cnn = small_agent(proprio_dim=3, encoder="cnn")
+    res = rb.run_suite(env, cnn, 0, RobustConfig(seed=11), with_recon, **quiet)
+    for c in RECON_CONDS:
+        assert "MV-MAE" in res["conditions"][c.name]["skipped"], c.name
+    assert res["conditions"]["occlusion_one_25"]["skipped"] is None
+    # the MV-MAE agent runs them (and records what the policy saw); the headline mean is the same either way
+    env = FakeStereoEnv(num_envs=4, size=32, episode=10)
+    mv = small_agent(proprio_dim=3)
+    a = rb.run_suite(env, mv, 0, RobustConfig(seed=11), base, **quiet)
+    b = rb.run_suite(env, mv, 0, RobustConfig(seed=11), with_recon, ["occlusion_one_recon_25"],
+                     video_dir=tmp_path / "videos", video_scale=1, **quiet)
+    for c in RECON_CONDS:
+        e = b["conditions"][c.name]
+        assert e["skipped"] is None and 0.0 <= e["success"] <= 1.0 and "success_rel" in e, c.name
+    assert b["mean_success"] == a["mean_success"] and b["mean_success_rel"] == a["mean_success_rel"]
+    assert all(b["conditions"][n]["episodes"] == a["conditions"][n]["episodes"] for n in a["conditions"])
+    assert (tmp_path / "videos" / "robust_occlusion_one_recon_25_0.mp4").exists()
+    assert "occlusion_one_recon" in rb.family_curves(b) and "view_drop_recon" not in rb.family_curves(b)

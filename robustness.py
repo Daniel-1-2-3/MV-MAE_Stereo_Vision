@@ -56,6 +56,11 @@ FAMILIES: dict[str, tuple[str, str]] = {
     "gaussian_noise": ("image", "noise std (fraction of 255)"),
     "occlusion_one": ("image", "occluded fraction of one view"),
     "occlusion_both": ("image", "occluded fraction of each view"),
+    # MV-MAE only, "reconstruct, then act": the same removed pixels as the base family (view_drop, occlusion_*), filled
+    # in by the MV-MAE reconstruction before the policy sees the observation (see mvmae_fill)
+    "view_drop_recon": ("image", ""),
+    "occlusion_one_recon": ("image", "occluded fraction of one view (MV-MAE fills it in)"),
+    "occlusion_both_recon": ("image", "occluded fraction of each view (MV-MAE fills it in)"),
     "brightness": ("image", "brightness factor - 1"),
     "contrast": ("image", "contrast factor - 1"),
     "hue": ("image", "hue shift (fraction of the colour wheel)"),
@@ -81,6 +86,10 @@ CONDITIONS: tuple[Condition, ...] = (
     *(_c(f"gaussian_noise_{s:.2f}", "gaussian_noise", s) for s in (0.05, 0.10, 0.20)),
     *(_c(f"occlusion_one_{p}", "occlusion_one", p / 100) for p in (10, 25, 40)),  # grey square in one random view
     *(_c(f"occlusion_both_{p}", "occlusion_both", p / 100) for p in (10, 25, 40)),  # in both, independent positions
+    _c("view_drop_recon_left", "view_drop_recon", 1.0, "left"),  # view_drop_left, MV-MAE redraws the left view
+    _c("view_drop_recon_right", "view_drop_recon", 1.0, "right"),
+    *(_c(f"occlusion_one_recon_{p}", "occlusion_one_recon", p / 100) for p in (10, 25, 40)),
+    *(_c(f"occlusion_both_recon_{p}", "occlusion_both_recon", p / 100) for p in (10, 25, 40)),
     _c("brightness_0.6", "brightness", -0.4),
     _c("brightness_1.4", "brightness", 0.4),
     _c("contrast_0.6", "contrast", -0.4),
@@ -96,6 +105,8 @@ CONDITIONS: tuple[Condition, ...] = (
     _c("light_shadow_on", "shadow_light", 1.0),
 )
 BY_NAME = {c.name: c for c in CONDITIONS}
+# MV-MAE only; left out of mean_success / mean_success_rel, so the headline mean covers the same conditions for every agent
+RECON_FAMILIES = ("view_drop_recon", "occlusion_one_recon", "occlusion_both_recon")
 
 
 def resolve_conditions(names) -> list[Condition]:
@@ -116,7 +127,8 @@ def resolve_conditions(names) -> list[Condition]:
 # ======================================================================== image perturbations (plain torch)
 def episode_state(cond: Condition, num_envs: int, obs_shape, device, gen: torch.Generator | None) -> dict:
     """Random choices that stay fixed for a whole episode (occluder position and, for occlusion_one, the view)."""
-    if cond.family not in ("occlusion_one", "occlusion_both") or cond.severity <= 0:
+    family = cond.family.removesuffix("_recon")  # a _recon condition removes exactly its base condition's pixels
+    if family not in ("occlusion_one", "occlusion_both") or cond.severity <= 0:
         return {}
     v, _, h, w = obs_shape
     side = min(h, w, int(round(math.sqrt(cond.severity * h * w))))  # square covering `severity` of the image
@@ -128,7 +140,7 @@ def episode_state(cond: Condition, num_envs: int, obs_shape, device, gen: torch.
     cols = torch.arange(w, device=device)[None, None, None, :]
     mask = ((rows >= y0[..., None, None]) & (rows < y0[..., None, None] + side)
             & (cols >= x0[..., None, None]) & (cols < x0[..., None, None] + side))  # (N, V, H, W)
-    if cond.family == "occlusion_one":
+    if family == "occlusion_one":
         view = torch.randint(0, v, (num_envs,), generator=gen, device=device)
         mask &= (torch.arange(v, device=device)[None] == view[:, None])[..., None, None]
     return {"occluder": mask[:, :, None]}  # (N, V, 1, H, W)
@@ -165,7 +177,7 @@ def perturb_images(obs: torch.Tensor, cond: Condition, state: dict | None = None
     of 255; occlusion_* - area fraction of the grey (128) square (position from `state`, see episode_state);
     brightness / contrast - factor - 1; hue - turns of the colour wheel; blur - sigma in pixels.
     """
-    s, fam = cond.severity, cond.family
+    s, fam = cond.severity, cond.family.removesuffix("_recon")  # a _recon condition: its base condition's pixels
     if cond.kind != "image" or s == 0:
         return obs
     x = obs.float()
@@ -197,6 +209,75 @@ def perturb_images(obs: torch.Tensor, cond: Condition, state: dict | None = None
     return x.round().clamp(0, 255).to(torch.uint8)
 
 
+# ------------------------------------------------------------------ "reconstruct, then act" (MV-MAE only)
+def missing_pixels(cond: Condition, state: dict, num_envs: int, obs_shape, device) -> torch.Tensor:
+    """(N, V, H, W) bool: the pixels `cond` removes (view_drop*: the whole dropped view; occlusion*: the occluder)."""
+    v, _, h, w = obs_shape
+    missing = torch.zeros(num_envs, v, h, w, dtype=torch.bool, device=device)
+    family = cond.family.removesuffix("_recon")
+    if family == "view_drop":
+        missing[:, 0 if cond.variant == "left" else 1] = True
+    elif family in ("occlusion_one", "occlusion_both") and "occluder" in state:
+        missing = state["occluder"][:, :, 0].to(device)
+    return missing
+
+
+def hidden_tokens(m, missing: torch.Tensor) -> torch.Tensor:
+    """(N, V, H, W) missing pixels -> (N, L) bool hidden MV-MAE tokens, order (frame, view, row, col) as MVMAE._tokens.
+
+    A token is hidden if any pixel of its p x p patch is missing; the pixel mask is the same in every frame.
+    """
+    n = missing.shape[0]
+    per_view = missing.reshape(n, m.V, m.gh, m.p, m.gw, m.p).any(dim=5).any(dim=3)  # (N, V, gh, gw)
+    return per_view.reshape(n, 1, m.V * m.N).expand(n, m.F, m.V * m.N).reshape(n, m.L)
+
+
+@torch.no_grad()
+def mvmae_fill(agent, stack: torch.Tensor, missing: torch.Tensor) -> torch.Tensor:
+    """(N, F, V, 3, H, W) uint8 frame stack -> copy whose `missing` pixels ((N, V, H, W), the same in every frame) are
+    replaced by the MV-MAE reconstruction; every real pixel is kept.
+
+    MVMAE.forward_mae with this deterministic mask instead of view_mask(): only the tokens with no missing pixel go
+    through the encoder, the decoder redraws the rest. The stack is never modified (FrameStacker returns its buffer).
+    """
+    m = agent.mvmae
+    dev = next(m.parameters()).device
+    x, miss = stack.to(dev), missing.to(dev)
+    out = x.clone()
+    hid = hidden_tokens(m, miss)
+    counts = (~hid).sum(dim=1)  # visible tokens per env (differs with the occluder's alignment to the patch grid)
+    with agent._autocast():
+        tokens = m._tokens(m.normalize(x))
+        for k in counts.unique().tolist():
+            if k == m.L:
+                continue  # nothing missing
+            idx = (counts == k).nonzero().squeeze(1)
+            b, dim = idx.numel(), tokens.shape[-1]
+            keep_idx = torch.argsort(hid[idx].to(torch.int8), dim=1, stable=True)[:, :k]  # visible positions, ascending
+            if k > 0:
+                visible = torch.gather(tokens[idx], 1, keep_idx[..., None].expand(-1, -1, dim))
+                dec_visible = m.dec_in(m._run_encoder(visible))
+                d = dec_visible.shape[-1]
+                full = m.mask_token.to(dec_visible.dtype).expand(b, m.L, d).clone()
+                full.scatter_(1, keep_idx[..., None].expand(-1, -1, d), dec_visible)
+            else:  # every token missing: the decoder starts from mask tokens alone
+                d = m.mask_token.shape[-1]
+                full = m.mask_token.to(tokens.dtype).expand(b, m.L, d).clone()
+            full = full.reshape(b, m.F, m.V, m.N, d)
+            full = (
+                full
+                + m.dec_pos.to(full.dtype)
+                + m.dec_view.to(full.dtype)[None, None, :, None, :]
+                + m.dec_frame.to(full.dtype)[None, :, None, None, :]
+            ).reshape(b, m.L, d)
+            for blk in m.decoder:
+                full = blk(full)
+            full = m.dec_norm(full)
+            recon = m.denormalize(m.unpatchify(m.pixel_head(full).float()))  # (b, F, V, 3, H, W) uint8
+            out[idx] = torch.where(miss[idx][:, None, :, None], recon, x[idx])
+    return out.to(stack.device)
+
+
 def drop_frames(stack: torch.Tensor, dropped: int) -> torch.Tensor:
     """(N, F, ...) frame stack -> copy whose `dropped` frames before the newest are replaced by the newest
     (a camera that delivered the same image again). 0 returns the stack itself."""
@@ -214,14 +295,18 @@ class PerturbedObservations:
     temporal/frozen: the camera image is refreshed only every (severity + 1)-th step (the frame stack keeps
     receiving the last refreshed image); temporal/frame_drop: in every stack the policy gets, `severity` frames
     before the newest are replaced by the newest. `fed` is the frame that went into the stack this step.
+    With `fill` (fill(stack, missing) -> stack, e.g. mvmae_fill), the removed pixels are filled in every step from the
+    perturbed frames the stack holds; `shown` is the newest filled frame (what the policy saw).
     """
 
-    def __init__(self, cond: Condition, num_envs: int, frame_stack: int, obs_shape, device, gen):
-        self.cond, self.gen = cond, gen
+    def __init__(self, cond: Condition, num_envs: int, frame_stack: int, obs_shape, device, gen, fill=None):
+        self.cond, self.gen, self.fill = cond, gen, fill
         self.stacker = FrameStacker(num_envs, frame_stack, obs_shape, device)
         self.state = episode_state(cond, num_envs, obs_shape, device, gen)
+        self.missing = missing_pixels(cond, self.state, num_envs, obs_shape, device) if fill is not None else None
         self.t = 0
         self.fed = None
+        self.shown = None
 
     def _frame(self, obs: torch.Tensor) -> torch.Tensor:
         return perturb_images(obs, self.cond, self.state, self.gen)
@@ -229,6 +314,9 @@ class PerturbedObservations:
     def _view(self, stack: torch.Tensor) -> torch.Tensor:
         if self.cond.variant == "frame_drop":
             return drop_frames(stack, int(self.cond.severity))
+        if self.fill is not None:
+            stack = self.fill(stack, self.missing)
+            self.shown = stack[:, -1]
         return stack
 
     def reset(self, obs: torch.Tensor) -> torch.Tensor:
@@ -264,8 +352,10 @@ def preserved_random_state():
 
 
 def condition_generator(cond: Condition, seed: int, rnd: int, device) -> torch.Generator:
+    # a _recon condition draws from its base condition's generator, so its occluders land in exactly the same places
+    name = cond.name.replace("_recon", "", 1) if cond.family in RECON_FAMILIES else cond.name
     g = torch.Generator(device=device)
-    g.manual_seed((int(seed) * 1_000_003 + zlib.crc32(f"{cond.name}/{rnd}".encode())) % (2 ** 62))
+    g.manual_seed((int(seed) * 1_000_003 + zlib.crc32(f"{name}/{rnd}".encode())) % (2 ** 62))
     return g
 
 
@@ -281,7 +371,8 @@ def run_episodes(env, agent, env_step: int, cond: Condition, gen, record: bool, 
 
     Returns per-env tensors (CPU) for METRICS, `first_obs` (the unperturbed first image, on the env device) and, if
     `record`, `frames`: the stereo input the policy received in one episode (a success if there is one, else one
-    that reached success at some point, else env 0); temporal conditions show the whole frame stack (oldest on top).
+    that reached success at some point, else env 0); temporal conditions show the whole frame stack (oldest on top),
+    _recon conditions the filled-in frame the policy saw.
     """
     from trainer import robot_state
 
@@ -289,9 +380,11 @@ def run_episodes(env, agent, env_step: int, cond: Condition, gen, record: bool, 
     n, dev = env.num_envs, env.device
     obs = env.reset()
     first_obs = obs.clone()
-    pipe = PerturbedObservations(cond, n, agent.frame_stack, env.obs_shape, dev, gen)
+    fill = (lambda s, m: mvmae_fill(agent, s, m)) if cond.family in RECON_FAMILIES else None
+    pipe = PerturbedObservations(cond, n, agent.frame_stack, env.obs_shape, dev, gen, fill=fill)
     stack = pipe.reset(obs)
-    fed = [pipe.fed.clone()] if record else []
+    seen = (lambda: pipe.shown) if fill is not None else (lambda: pipe.fed)  # what the policy saw, for the video
+    fed = [seen().clone()] if record else []
     valid = torch.ones(n, dtype=torch.long, device=dev)
     ret = torch.zeros(n, device=dev)
     finished = torch.zeros(n, dtype=torch.bool, device=dev)
@@ -314,7 +407,7 @@ def run_episodes(env, agent, env_step: int, cond: Condition, gen, record: bool, 
         finished |= done
         stack = pipe.step(obs, done)
         if record:
-            fed.append(pipe.fed.clone())
+            fed.append(seen().clone())
             valid += live.long()
         prop = robot_state(env, agent)
         if bool(finished.all()):
@@ -377,6 +470,11 @@ def run_suite(env, agent, env_step: int, rcfg, conditions: list[Condition], vide
                          "skipped": None}
                 results["conditions"][cond.name] = entry
                 restore = None
+                if cond.family in RECON_FAMILIES and not getattr(agent, "uses_mvmae", False):
+                    entry["skipped"] = (f"needs the MV-MAE reconstruction (agent.encoder="
+                                        f"{getattr(agent, 'encoder_kind', '?')})")
+                    log(f"  robust: skipping {cond.name} ({entry['skipped']})")
+                    continue
                 if cond.kind == "sim":
                     if not hasattr(env, "sim_perturbation"):
                         entry["skipped"] = "this environment has no scene perturbations"
@@ -439,7 +537,8 @@ def run_suite(env, agent, env_step: int, rcfg, conditions: list[Condition], vide
         if entry["skipped"] is None:
             for k in METRICS:
                 entry[f"{k}_rel"] = _ratio(entry[k], nom[k])
-    done = [e for name, e in results["conditions"].items() if name != "nominal" and e["skipped"] is None]
+    done = [e for name, e in results["conditions"].items()
+            if name != "nominal" and e["skipped"] is None and e["family"] not in RECON_FAMILIES]  # same set for all agents
     results["mean_success"] = float(np.mean([e["success"] for e in done])) if done else float("nan")
     results["mean_success_rel"] = _ratio(results["mean_success"], nom["success"]) if done else float("nan")
     results["time_s"] = time.time() - t_start
